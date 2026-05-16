@@ -75,7 +75,7 @@
 const { Router } = require('express');
 const authenticate = require('../../shared/middlewares/authenticate');
 const authorize = require('../../shared/middlewares/authorize');
-const { authorizeRoles, requirePermission } = authorize;
+const { authorizeRoles, requirePermission, requireAnyPermission } = authorize;
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendPaginated } = require('../../shared/utils/apiResponse');
 const { createUpload } = require('../../shared/middlewares/upload');
@@ -148,7 +148,7 @@ router.patch('/users/:id/avatar', authorizeRoles('ADMIN'), avatarUpload.single('
 // PROVIDERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/providers', requirePermission('suppliers.manage'), providersCtrl.listProviders);
+router.get('/providers', requireAnyPermission('suppliers.manage', 'products.manage', 'manage_providers', 'manage_products'), providersCtrl.listProviders);
 router.post('/providers', requirePermission('suppliers.manage'), validateBody(schemas.createProvider), providersCtrl.createProvider);
 // sub-resource actions BEFORE /:id to avoid param collision
 router.get('/providers/:id/balance', requirePermission('suppliers.manage'), providersCtrl.getProviderBalance);

@@ -65,8 +65,42 @@ const requirePermission = (...permissions) => (req, res, next) => {
     next();
 };
 
+const requireAnyPermission = (...permissions) => (req, res, next) => {
+    if (!req.user) {
+        throw new AuthorizationError('Authentication required before authorization.');
+    }
+
+    if (req.user.role === ADMIN_ROLE) {
+        return next();
+    }
+
+    const allowedPermissions = permissions
+        .flat()
+        .map((permission) => String(permission || '').trim())
+        .filter(Boolean);
+
+    if (allowedPermissions.length === 0) {
+        return next();
+    }
+
+    const userPermissions = Array.isArray(req.user.permissions)
+        ? req.user.permissions
+        : [];
+
+    const hasAnyPermission = allowedPermissions.some((permission) =>
+        userPermissions.includes(permission)
+    );
+
+    if (!hasAnyPermission) {
+        throw new AuthorizationError('You do not have permission to perform this action.');
+    }
+
+    next();
+};
+
 const authorize = authorizeRoles;
 
 module.exports = authorize;
 module.exports.authorizeRoles = authorizeRoles;
 module.exports.requirePermission = requirePermission;
+module.exports.requireAnyPermission = requireAnyPermission;
