@@ -38,6 +38,13 @@ router.patch('/me', userController.updateMyProfile);
  */
 router.patch('/me/avatar', avatarUpload.single('avatar'), userController.updateMyAvatar);
 
+/**
+ * @route  PATCH /api/users/me/api-token
+ * @desc   Regenerate own API token
+ * @access Any authenticated user
+ */
+router.patch('/me/api-token', userController.regenerateMyApiToken);
+
 // ── Admin: Queries ────────────────────────────────────────────────────────────
 
 /**

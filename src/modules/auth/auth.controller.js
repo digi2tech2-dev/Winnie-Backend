@@ -34,7 +34,43 @@ const register = catchAsync(async (req, res) => {
 const login = catchAsync(async (req, res) => {
     const { email, password } = req.body;
     const result = await authService.login({ email, password });
-    sendSuccess(res, result, 'Logged in successfully.');
+    sendSuccess(
+        res,
+        result,
+        result.requires2FA ? 'Two-factor authentication required.' : 'Logged in successfully.'
+    );
+});
+
+const generate2FASecret = catchAsync(async (req, res) => {
+    const result = await authService.generate2FASecret(req.user._id);
+    sendSuccess(res, result, 'Two-factor verification code sent.');
+});
+
+const enable2FA = catchAsync(async (req, res) => {
+    const result = await authService.enable2FA({
+        userId: req.user._id,
+        otp: req.body.otp,
+        tempToken: req.body.tempToken,
+        requestId: req.body.requestId,
+    });
+    sendSuccess(res, result, 'Two-factor authentication enabled.');
+});
+
+const disable2FA = catchAsync(async (req, res) => {
+    const result = await authService.disable2FA({
+        userId: req.user._id,
+        currentPassword: req.body.currentPassword || req.body.password,
+    });
+    sendSuccess(res, result, 'Two-factor authentication disabled.');
+});
+
+const verify2FA = catchAsync(async (req, res) => {
+    const result = await authService.verify2FA({
+        otp: req.body.otp,
+        tempToken: req.body.tempToken,
+        requestId: req.body.requestId,
+    });
+    sendSuccess(res, result, 'Two-factor authentication verified.');
 });
 
 // ─── Email Verification ───────────────────────────────────────────────────────
@@ -97,4 +133,14 @@ const googleCallback = catchAsync(async (req, res) => {
     res.redirect(`${frontendBase}/auth?token=${result.token}`);
 });
 
-module.exports = { register, login, verifyEmail, resendVerification, googleCallback };
+module.exports = {
+    register,
+    login,
+    generate2FASecret,
+    enable2FA,
+    disable2FA,
+    verify2FA,
+    verifyEmail,
+    resendVerification,
+    googleCallback,
+};

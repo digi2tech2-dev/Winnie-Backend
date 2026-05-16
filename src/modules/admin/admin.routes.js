@@ -75,6 +75,7 @@
 const { Router } = require('express');
 const authenticate = require('../../shared/middlewares/authenticate');
 const authorize = require('../../shared/middlewares/authorize');
+const { authorizeRoles, requirePermission } = authorize;
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendPaginated } = require('../../shared/utils/apiResponse');
 const { createUpload } = require('../../shared/middlewares/upload');
@@ -104,97 +105,106 @@ const router = Router();
 
 // ─── Auth guard — applied to every route in this router ──────────────────────
 router.use(authenticate);
-router.use(authorize('ADMIN'));
+router.use(authorizeRoles('ADMIN', 'SUPERVISOR'));
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DASHBOARD STATISTICS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/dashboard/stats', statsCtrl.getDashboardStats);
-router.get('/stats', statsCtrl.getDashboardStats);
+router.get('/dashboard/stats', requirePermission('dashboard.view'), statsCtrl.getDashboardStats);
+router.get('/stats', requirePermission('dashboard.view'), statsCtrl.getDashboardStats);
+
+// SUPERVISORS
+router.get('/supervisors', authorizeRoles('ADMIN'), validateQuery(schemas.listUsersQuery), usersCtrl.listSupervisors);
+router.patch(
+    '/supervisors/:id/permissions',
+    authorizeRoles('ADMIN'),
+    validateBody(schemas.updateSupervisorPermissions),
+    usersCtrl.updateSupervisorPermissions
+);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // USERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/users', validateQuery(schemas.listUsersQuery), usersCtrl.listUsers);
-router.get('/users/deleted', usersCtrl.listDeletedUsers); // MUST be before /:id
-router.post('/users/adjust-debt', walletLimiter, validateBody(schemas.debtAdjustment), walletCtrl.adjustDebt);
-router.get('/users/:id', usersCtrl.getUserById);
-router.patch('/users/:id', validateBody(schemas.updateUser), usersCtrl.updateUser);
-router.delete('/users/:id', usersCtrl.deleteUser);
+router.get('/users', requirePermission('users.view'), validateQuery(schemas.listUsersQuery), usersCtrl.listUsers);
+router.get('/users/deleted', authorizeRoles('ADMIN'), usersCtrl.listDeletedUsers); // MUST be before /:id
+router.post('/users/adjust-debt', requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.debtAdjustment), walletCtrl.adjustDebt);
+router.get('/users/:id', requirePermission('users.view'), usersCtrl.getUserById);
+router.patch('/users/:id', authorizeRoles('ADMIN'), validateBody(schemas.updateUser), usersCtrl.updateUser);
+router.delete('/users/:id', requirePermission('users.delete'), usersCtrl.deleteUser);
 // approve / reject / restore — specific actions must come BEFORE /:id pattern
-router.patch('/users/:id/approve', usersCtrl.approveUser);
-router.patch('/users/:id/reject', usersCtrl.rejectUser);
-router.patch('/users/:id/restore', usersCtrl.restoreUser);
+router.patch('/users/:id/approve', requirePermission('users.status'), usersCtrl.approveUser);
+router.patch('/users/:id/reject', requirePermission('users.status'), usersCtrl.rejectUser);
+router.patch('/users/:id/restore', requirePermission('users.status'), usersCtrl.restoreUser);
 // Phase 4 gap-bridged routes
-router.patch('/users/:id/role', validateBody(schemas.updateUserRole), usersCtrl.updateUserRole);
-router.patch('/users/:id/currency', validateBody(schemas.updateUserCurrency), usersCtrl.updateUserCurrency);
-router.patch('/users/:id/credit-limit', validateBody(schemas.updateCreditLimit), usersCtrl.updateUserCreditLimit);
-router.post('/users/:id/reset-password', validateBody(schemas.resetUserPassword), usersCtrl.resetUserPassword);
-router.patch('/users/:id/avatar', avatarUpload.single('avatar'), usersCtrl.updateUserAvatar);
+router.patch('/users/:id/role', authorizeRoles('ADMIN'), validateBody(schemas.updateUserRole), usersCtrl.updateUserRole);
+router.patch('/users/:id/currency', authorizeRoles('ADMIN'), validateBody(schemas.updateUserCurrency), usersCtrl.updateUserCurrency);
+router.patch('/users/:id/credit-limit', authorizeRoles('ADMIN'), validateBody(schemas.updateCreditLimit), usersCtrl.updateUserCreditLimit);
+router.post('/users/:id/reset-password', authorizeRoles('ADMIN'), validateBody(schemas.resetUserPassword), usersCtrl.resetUserPassword);
+router.patch('/users/:id/avatar', authorizeRoles('ADMIN'), avatarUpload.single('avatar'), usersCtrl.updateUserAvatar);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // PROVIDERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/providers', providersCtrl.listProviders);
-router.post('/providers', validateBody(schemas.createProvider), providersCtrl.createProvider);
+router.get('/providers', requirePermission('suppliers.manage'), providersCtrl.listProviders);
+router.post('/providers', requirePermission('suppliers.manage'), validateBody(schemas.createProvider), providersCtrl.createProvider);
 // sub-resource actions BEFORE /:id to avoid param collision
-router.get('/providers/:id/balance', providersCtrl.getProviderBalance);
-router.get('/providers/:id/products', providersCtrl.getProviderLiveProducts);
-router.post('/providers/:id/test-connection', providersCtrl.testProviderConnection);
-router.get('/providers/:id/check-order', providersCtrl.checkProviderOrder);
-router.get('/providers/:providerId/products/:externalProductId/price', providersCtrl.getProductPrice);
-router.patch('/providers/:id/toggle', providersCtrl.toggleProvider);
-router.get('/providers/:id', providersCtrl.getProviderById);
-router.patch('/providers/:id', validateBody(schemas.updateProvider), providersCtrl.updateProvider);
-router.delete('/providers/:id', providersCtrl.deleteProvider);
+router.get('/providers/:id/balance', requirePermission('suppliers.manage'), providersCtrl.getProviderBalance);
+router.get('/providers/:id/products', requirePermission('suppliers.manage'), providersCtrl.getProviderLiveProducts);
+router.post('/providers/:id/test-connection', requirePermission('suppliers.manage'), providersCtrl.testProviderConnection);
+router.get('/providers/:id/check-order', requirePermission('suppliers.manage'), providersCtrl.checkProviderOrder);
+router.get('/providers/:providerId/products/:externalProductId/price', requirePermission('suppliers.manage'), providersCtrl.getProductPrice);
+router.patch('/providers/:id/toggle', requirePermission('suppliers.manage'), providersCtrl.toggleProvider);
+router.get('/providers/:id', requirePermission('suppliers.manage'), providersCtrl.getProviderById);
+router.patch('/providers/:id', requirePermission('suppliers.manage'), validateBody(schemas.updateProvider), providersCtrl.updateProvider);
+router.delete('/providers/:id', requirePermission('suppliers.manage'), providersCtrl.deleteProvider);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ORDERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/orders', validateQuery(schemas.listOrdersQuery), ordersCtrl.listOrders);
-router.post('/orders/:id/retry', ordersCtrl.retryOrder);
-router.post('/orders/:id/refund', ordersCtrl.refundOrder);
-router.post('/orders/:id/sync-status', ordersCtrl.syncOrderProviderStatus);
-router.post('/orders/:id/complete', ordersCtrl.completeOrder);
-router.patch('/orders/:id/status', validateBody(schemas.updateOrderStatus), ordersCtrl.updateStatus);
-router.get('/orders/:id', ordersCtrl.getOrderById);
+router.get('/orders', requirePermission('orders.view'), validateQuery(schemas.listOrdersQuery), ordersCtrl.listOrders);
+router.post('/orders/:id/retry', requirePermission('orders.update'), ordersCtrl.retryOrder);
+router.post('/orders/:id/refund', requirePermission('orders.refund'), ordersCtrl.refundOrder);
+router.post('/orders/:id/sync-status', requirePermission('orders.update'), ordersCtrl.syncOrderProviderStatus);
+router.post('/orders/:id/complete', requirePermission('orders.update'), ordersCtrl.completeOrder);
+router.patch('/orders/:id/status', requirePermission('orders.update'), validateBody(schemas.updateOrderStatus), ordersCtrl.updateStatus);
+router.get('/orders/:id', requirePermission('orders.view'), ordersCtrl.getOrderById);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WALLETS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/wallets', walletCtrl.listWallets);
-router.get('/wallets/:userId/transactions', walletCtrl.getTransactionHistory);
-router.post('/wallets/:userId/add', walletLimiter, validateBody(schemas.walletAdjustment), walletCtrl.addFunds);
-router.post('/wallets/:userId/deduct', walletLimiter, validateBody(schemas.walletAdjustment), walletCtrl.deductFunds);
-router.put('/wallets/:userId/set', walletLimiter, validateBody(schemas.walletSetBalance), walletCtrl.setBalance);
-router.get('/wallets/:userId', walletCtrl.getWallet);
+router.get('/wallets', requirePermission('wallet.view'), walletCtrl.listWallets);
+router.get('/wallets/:userId/transactions', requirePermission('wallet.view'), walletCtrl.getTransactionHistory);
+router.post('/wallets/:userId/add', requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.walletAdjustment), walletCtrl.addFunds);
+router.post('/wallets/:userId/deduct', requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.walletAdjustment), walletCtrl.deductFunds);
+router.put('/wallets/:userId/set', requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.walletSetBalance), walletCtrl.setBalance);
+router.get('/wallets/:userId', requirePermission('wallet.view'), walletCtrl.getWallet);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CATEGORIES  (Phase 4b gap-bridged module)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/categories', categoriesCtrl.listCategories);
-router.get('/categories/:id', categoriesCtrl.getCategoryById);
-router.post('/categories', validateBody(categoryValidation.createCategorySchema), categoriesCtrl.createCategory);
-router.patch('/categories/:id', validateBody(categoryValidation.updateCategorySchema), categoriesCtrl.updateCategory);
-router.patch('/categories/:id/toggle', categoriesCtrl.toggleCategory);
-router.delete('/categories/:id', categoriesCtrl.deleteCategory);
+router.get('/categories', requirePermission('products.view'), categoriesCtrl.listCategories);
+router.get('/categories/:id', requirePermission('products.view'), categoriesCtrl.getCategoryById);
+router.post('/categories', requirePermission('products.manage'), validateBody(categoryValidation.createCategorySchema), categoriesCtrl.createCategory);
+router.patch('/categories/:id', requirePermission('products.manage'), validateBody(categoryValidation.updateCategorySchema), categoriesCtrl.updateCategory);
+router.patch('/categories/:id/toggle', requirePermission('products.manage'), categoriesCtrl.toggleCategory);
+router.delete('/categories/:id', requirePermission('products.manage'), categoriesCtrl.deleteCategory);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CURRENCIES  (thin proxy — full controller lives in currency module)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/currencies', catchAsync(async (req, res) => {
+router.get('/currencies', authorizeRoles('ADMIN'), catchAsync(async (req, res) => {
     const currencies = await Currency.find().sort({ code: 1 });
     sendSuccess(res, { currencies }, 'Currencies retrieved');
 }));
 
-router.patch('/currencies/:code', validateBody(schemas.updateCurrency), catchAsync(async (req, res) => {
+router.patch('/currencies/:code', authorizeRoles('ADMIN'), validateBody(schemas.updateCurrency), catchAsync(async (req, res) => {
     const { platformRate, markupPercentage, isActive, applyDebtAdjustment } = req.body;
     const code = req.params.code.toUpperCase();
 
@@ -221,7 +231,7 @@ router.patch('/currencies/:code', validateBody(schemas.updateCurrency), catchAsy
     sendSuccess(res, { currency, debtAdjustment }, message);
 }));
 
-router.post('/currencies', validateBody(schemas.createCurrency), catchAsync(async (req, res) => {
+router.post('/currencies', authorizeRoles('ADMIN'), validateBody(schemas.createCurrency), catchAsync(async (req, res) => {
     const { code, name, symbol, platformRate, marketRate, markupPercentage, isActive } = req.body;
 
     // Check for duplicate code
@@ -249,22 +259,22 @@ router.post('/currencies', validateBody(schemas.createCurrency), catchAsync(asyn
 // GROUPS  (thin proxy — full controller lives in groups module)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/groups', catchAsync(async (req, res) => {
+router.get('/groups', requirePermission('groups.manage'), catchAsync(async (req, res) => {
     const groups = await groupSvc.listGroups({ includeInactive: true });
     sendSuccess(res, { groups }, 'Groups retrieved');
 }));
 
-router.post('/groups', validateBody(schemas.createGroup), catchAsync(async (req, res) => {
+router.post('/groups', requirePermission('groups.manage'), validateBody(schemas.createGroup), catchAsync(async (req, res) => {
     const group = await groupSvc.createGroup(req.body);
     res.status(201).json({ success: true, message: 'Group created', data: { group } });
 }));
 
-router.patch('/groups/:id', validateBody(schemas.updateGroup), catchAsync(async (req, res) => {
+router.patch('/groups/:id', requirePermission('groups.manage'), validateBody(schemas.updateGroup), catchAsync(async (req, res) => {
     const group = await groupSvc.updateGroup(req.params.id, req.body);
     sendSuccess(res, { group }, 'Group updated');
 }));
 
-router.delete('/groups/:id', catchAsync(async (req, res) => {
+router.delete('/groups/:id', requirePermission('groups.manage'), catchAsync(async (req, res) => {
     const group = await groupSvc.deleteGroup(req.params.id);
     sendSuccess(res, { group }, 'Group deleted');
 }));
@@ -273,15 +283,15 @@ router.delete('/groups/:id', catchAsync(async (req, res) => {
 // SETTINGS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/settings', settingsCtrl.listSettings);
-router.get('/settings/:key', settingsCtrl.getSettingByKey);
-router.patch('/settings/:key', validateBody(schemas.updateSetting), settingsCtrl.updateSetting);
+router.get('/settings', authorizeRoles('ADMIN'), settingsCtrl.listSettings);
+router.get('/settings/:key', authorizeRoles('ADMIN'), settingsCtrl.getSettingByKey);
+router.patch('/settings/:key', authorizeRoles('ADMIN'), validateBody(schemas.updateSetting), settingsCtrl.updateSetting);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DEPOSITS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/deposits', catchAsync(async (req, res) => {
+router.get('/deposits', requirePermission('topups.review'), catchAsync(async (req, res) => {
     const page = parseInt(req.query.page ?? 1, 10);
     const limit = Math.min(parseInt(req.query.limit ?? 20, 10), 100);
     const { status, search } = req.query;
@@ -295,12 +305,12 @@ router.get('/deposits', catchAsync(async (req, res) => {
     });
 }));
 
-router.get('/deposits/:id', catchAsync(async (req, res) => {
+router.get('/deposits/:id', requirePermission('topups.review'), catchAsync(async (req, res) => {
     const deposit = await depositSvc.getDepositById(req.params.id);
     sendSuccess(res, deposit);
 }));
 
-router.patch('/deposits/:id/approve', validateBody(schemas.approveDeposit), catchAsync(async (req, res) => {
+router.patch('/deposits/:id/approve', requirePermission('topups.review'), validateBody(schemas.approveDeposit), catchAsync(async (req, res) => {
     const deposit = await depositSvc.approveDeposit(
         req.params.id,
         req.user._id,
@@ -315,7 +325,7 @@ router.patch('/deposits/:id/approve', validateBody(schemas.approveDeposit), catc
     sendSuccess(res, deposit, 'Deposit approved and wallet credited.');
 }));
 
-router.patch('/deposits/:id/reject', validateBody(schemas.approveDeposit), catchAsync(async (req, res) => {
+router.patch('/deposits/:id/reject', requirePermission('topups.review'), validateBody(schemas.approveDeposit), catchAsync(async (req, res) => {
     const deposit = await depositSvc.rejectDeposit(
         req.params.id,
         req.user._id,
@@ -330,7 +340,7 @@ router.patch('/deposits/:id/reject', validateBody(schemas.approveDeposit), catch
  * Unified review endpoint — approve or reject a deposit in one call.
  * Body: { status: 'APPROVED' | 'REJECTED', adminNotes?: string }
  */
-router.patch('/deposits/:id/review', validateBody(schemas.reviewDeposit), catchAsync(async (req, res) => {
+router.patch('/deposits/:id/review', requirePermission('topups.review'), validateBody(schemas.reviewDeposit), catchAsync(async (req, res) => {
     const { id } = req.params;
     const { status, adminNotes } = req.body;
     const auditCtx = { actorId: req.user._id, actorRole: 'ADMIN', ipAddress: req.ip, userAgent: req.get('User-Agent') };
@@ -345,7 +355,7 @@ router.patch('/deposits/:id/review', validateBody(schemas.reviewDeposit), catchA
     }
 }));
 
-router.patch('/deposits/:id', validateBody(schemas.updateDeposit), catchAsync(async (req, res) => {
+router.patch('/deposits/:id', requirePermission('topups.review'), validateBody(schemas.updateDeposit), catchAsync(async (req, res) => {
     const deposit = await depositSvc.updatePendingDeposit(req.params.id, req.body, req.user._id);
     sendSuccess(res, { deposit }, 'Deposit request updated');
 }));
@@ -354,7 +364,7 @@ router.patch('/deposits/:id', validateBody(schemas.updateDeposit), catchAsync(as
 // AUDIT LOGS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.get('/audit', catchAsync(async (req, res) => {
+router.get('/audit', authorizeRoles('ADMIN'), catchAsync(async (req, res) => {
     const { entityType, entityId, page, limit } = req.query;
     const result = await getEntityAuditLogs(entityId, entityType, {
         page: parseInt(page ?? 1, 10),
@@ -363,7 +373,7 @@ router.get('/audit', catchAsync(async (req, res) => {
     sendPaginated(res, result.logs, result.pagination, 'Audit logs retrieved');
 }));
 
-router.get('/audit/actor/:actorId', catchAsync(async (req, res) => {
+router.get('/audit/actor/:actorId', authorizeRoles('ADMIN'), catchAsync(async (req, res) => {
     const { page, limit } = req.query;
     const result = await getActorAuditLogs(req.params.actorId, {
         page: parseInt(page ?? 1, 10),
@@ -377,6 +387,6 @@ router.get('/audit/actor/:actorId', catchAsync(async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const categoryRoutes = require('../categories/category.routes');
-router.use('/categories', categoryRoutes);
+router.use('/categories', authorizeRoles('ADMIN'), categoryRoutes);
 
 module.exports = router;

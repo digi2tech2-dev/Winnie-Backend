@@ -121,6 +121,40 @@ describe('[1] Admin Users Service', () => {
         expect(updated.status).toBe(USER_STATUS.ACTIVE);
     });
 
+    it('updateUser enables API access and creates apiToken when missing', async () => {
+        const { customer, admin } = await setup();
+        await User.findByIdAndUpdate(customer._id, { $set: { isApiEnabled: false, apiToken: null } });
+
+        await adminUsersService.updateUser(
+            customer._id,
+            { isApiEnabled: true },
+            admin._id
+        );
+
+        const updated = await User.findById(customer._id).select('+apiToken');
+        expect(updated.isApiEnabled).toBe(true);
+        expect(typeof updated.apiToken).toBe('string');
+        expect(updated.apiToken.length).toBeGreaterThan(0);
+    });
+
+    it('updateUser keeps existing apiToken when API access is enabled', async () => {
+        const { customer, admin } = await setup();
+        const existingToken = 'existing-api-token-123';
+        await User.findByIdAndUpdate(customer._id, {
+            $set: { isApiEnabled: false, apiToken: existingToken },
+        });
+
+        await adminUsersService.updateUser(
+            customer._id,
+            { isApiEnabled: true },
+            admin._id
+        );
+
+        const updated = await User.findById(customer._id).select('+apiToken');
+        expect(updated.isApiEnabled).toBe(true);
+        expect(updated.apiToken).toBe(existingToken);
+    });
+
     it('updateUser rejects duplicate email', async () => {
         const { group, admin, customer } = await setup();
         const other = await createCustomer({ groupId: group._id });
@@ -328,6 +362,11 @@ describe('[4] Joi Validation Schemas', () => {
 
     it('updateUser: accepts valid name + status', () => {
         const err = runBodyValidation(schemas.updateUser, { name: 'Alice', status: 'ACTIVE' });
+        expect(err).toBeNull();
+    });
+
+    it('updateUser: accepts isApiEnabled boolean', () => {
+        const err = runBodyValidation(schemas.updateUser, { isApiEnabled: true });
         expect(err).toBeNull();
     });
 

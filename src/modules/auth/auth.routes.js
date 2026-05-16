@@ -15,8 +15,15 @@
 const { Router } = require('express');
 const passport = require('../../config/google.strategy');
 const authController = require('./auth.controller');
-const { registerValidation, loginValidation } = require('./auth.validation');
+const {
+    registerValidation,
+    loginValidation,
+    enable2FAValidation,
+    disable2FAValidation,
+    verify2FAValidation,
+} = require('./auth.validation');
 const validate = require('../../shared/middlewares/validate');
+const authenticate = require('../../shared/middlewares/authenticate');
 const { body } = require('express-validator');
 const config = require('../../config/config');
 const { authLimiter } = require('../../shared/middlewares/rateLimiter');
@@ -50,6 +57,10 @@ router.post('/register', authLimiter, registerValidation, validate, authControll
  * @access Public
  */
 router.post('/login', authLimiter, loginValidation, validate, authController.login);
+router.post('/2fa/generate', authLimiter, authenticate, authController.generate2FASecret);
+router.post('/2fa/enable', authenticate, enable2FAValidation, validate, authController.enable2FA);
+router.post('/2fa/disable', authenticate, disable2FAValidation, validate, authController.disable2FA);
+router.post('/verify-2fa', authLimiter, verify2FAValidation, validate, authController.verify2FA);
 
 // ─── Email Verification ───────────────────────────────────────────────────────
 

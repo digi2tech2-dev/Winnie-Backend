@@ -52,4 +52,60 @@ const loginValidation = [
         .notEmpty().withMessage('Password is required'),
 ];
 
-module.exports = { registerValidation, loginValidation };
+const otpValidation = body('otp')
+    .trim()
+    .matches(/^\d{6}$/).withMessage('otp must be a 6-digit code');
+
+const optionalTwoFactorTokenValidation = [
+    body('tempToken')
+        .optional()
+        .trim()
+        .isString().withMessage('tempToken must be a string')
+        .isLength({ min: 20 }).withMessage('tempToken is invalid'),
+
+    body('requestId')
+        .optional()
+        .trim()
+        .isString().withMessage('requestId must be a string')
+        .isLength({ min: 20 }).withMessage('requestId is invalid'),
+];
+
+const enable2FAValidation = [
+    otpValidation,
+    ...optionalTwoFactorTokenValidation,
+    body()
+        .custom((value) => Boolean(value.tempToken || value.requestId))
+        .withMessage('tempToken or requestId is required'),
+];
+
+const disable2FAValidation = [
+    body('currentPassword')
+        .optional()
+        .isString().withMessage('currentPassword must be a string')
+        .isLength({ min: 1 }).withMessage('currentPassword is required'),
+
+    body('password')
+        .optional()
+        .isString().withMessage('password must be a string')
+        .isLength({ min: 1 }).withMessage('password is required'),
+
+    body()
+        .custom((value) => Boolean(value.currentPassword || value.password))
+        .withMessage('currentPassword is required'),
+];
+
+const verify2FAValidation = [
+    otpValidation,
+    ...optionalTwoFactorTokenValidation,
+    body()
+        .custom((value) => Boolean(value.tempToken || value.requestId))
+        .withMessage('tempToken or requestId is required'),
+];
+
+module.exports = {
+    registerValidation,
+    loginValidation,
+    enable2FAValidation,
+    disable2FAValidation,
+    verify2FAValidation,
+};

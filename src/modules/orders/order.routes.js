@@ -7,6 +7,7 @@ const validate = require('../../shared/middlewares/validate');
 const authenticate = require('../../shared/middlewares/authenticate');
 const authorize = require('../../shared/middlewares/authorize');
 const requireActiveUser = require('../../shared/middlewares/requireActiveUser');
+const validateOrderDynamicFields = require('./validateOrderDynamicFields.middleware');
 
 const router = Router();
 
@@ -20,7 +21,15 @@ router.use(authenticate);
  * @desc   Place a new order
  * @access Active Customer only
  */
-router.post('/', requireActiveUser, authorize('CUSTOMER'), createOrderValidation, validate, orderController.createOrder);
+router.post(
+    '/',
+    requireActiveUser,
+    authorize('CUSTOMER'),
+    createOrderValidation,
+    validate,
+    validateOrderDynamicFields,
+    orderController.createOrder
+);
 
 /**
  * @route  GET /api/orders/my

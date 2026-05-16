@@ -4,6 +4,10 @@ const mongoose = require('mongoose');
 const { DepositRequest, DEPOSIT_STATUS } = require('./deposit.model');
 const { User } = require('../users/user.model');
 const { creditWalletDirect } = require('../wallet/wallet.service');
+const {
+    safeCreateNotification,
+    safeCreateAdminActorNotifications,
+} = require('../notifications/notification.service');
 // convertUsdToUserCurrency removed — deposits now credit requestedAmount directly
 const {
     NotFoundError,
@@ -98,6 +102,44 @@ const createDepositRequest = async ({
         },
         ipAddress: auditContext?.ipAddress ?? null,
         userAgent: auditContext?.userAgent ?? null,
+    });
+
+    void safeCreateNotification({
+        userId,
+        title: 'تم استلام طلب الشحن',
+        message: `تم استلام طلب شحن الرصيد بمبلغ ${deposit.requestedAmount} ${deposit.currency} وجاري مراجعته من قبل الإدارة.`,
+        type: 'deposit',
+        priority: 'normal',
+        route: '/wallet',
+        entityType: 'topup',
+        entityId: deposit._id,
+        metadata: {
+            depositId: deposit._id.toString(),
+            requestedAmount: deposit.requestedAmount,
+            currency: deposit.currency,
+            amountUsd: deposit.amountUsd,
+            status: deposit.status,
+        },
+    });
+
+    void safeCreateAdminActorNotifications({
+        roles: ['ADMIN', 'SUPERVISOR'],
+        permissions: ['topups.review'],
+        title: 'طلب شحن رصيد جديد',
+        message: `هناك طلب شحن رصيد جديد بمبلغ ${deposit.requestedAmount} ${deposit.currency} في انتظار المراجعة.`,
+        type: 'deposit',
+        priority: 'high',
+        route: `/admin/payments?topupId=${deposit._id.toString()}`,
+        entityType: 'topup',
+        entityId: deposit._id,
+        metadata: {
+            depositId: deposit._id.toString(),
+            userId: userId.toString(),
+            requestedAmount: deposit.requestedAmount,
+            currency: deposit.currency,
+            amountUsd: deposit.amountUsd,
+            status: deposit.status,
+        },
     });
 
     return deposit;

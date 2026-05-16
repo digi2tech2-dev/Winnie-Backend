@@ -424,6 +424,35 @@ describe('Full lifecycle flows', () => {
     });
 });
 
+describe('API token management', () => {
+    let group;
+
+    beforeEach(async () => {
+        group = await createGroup({ name: 'ApiTokenGroup', percentage: 0 });
+    });
+
+    it('regenerateMyApiToken returns a new token and persists it', async () => {
+        const customer = await createCustomer({ groupId: group._id });
+        const result = await userService.regenerateMyApiToken(customer._id);
+
+        expect(result.apiToken).toMatch(/^[a-f0-9]{64}$/);
+        expect(result.user.apiToken).toBeUndefined();
+
+        const fresh = await User.findById(customer._id).select('+apiToken');
+        expect(fresh.apiToken).toBe(result.apiToken);
+    });
+
+    it('updateUser enables API access and generates apiToken when missing', async () => {
+        const customer = await createCustomer({ groupId: group._id, isApiEnabled: false, apiToken: null });
+
+        await userService.updateUser(customer._id, { isApiEnabled: true });
+        const fresh = await User.findById(customer._id).select('+apiToken');
+
+        expect(fresh.isApiEnabled).toBe(true);
+        expect(fresh.apiToken).toMatch(/^[a-f0-9]{64}$/);
+    });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 22–24. EDGE CASES
 // ─────────────────────────────────────────────────────────────────────────────

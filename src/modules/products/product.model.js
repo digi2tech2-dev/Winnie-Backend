@@ -39,6 +39,66 @@ const FIELD_TYPES = Object.freeze({
     DATE: 'date',
 });
 
+const DYNAMIC_FIELD_TYPES = Object.freeze({
+    TEXT: 'text',
+    TEXTAREA: 'textarea',
+    NUMBER: 'number',
+    EMAIL: 'email',
+    TEL: 'tel',
+    URL: 'url',
+    DATE: 'date',
+    SELECT: 'select',
+});
+
+const dynamicFieldSchema = new mongoose.Schema(
+    {
+        name: {
+            type: String,
+            required: [true, 'dynamicField.name is required'],
+            lowercase: true,
+            trim: true,
+            match: [/^[a-z][a-z0-9_]*$/, 'dynamicField.name must be lowercase snake_case'],
+        },
+        label: {
+            type: String,
+            required: [true, 'dynamicField.label is required'],
+            trim: true,
+        },
+        type: {
+            type: String,
+            enum: {
+                values: Object.values(DYNAMIC_FIELD_TYPES),
+                message: `dynamicField.type must be one of: ${Object.values(DYNAMIC_FIELD_TYPES).join(', ')}`,
+            },
+            required: [true, 'dynamicField.type is required'],
+        },
+        required: {
+            type: Boolean,
+            default: true,
+        },
+        options: {
+            type: [String],
+            default: [],
+            set: (options) => Array.isArray(options)
+                ? [...new Set(options.map((option) => String(option || '').trim()).filter(Boolean))]
+                : [],
+        },
+        min: {
+            type: Number,
+            default: null,
+        },
+        max: {
+            type: Number,
+            default: null,
+        },
+        isActive: {
+            type: Boolean,
+            default: true,
+        },
+    },
+    { _id: false }
+);
+
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
 const productSchema = new mongoose.Schema(
@@ -210,6 +270,11 @@ const productSchema = new mongoose.Schema(
             default: true,
         },
 
+        isAvailableForApi: {
+            type: Boolean,
+            default: true,
+        },
+
         /** Soft-delete timestamp. Null = not deleted. */
         deletedAt: {
             type: Date,
@@ -362,6 +427,11 @@ const productSchema = new mongoose.Schema(
             default: [],
         },
 
+        dynamicFields: {
+            type: [dynamicFieldSchema],
+            default: [],
+        },
+
         // ── Provider Field Mapping ─────────────────────────────────────────────
 
         /**
@@ -391,8 +461,47 @@ const productSchema = new mongoose.Schema(
 
 // ─── Indexes ──────────────────────────────────────────────────────────────────
 
+productSchema.pre('validate', function (next) {
+    const dynamicFields = Array.isArray(this.dynamicFields) ? this.dynamicFields : [];
+    const seenNames = new Set();
+
+    for (const field of dynamicFields) {
+        if (!field) continue;
+
+        const name = String(field.name || '').trim().toLowerCase();
+        if (name) {
+            if (seenNames.has(name)) {
+                return next(new Error(`dynamicFields.name must be unique per product. Duplicate: '${name}'.`));
+            }
+            seenNames.add(name);
+            field.name = name;
+        }
+
+        if (field.type === DYNAMIC_FIELD_TYPES.SELECT) {
+            const options = Array.isArray(field.options)
+                ? field.options.map((option) => String(option || '').trim()).filter(Boolean)
+                : [];
+
+            if (field.isActive !== false && options.length === 0) {
+                return next(new Error(`dynamicField '${name || field.label || 'select'}' must define at least one option when type is select.`));
+            }
+
+            field.options = [...new Set(options)];
+        }
+
+        const hasMin = field.min !== null && field.min !== undefined;
+        const hasMax = field.max !== null && field.max !== undefined;
+        if (hasMin && hasMax && Number(field.min) > Number(field.max)) {
+            return next(new Error(`dynamicField '${name || field.label || 'number'}' min cannot be greater than max.`));
+        }
+    }
+
+    return next();
+});
+
 productSchema.index({ name: 1 });
 productSchema.index({ isActive: 1 });
+productSchema.index({ isActive: 1, isAvailableForApi: 1 });
 productSchema.index({ provider: 1, isActive: 1 });        // provider product listings
 productSchema.index({ providerProduct: 1 });               // price-sync: find Products by ProviderProduct
 productSchema.index({ pricingMode: 1, provider: 1 });     // price-sync: find 'sync' mode candidates
@@ -417,4 +526,13 @@ const computeFinalPrice = (providerPrice, markupType, markupValue) => {
 
 const Product = mongoose.model('Product', productSchema);
 
-module.exports = { Product, PRICING_MODES, MARKUP_TYPES, EXECUTION_TYPES, FIELD_TYPES, computeFinalPrice };
+module.exports = {
+    Product,
+    PRICING_MODES,
+    MARKUP_TYPES,
+    EXECUTION_TYPES,
+    FIELD_TYPES,
+    DYNAMIC_FIELD_TYPES,
+    dynamicFieldSchema,
+    computeFinalPrice,
+};

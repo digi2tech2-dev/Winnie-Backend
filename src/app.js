@@ -21,7 +21,9 @@ const orderRoutes = require('./modules/orders/order.routes');
 const walletRoutes = require('./modules/wallet/wallet.routes');
 const auditRoutes = require('./modules/audit/audit.routes');
 const depositRoutes = require('./modules/deposits/deposit.routes');
+const notificationRoutes = require('./modules/notifications/notification.routes');
 const providerRoutes = require('./modules/providers/provider.routes');
+const clientRoutes = require('./modules/client/client.routes');
 const adminCatalogRoutes = require('./modules/admin/admin.catalog.routes');
 const adminRoutes = require('./modules/admin/admin.routes');    // ← dashboard router
 const meRoutes = require('./modules/me/me.routes');          // ← user panel
@@ -107,7 +109,10 @@ app.use(`${API_PREFIX}/orders`, orderRoutes);
 app.use(`${API_PREFIX}/wallet`, walletRoutes);
 app.use(`${API_PREFIX}/audit`, auditRoutes);
 app.use(`${API_PREFIX}/deposits`, depositRoutes);
+app.use(`${API_PREFIX}/notifications`, notificationRoutes);
+app.use(`${API_PREFIX}/me/notifications`, notificationRoutes);
 app.use(`${API_PREFIX}/providers`, providerRoutes);
+app.use(`${API_PREFIX}/client`, clientRoutes);
 
 // ── User Panel ─────────────────────────────────────────────────────────────────
 app.use(`${API_PREFIX}/me`, meRoutes);

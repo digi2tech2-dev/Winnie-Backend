@@ -9,6 +9,7 @@ const config = require('../../config/config');
  */
 const ROLES = Object.freeze({
     ADMIN: 'ADMIN',
+    SUPERVISOR: 'SUPERVISOR',
     CUSTOMER: 'CUSTOMER',
 });
 
@@ -99,10 +100,65 @@ const userSchema = new mongoose.Schema(
             default: null,
         },
 
+        twoFactorOtp: {
+            type: String,
+            select: false,
+            default: null,
+        },
+
+        twoFactorOtpExpires: {
+            type: Date,
+            select: false,
+            default: null,
+        },
+
+        twoFactorTempToken: {
+            type: String,
+            select: false,
+            default: null,
+        },
+
+        twoFactorTempTokenExpires: {
+            type: Date,
+            select: false,
+            default: null,
+        },
+
+        isTwoFactorEnabled: {
+            type: Boolean,
+            default: false,
+        },
+
         role: {
             type: String,
             enum: Object.values(ROLES),
             default: ROLES.CUSTOMER,
+        },
+
+        isApiEnabled: {
+            type: Boolean,
+            default: false,
+        },
+
+        apiToken: {
+            type: String,
+            trim: true,
+            default: null,
+            select: false,
+            index: true,
+        },
+
+        permissions: {
+            type: [String],
+            default: [],
+            set: (permissions) => {
+                if (!Array.isArray(permissions)) return [];
+                return [...new Set(
+                    permissions
+                        .map((permission) => String(permission || '').trim())
+                        .filter(Boolean)
+                )];
+            },
         },
 
         // ── Activation Lifecycle ─────────────────────────────────────────────
@@ -238,6 +294,7 @@ const userSchema = new mongoose.Schema(
 // ─── Indexes ────────────────────────────────────────────────────────────────
 // Note: email already has a unique index from unique:true in the field definition
 userSchema.index({ role: 1 });
+userSchema.index({ permissions: 1 });
 userSchema.index({ groupId: 1 });
 userSchema.index({ deletedAt: 1 }, { sparse: true });  // fast filter for non-deleted users
 // status index defined inline above
@@ -288,6 +345,13 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 userSchema.methods.toSafeObject = function () {
     const obj = this.toObject();
     delete obj.password;
+    delete obj.emailVerificationToken;
+    delete obj.emailVerificationExpires;
+    delete obj.twoFactorOtp;
+    delete obj.twoFactorOtpExpires;
+    delete obj.twoFactorTempToken;
+    delete obj.twoFactorTempTokenExpires;
+    delete obj.apiToken;
     return obj;
 };
 

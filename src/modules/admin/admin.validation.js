@@ -29,6 +29,15 @@ const pagination = {
     limit: Joi.number().integer().min(1).max(100).default(20),
 };
 
+const role = Joi.string().trim().uppercase().valid('ADMIN', 'SUPERVISOR', 'CUSTOMER');
+const permission = Joi.string()
+    .trim()
+    .pattern(/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/)
+    .messages({
+        'string.pattern.base': 'Permissions must use dot notation, for example orders.view',
+    });
+const permissions = Joi.array().items(permission).unique();
+
 // ─── Middleware factory ───────────────────────────────────────────────────────
 
 /**
@@ -74,6 +83,8 @@ const updateUserSchema = Joi.object({
     groupId: objectId().allow(null),
     status: Joi.string().valid('PENDING', 'ACTIVE', 'REJECTED'),
     verified: Joi.boolean(),
+    isApiEnabled: Joi.boolean(),
+    permissions,
     creditLimit: Joi.number().min(0).messages({
         'number.min': 'Credit limit cannot be negative',
     }),
@@ -84,7 +95,7 @@ const listUsersQuery = Joi.object({
     status: Joi.string().valid('PENDING', 'ACTIVE', 'REJECTED'),
     verified: Joi.boolean(),
     email: Joi.string().max(128),
-    role: Joi.string().valid('ADMIN', 'CUSTOMER'),
+    role,
     from: Joi.date().iso(),
     to: Joi.date().iso().min(Joi.ref('from')),
     sortBy: Joi.string().valid('createdAt', 'email', 'name', 'status', 'walletBalance').default('createdAt'),
@@ -92,10 +103,11 @@ const listUsersQuery = Joi.object({
 });
 
 const updateUserRoleSchema = Joi.object({
-    role: Joi.string().valid('ADMIN', 'CUSTOMER').required().messages({
+    role: role.required().messages({
         'any.required': 'Role is required',
-        'any.only': 'Role must be ADMIN or CUSTOMER',
+        'any.only': 'Role must be ADMIN, SUPERVISOR, or CUSTOMER',
     }),
+    permissions,
 });
 
 const updateUserCurrencySchema = Joi.object({
@@ -122,6 +134,12 @@ const resetUserPasswordSchema = Joi.object({
 const updateUserAvatarSchema = Joi.object({
     avatar: Joi.string().uri({ allowRelative: true }).allow('', null).required().messages({
         'any.required': 'Avatar URL is required (use null to remove)',
+    }),
+});
+
+const updateSupervisorPermissionsSchema = Joi.object({
+    permissions: permissions.required().messages({
+        'any.required': 'permissions is required',
     }),
 });
 
@@ -306,6 +324,7 @@ module.exports = {
         updateUser: updateUserSchema,
         listUsersQuery,
         updateUserRole: updateUserRoleSchema,
+        updateSupervisorPermissions: updateSupervisorPermissionsSchema,
         updateUserCurrency: updateUserCurrencySchema,
         updateCreditLimit: updateCreditLimitSchema,
         resetUserPassword: resetUserPasswordSchema,

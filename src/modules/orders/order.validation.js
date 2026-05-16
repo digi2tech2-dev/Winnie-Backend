@@ -17,6 +17,10 @@ const createOrderValidation = [
     body('orderFieldsValues')
         .optional({ nullable: true })
         .isObject().withMessage('orderFieldsValues must be an object'),
+
+    body('dynamicData')
+        .optional({ nullable: true })
+        .isObject().withMessage('dynamicData must be an object'),
 ];
 
 const orderIdParamValidation = [

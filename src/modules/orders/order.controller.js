@@ -7,11 +7,12 @@ const catchAsync = require('../../shared/utils/catchAsync');
 // ── Customer Endpoints ────────────────────────────────────────────────────────
 
 const createOrder = catchAsync(async (req, res) => {
-    const { productId, quantity, orderFieldsValues, link, target } = req.body;
+    const { productId, quantity, orderFieldsValues, dynamicData, link, target } = req.body;
+    const customerInput = req.validatedDynamicInput || null;
 
     // Merge top-level link/target into orderFieldsValues so they always
     // reach customerInput (SMM providers need these as provider params).
-    const mergedFields = { ...orderFieldsValues };
+    const mergedFields = { ...dynamicData, ...orderFieldsValues };
     if (link && !mergedFields.link) mergedFields.link = link;
     if (target && !mergedFields.target) mergedFields.target = target;
     const finalFields = Object.keys(mergedFields).length > 0 ? mergedFields : null;
@@ -32,6 +33,7 @@ const createOrder = catchAsync(async (req, res) => {
         quantity: parseInt(quantity, 10),
         idempotencyKey,
         orderFieldsValues: finalFields,
+        customerInput,
         auditContext,
     });
 

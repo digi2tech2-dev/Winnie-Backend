@@ -157,6 +157,65 @@ const _verificationTemplate = ({ name, verifyUrl }) => `
 </html>
 `;
 
+const _twoFactorOtpTemplate = ({ name, otp, expiresMinutes }) => `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Your Two-Factor Code</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f7ff;font-family:'Segoe UI',Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f7ff;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="560" cellpadding="0" cellspacing="0"
+               style="background:#ffffff;border-radius:12px;overflow:hidden;
+                      box-shadow:0 4px 24px rgba(0,0,0,.08);">
+          <tr>
+            <td style="background:linear-gradient(135deg,#4f46e5,#7c3aed);
+                       padding:36px 48px;text-align:center;">
+              <h1 style="margin:0;color:#fff;font-size:24px;font-weight:700;">Digital Platform</h1>
+              <p style="margin:8px 0 0;color:rgba(255,255,255,.75);font-size:14px;">
+                Two-Factor Authentication
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:44px 48px;text-align:center;">
+              <p style="margin:0 0 16px;font-size:16px;color:#374151;text-align:left;">
+                Hi <strong>${name}</strong>,
+              </p>
+              <p style="margin:0 0 28px;font-size:15px;color:#6b7280;line-height:1.6;text-align:left;">
+                Use this one-time code to continue. It expires in
+                <strong>${expiresMinutes} minutes</strong>.
+              </p>
+              <div style="display:inline-block;letter-spacing:10px;font-size:34px;font-weight:800;
+                          color:#111827;background:#f3f4f6;border:1px solid #e5e7eb;
+                          border-radius:12px;padding:18px 20px 18px 30px;">
+                ${otp}
+              </div>
+              <p style="margin:30px 0 0;font-size:13px;color:#9ca3af;line-height:1.6;text-align:left;">
+                If you did not request this code, change your password and contact support.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="background:#f9fafb;padding:22px 48px;border-top:1px solid #e5e7eb;
+                       text-align:center;">
+              <p style="margin:0;font-size:12px;color:#9ca3af;">
+                &copy; ${new Date().getFullYear()} Digital Platform. All rights reserved.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+`;
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -178,4 +237,16 @@ const sendVerificationEmail = async (user, rawToken) => {
     });
 };
 
-module.exports = { sendEmail, sendVerificationEmail };
+const sendTwoFactorOtpEmail = async (user, otp, { expiresMinutes = 10 } = {}) => {
+    await sendEmail({
+        to: user.email,
+        subject: 'Your two-factor authentication code',
+        html: _twoFactorOtpTemplate({
+            name: user.name || 'there',
+            otp,
+            expiresMinutes,
+        }),
+    });
+};
+
+module.exports = { sendEmail, sendVerificationEmail, sendTwoFactorOtpEmail };

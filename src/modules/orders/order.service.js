@@ -24,6 +24,7 @@ const {
 } = require('../audit/audit.constants');
 const { convertUsdToUserCurrency } = require('../../services/currencyConverter.service');
 const { User } = require('../users/user.model');
+const { safeCreateAdminActorNotifications } = require('../notifications/notification.service');
 const { getLivePrice, invalidate: invalidatePriceCache } = require('../providers/providerPriceCache');
 const { toDecimal, toStr, toFiat, multiply, subtract, add, isPositive, compare } = require('../../shared/utils/decimalPrecision');
 
@@ -93,6 +94,7 @@ const _autoUpdateProductPrice = (productId, newProviderPrice, markupType, markup
  * @param {string|null} params.idempotencyKey
  * @param {Object|null} params.auditContext
  * @param {Object|null} params.orderFieldsValues  - dynamic field values submitted by customer
+ * @param {Object|null} params.customerInput       - pre-validated dynamic field input
  * @param {Object|null} params.provider           - adapter instance (injected for testability)
  */
 const createOrder = async ({
@@ -103,6 +105,7 @@ const createOrder = async ({
     auditContext = null,
     orderFieldsValues = null,   // ← new param
     provider = null,   // ← injected; null = auto-resolve from factory
+    customerInput = null,
 }) => {
     // ── Pre-transaction: Idempotency Check ───────────────────────────────────
     if (idempotencyKey) {
@@ -163,7 +166,17 @@ const createOrder = async ({
         }
     }
 
-    return _attemptCreateOrder({ userId, productId, quantity, idempotencyKey, auditContext, orderFieldsValues, provider: resolvedProvider, providerCode });
+    return _attemptCreateOrder({
+        userId,
+        productId,
+        quantity,
+        idempotencyKey,
+        auditContext,
+        orderFieldsValues,
+        customerInput,
+        provider: resolvedProvider,
+        providerCode,
+    });
 
 };
 
@@ -173,7 +186,17 @@ const createOrder = async ({
  * @private
  */
 const _attemptCreateOrder = async (
-    { userId, productId, quantity, idempotencyKey, auditContext, orderFieldsValues, provider, providerCode = null },
+    {
+        userId,
+        productId,
+        quantity,
+        idempotencyKey,
+        auditContext,
+        orderFieldsValues,
+        customerInput: validatedCustomerInput = null,
+        provider,
+        providerCode = null,
+    },
     isRetry = false
 ) => {
 
@@ -214,15 +237,15 @@ const _attemptCreateOrder = async (
         // If the product defines formal orderFields, validate against them.
         // Otherwise, pass through raw values so that link/target/etc. still
         // reach the provider (critical for SMM-panel services).
-        let customerInput = null;
-        if (product.orderFields && product.orderFields.length > 0) {
+        let customerInput = validatedCustomerInput;
+        if (!customerInput && product.orderFields && product.orderFields.length > 0) {
             // validateOrderFields throws BusinessRuleError on invalid input
             const { values, fieldsSnapshot } = validateOrderFields(
                 product.orderFields,
                 orderFieldsValues
             );
             customerInput = { values, fieldsSnapshot };
-        } else if (orderFieldsValues && typeof orderFieldsValues === 'object' && Object.keys(orderFieldsValues).length > 0) {
+        } else if (!customerInput && orderFieldsValues && typeof orderFieldsValues === 'object' && Object.keys(orderFieldsValues).length > 0) {
             // No formal schema — save raw values so the fulfillment engine
             // can forward them to the provider (e.g. { link: '...' }).
             customerInput = { values: orderFieldsValues, fieldsSnapshot: [] };
@@ -324,6 +347,11 @@ const _attemptCreateOrder = async (
         // An AUTOMATIC product → PROCESSING (fulfillment attempted post-commit)
         // Any other case        → PENDING   (admin handles manually)
         const isAutomatic = product.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC;
+        const isManualOrder = (
+            product.executionType === ORDER_EXECUTION_TYPES.MANUAL ||
+            !product.provider ||
+            !product.providerProduct
+        );
         const initialStatus = isAutomatic ? ORDER_STATUS.PROCESSING : ORDER_STATUS.PENDING;
 
         // ── 6. Create Order ────────────────────────────────────────────────────
@@ -422,6 +450,26 @@ const _attemptCreateOrder = async (
         // Always fires for AUTOMATIC products. executeOrder self-resolves the
         // provider adapter if none was pre-resolved, and handles all failures
         // (marks FAILED + refunds the wallet).
+        if (isManualOrder) {
+            void safeCreateAdminActorNotifications({
+                title: 'طلب يدوي جديد',
+                message: 'يوجد طلب يدوي جديد يحتاج إلى التنفيذ.',
+                type: 'order',
+                priority: 'high',
+                route: `/admin/orders?orderId=${order._id.toString()}`,
+                entityType: 'order',
+                entityId: order._id,
+                metadata: {
+                    orderId: order._id.toString(),
+                    orderNumber,
+                    userId: userId.toString(),
+                    productId: product._id.toString(),
+                    quantity: qty,
+                    status: initialStatus,
+                },
+            });
+        }
+
         if (isAutomatic) {
             createAuditLog({
                 actorId, actorRole, ipAddress, userAgent,
@@ -452,7 +500,17 @@ const _attemptCreateOrder = async (
             session.endSession();
             await new Promise((r) => setTimeout(r, 10));
             return _attemptCreateOrder(
-                { userId, productId, quantity, idempotencyKey, auditContext, orderFieldsValues, provider, providerCode },
+                {
+                    userId,
+                    productId,
+                    quantity,
+                    idempotencyKey,
+                    auditContext,
+                    orderFieldsValues,
+                    customerInput: validatedCustomerInput,
+                    provider,
+                    providerCode,
+                },
                 true
             );
 

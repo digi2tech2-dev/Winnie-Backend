@@ -23,6 +23,11 @@ const updateMyAvatar = catchAsync(async (req, res) => {
     sendSuccess(res, user, 'Avatar updated successfully.');
 });
 
+const regenerateMyApiToken = catchAsync(async (req, res) => {
+    const result = await userService.regenerateMyApiToken(req.user._id);
+    sendSuccess(res, result, 'API token regenerated successfully.');
+});
+
 // ── Admin: Queries ────────────────────────────────────────────────────────────
 
 const listUsers = catchAsync(async (req, res) => {
@@ -42,8 +47,8 @@ const getUser = catchAsync(async (req, res) => {
 // ── Admin: General Update ─────────────────────────────────────────────────────
 
 const updateUser = catchAsync(async (req, res) => {
-    const { name, groupId, creditLimit } = req.body;
-    const user = await userService.updateUser(req.params.id, { name, groupId, creditLimit });
+    const { name, groupId, creditLimit, isApiEnabled } = req.body;
+    const user = await userService.updateUser(req.params.id, { name, groupId, creditLimit, isApiEnabled });
     sendSuccess(res, user, 'User updated successfully.');
 });
 
@@ -71,6 +76,7 @@ module.exports = {
     getMyProfile,
     updateMyProfile,
     updateMyAvatar,
+    regenerateMyApiToken,
     listUsers,
     getUser,
     updateUser,

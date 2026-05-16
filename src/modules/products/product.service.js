@@ -96,6 +96,7 @@ const createProduct = async ({
     isActive = true,
     executionType = 'manual',
     orderFields = [],
+    dynamicFields = [],
     providerMapping = {},
     provider = null,
     providerProduct = null,
@@ -164,6 +165,7 @@ const createProduct = async ({
         markupValue,
         executionType: resolvedExecutionType,
         orderFields,
+        dynamicFields,
         providerMapping,
         provider,
         providerProduct,
@@ -320,7 +322,7 @@ const updateProduct = async (productId, updates) => {
     const ALLOWED = [
         'name', 'description', 'image', 'category', 'displayOrder', 'isActive',
         'basePrice', 'minQty', 'maxQty', 'pricingMode', 'markupType', 'markupValue',
-        'executionType', 'orderFields', 'providerMapping',
+        'executionType', 'orderFields', 'dynamicFields', 'providerMapping',
         'provider', 'providerProduct',
         'syncPriceWithProvider', 'enableManualPrice', 'manualPriceAdjustment', 'finalPrice',
     ];

@@ -23,7 +23,8 @@
  * @module orderFields.validator
  */
 
-const { BusinessRuleError } = require('../../shared/errors/AppError');
+const Joi = require('joi');
+const { BusinessRuleError, ValidationError } = require('../../shared/errors/AppError');
 
 /** Field types recognised by the platform. */
 const FIELD_TYPES = Object.freeze({
@@ -36,6 +37,17 @@ const FIELD_TYPES = Object.freeze({
     EMAIL: 'email',
     TEL: 'tel',
     DATE: 'date',
+});
+
+const DYNAMIC_FIELD_TYPES = Object.freeze({
+    TEXT: 'text',
+    TEXTAREA: 'textarea',
+    NUMBER: 'number',
+    EMAIL: 'email',
+    TEL: 'tel',
+    URL: 'url',
+    DATE: 'date',
+    SELECT: 'select',
 });
 
 // Loose but practical URL regex: requires http(s):// prefix.
@@ -192,6 +204,122 @@ const validateOrderFields = (orderFields = [], orderFieldsValues = {}) => {
     return { values: validatedValues, fieldsSnapshot };
 };
 
+const normalizeDynamicField = (field) => ({
+    name: String(field.name || '').trim().toLowerCase(),
+    label: String(field.label || '').trim(),
+    type: field.type,
+    required: field.required !== false,
+    options: Array.isArray(field.options)
+        ? [...new Set(field.options.map((option) => String(option || '').trim()).filter(Boolean))]
+        : [],
+    min: field.min ?? null,
+    max: field.max ?? null,
+    isActive: field.isActive !== false,
+});
+
+const buildDynamicFieldRule = (field) => {
+    let rule;
+
+    switch (field.type) {
+        case DYNAMIC_FIELD_TYPES.NUMBER:
+            rule = Joi.number();
+            if (field.min !== null && field.min !== undefined) rule = rule.min(field.min);
+            if (field.max !== null && field.max !== undefined) rule = rule.max(field.max);
+            break;
+
+        case DYNAMIC_FIELD_TYPES.EMAIL:
+            rule = Joi.string().trim().email({ tlds: { allow: false } });
+            break;
+
+        case DYNAMIC_FIELD_TYPES.URL:
+            rule = Joi.string().trim().uri({ scheme: ['http', 'https'] });
+            break;
+
+        case DYNAMIC_FIELD_TYPES.DATE:
+            rule = Joi.date().iso();
+            break;
+
+        case DYNAMIC_FIELD_TYPES.SELECT:
+            rule = Joi.string().trim().valid(...field.options);
+            break;
+
+        case DYNAMIC_FIELD_TYPES.TEXT:
+        case DYNAMIC_FIELD_TYPES.TEXTAREA:
+        case DYNAMIC_FIELD_TYPES.TEL:
+        default:
+            rule = Joi.string().trim();
+            break;
+    }
+
+    if (field.required) {
+        return rule.required().messages({
+            'any.required': `'${field.label || field.name}' is required.`,
+            'string.empty': `'${field.label || field.name}' is required.`,
+            'any.only': `'${field.label || field.name}' must be one of: ${field.options.join(', ')}.`,
+        });
+    }
+
+    return rule.optional().allow(null, '');
+};
+
+const validateDynamicFields = (dynamicFields = [], submittedValues = {}) => {
+    const submitted = submittedValues && typeof submittedValues === 'object' && !Array.isArray(submittedValues)
+        ? submittedValues
+        : {};
+
+    const activeFields = dynamicFields
+        .map(normalizeDynamicField)
+        .filter((field) => field.isActive !== false);
+
+    const schemaShape = {};
+    for (const field of activeFields) {
+        if (!field.name) {
+            throw new ValidationError('Dynamic field validation failed.', [
+                { field: 'dynamicFields.name', message: 'Dynamic field name is required.' },
+            ]);
+        }
+
+        schemaShape[field.name] = buildDynamicFieldRule(field);
+    }
+
+    const schema = Joi.object(schemaShape).unknown(false);
+    const { value, error } = schema.validate(submitted, {
+        abortEarly: false,
+        convert: true,
+        stripUnknown: false,
+    });
+
+    if (error) {
+        throw new ValidationError(
+            'Dynamic field validation failed.',
+            error.details.map((detail) => ({
+                field: detail.path.join('.'),
+                message: detail.message.replace(/"/g, "'"),
+            }))
+        );
+    }
+
+    const values = { ...value };
+    for (const field of activeFields) {
+        if (!field.required && (values[field.name] === '' || values[field.name] === null)) {
+            delete values[field.name];
+        }
+    }
+
+    const fieldsSnapshot = activeFields.map((field) => ({
+        name: field.name,
+        label: field.label,
+        type: field.type,
+        required: field.required,
+        options: [...field.options],
+        min: field.min,
+        max: field.max,
+        isActive: field.isActive,
+    }));
+
+    return { values, fieldsSnapshot };
+};
+
 /**
  * applyProviderMapping(values, providerMapping)
  *
@@ -225,4 +353,10 @@ const applyProviderMapping = (values, providerMapping) => {
     return mapped;
 };
 
-module.exports = { validateOrderFields, applyProviderMapping, FIELD_TYPES };
+module.exports = {
+    validateOrderFields,
+    validateDynamicFields,
+    applyProviderMapping,
+    FIELD_TYPES,
+    DYNAMIC_FIELD_TYPES,
+};

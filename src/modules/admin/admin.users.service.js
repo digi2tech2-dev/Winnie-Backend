@@ -10,6 +10,7 @@
  * writes that are inherently atomic.
  */
 
+const crypto = require('crypto');
 const { User, USER_STATUS, ROLES } = require('../users/user.model');
 const { NotFoundError, ConflictError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
@@ -28,6 +29,29 @@ const _findOrFail = async (id) => {
     return user;
 };
 
+const _normalizePermissions = (permissions) => {
+    if (permissions === undefined) return undefined;
+    if (!Array.isArray(permissions)) {
+        throw new BusinessRuleError('permissions must be an array of strings.', 'INVALID_PERMISSIONS');
+    }
+
+    return [...new Set(
+        permissions
+            .map((permission) => String(permission || '').trim())
+            .filter(Boolean)
+    )];
+};
+
+const _sanitizeUserSnapshot = (snapshot) => {
+    if (!snapshot || typeof snapshot !== 'object') return snapshot;
+    const sanitized = { ...snapshot };
+    delete sanitized.password;
+    delete sanitized.emailVerificationToken;
+    delete sanitized.emailVerificationExpires;
+    delete sanitized.apiToken;
+    return sanitized;
+};
+
 // ─── List ──────────────────────────────────────────────────────────────────────
 
 /**
@@ -37,7 +61,7 @@ const _findOrFail = async (id) => {
  * @param {string}  [opts.status]    - 'PENDING' | 'ACTIVE' | 'REJECTED'
  * @param {boolean} [opts.verified]  - filter by email verification flag
  * @param {string}  [opts.email]     - partial email search (case-insensitive)
- * @param {string}  [opts.role]      - 'ADMIN' | 'CUSTOMER'
+ * @param {string}  [opts.role]      - 'ADMIN' | 'SUPERVISOR' | 'CUSTOMER'
  * @param {Date}    [opts.from]      - createdAt >= from
  * @param {Date}    [opts.to]        - createdAt <= to
  * @param {number}  [opts.page]
@@ -104,6 +128,11 @@ const listUsers = async ({
     };
 };
 
+const listSupervisors = async (opts = {}) => listUsers({
+    ...opts,
+    role: ROLES.SUPERVISOR,
+});
+
 // ─── Get One ───────────────────────────────────────────────────────────────────
 
 const getUserById = async (id) => {
@@ -121,9 +150,9 @@ const getUserById = async (id) => {
  */
 const updateUser = async (id, data, adminId) => {
     const user = await _findOrFail(id);
-    const before = user.toObject();
+    const before = _sanitizeUserSnapshot(user.toObject());
 
-    const { name, email, groupId, status, verified } = data;
+    const { name, email, groupId, status, verified, permissions, isApiEnabled } = data;
 
     if (name !== undefined) user.name = name.trim();
     if (status !== undefined) {
@@ -138,6 +167,21 @@ const updateUser = async (id, data, adminId) => {
     }
     if (verified !== undefined) user.verified = verified;
     if (groupId !== undefined) user.groupId = groupId;
+    if (permissions !== undefined) {
+        if (user.role !== ROLES.SUPERVISOR) {
+            throw new BusinessRuleError('Only supervisors can be assigned permissions.', 'INVALID_PERMISSION_TARGET');
+        }
+        user.permissions = _normalizePermissions(permissions);
+    }
+    if (isApiEnabled !== undefined) {
+        user.isApiEnabled = isApiEnabled;
+        if (isApiEnabled === true) {
+            const hasApiToken = await User.exists({ _id: id, apiToken: { $nin: [null, ''] } });
+            if (!hasApiToken) {
+                user.apiToken = crypto.randomBytes(32).toString('hex');
+            }
+        }
+    }
 
     if (email !== undefined && email !== user.email) {
         const exists = await User.findOne({ email: email.toLowerCase(), _id: { $ne: id } });
@@ -153,7 +197,7 @@ const updateUser = async (id, data, adminId) => {
         action: ADMIN_ACTIONS.USER_UPDATED,
         entityType: ENTITY_TYPES.USER,
         entityId: user._id,
-        metadata: { before, after: user.toObject() },
+        metadata: { before, after: _sanitizeUserSnapshot(user.toObject()) },
     });
 
     return user;
@@ -255,17 +299,36 @@ const { approveUser, rejectUser } = require('../users/user.service');
  * Admin update of a user's role.
  * Guards: cannot demote yourself, cannot change a deleted user's role.
  */
-const updateUserRole = async (id, role, adminId) => {
+const updateUserRole = async (id, role, adminId, permissions) => {
     const user = await _findOrFail(id);
     if (user._id.toString() === adminId.toString()) {
         throw new BusinessRuleError('You cannot change your own role.', 'SELF_ROLE_CHANGE');
     }
+    if (user.deletedAt) {
+        throw new BusinessRuleError('Cannot change the role of a deleted user.', 'DELETED_USER_ROLE_CHANGE');
+    }
     if (!Object.values(ROLES).includes(role)) {
-        throw new BusinessRuleError(`Invalid role: '${role}'. Must be ADMIN or CUSTOMER.`, 'INVALID_ROLE');
+        throw new BusinessRuleError(
+            `Invalid role: '${role}'. Must be ADMIN, SUPERVISOR, or CUSTOMER.`,
+            'INVALID_ROLE'
+        );
+    }
+
+    const normalizedPermissions = _normalizePermissions(permissions);
+    if (role !== ROLES.SUPERVISOR && normalizedPermissions?.length) {
+        throw new BusinessRuleError('Only supervisors can be assigned permissions.', 'INVALID_PERMISSION_TARGET');
     }
 
     const previousRole = user.role;
+    const previousPermissions = [...(user.permissions || [])];
     user.role = role;
+    if (role === ROLES.SUPERVISOR) {
+        user.permissions = normalizedPermissions !== undefined
+            ? normalizedPermissions
+            : (previousRole === ROLES.SUPERVISOR ? previousPermissions : []);
+    } else {
+        user.permissions = [];
+    }
     await user.save();
 
     createAuditLog({
@@ -274,7 +337,41 @@ const updateUserRole = async (id, role, adminId) => {
         action: ADMIN_ACTIONS.USER_ROLE_CHANGED,
         entityType: ENTITY_TYPES.USER,
         entityId: user._id,
-        metadata: { previousRole, newRole: role },
+        metadata: {
+            previousRole,
+            newRole: role,
+            previousPermissions,
+            newPermissions: user.permissions,
+        },
+    });
+
+    return user;
+};
+
+const updateSupervisorPermissions = async (id, permissions, adminId) => {
+    const user = await _findOrFail(id);
+    if (user.deletedAt) {
+        throw new BusinessRuleError('Cannot update permissions for a deleted user.', 'DELETED_USER_PERMISSION_CHANGE');
+    }
+    if (user.role !== ROLES.SUPERVISOR) {
+        throw new BusinessRuleError('Only supervisors can be assigned permissions.', 'INVALID_PERMISSION_TARGET');
+    }
+
+    const previousPermissions = [...(user.permissions || [])];
+    user.permissions = _normalizePermissions(permissions) || [];
+    await user.save();
+
+    createAuditLog({
+        actorId: adminId,
+        actorRole: ACTOR_ROLES.ADMIN,
+        action: ADMIN_ACTIONS.USER_UPDATED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: {
+            field: 'permissions',
+            previousPermissions,
+            newPermissions: user.permissions,
+        },
     });
 
     return user;
@@ -427,6 +524,7 @@ const updateUserCreditLimit = async (id, creditLimit, adminId) => {
 
 module.exports = {
     listUsers,
+    listSupervisors,
     listDeletedUsers,
     getUserById,
     updateUser,
@@ -435,6 +533,7 @@ module.exports = {
     approveUser,
     rejectUser,
     updateUserRole,
+    updateSupervisorPermissions,
     updateUserCurrency,
     updateUserCreditLimit,
     resetUserPassword,

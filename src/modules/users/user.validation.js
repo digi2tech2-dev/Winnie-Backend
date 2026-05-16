@@ -23,6 +23,10 @@ const updateUserValidation = [
         .optional()
         .isFloat({ min: 0 }).withMessage('Credit limit must be a non-negative number'),
 
+    body('isApiEnabled')
+        .optional()
+        .isBoolean().withMessage('isApiEnabled must be a boolean'),
+
     body('isActive')
         .optional()
         .isBoolean().withMessage('isActive must be a boolean'),

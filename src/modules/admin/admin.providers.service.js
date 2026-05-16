@@ -12,6 +12,39 @@ const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+const { safeCreateAdminActorNotifications } = require('../notifications/notification.service');
+
+const extractProviderBalanceAmount = (balance) => {
+    if (typeof balance === 'number') {
+        return balance;
+    }
+
+    if (typeof balance === 'string') {
+        const parsed = Number(balance.replace(/[^\d.-]/g, ''));
+        return Number.isFinite(parsed) ? parsed : NaN;
+    }
+
+    if (balance && typeof balance === 'object') {
+        const candidateKeys = [
+            'balance',
+            'Balance',
+            'amount',
+            'Amount',
+            'credit',
+            'Credit',
+            'funds',
+            'Funds',
+        ];
+
+        for (const key of candidateKeys) {
+            if (balance[key] !== undefined && balance[key] !== null) {
+                return extractProviderBalanceAmount(balance[key]);
+            }
+        }
+    }
+
+    return NaN;
+};
 
 // ─── List ──────────────────────────────────────────────────────────────────────
 
@@ -130,6 +163,25 @@ const getProviderBalance = async (id) => {
 
     const adapter = getProviderAdapter(provider);
     const balance = await adapter.getBalance();
+
+    const balanceAmount = extractProviderBalanceAmount(balance);
+    if (Number.isFinite(balanceAmount) && balanceAmount < 10) {
+        void safeCreateAdminActorNotifications({
+            title: 'رصيد المورد منخفض',
+            message: `رصيد المورد ${provider.name} انخفض إلى ${balanceAmount}. يرجى شحن الرصيد.`,
+            type: 'admin',
+            priority: 'high',
+            route: `/admin/suppliers?providerId=${provider._id.toString()}`,
+            entityType: 'provider',
+            entityId: provider._id,
+            metadata: {
+                providerId: provider._id.toString(),
+                providerName: provider.name,
+                balance: balanceAmount,
+            },
+        });
+    }
+
     return { provider: provider.name, balance };
 };
 

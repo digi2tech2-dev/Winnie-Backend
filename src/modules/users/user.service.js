@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const { User, ROLES, USER_STATUS } = require('./user.model');
 const Group = require('../groups/group.model');
 const { NotFoundError, ConflictError, BusinessRuleError } = require('../../shared/errors/AppError');
@@ -165,7 +166,7 @@ const rejectUser = async (targetUserId, adminId, auditContext = null) => {
  * Activation lifecycle is intentionally handled via approveUser/rejectUser
  * so that all audit fields (approvedBy/At, rejectedBy/At) are always set correctly.
  */
-const updateUser = async (id, { groupId, creditLimit, name }) => {
+const updateUser = async (id, { groupId, creditLimit, name, isApiEnabled }) => {
     const user = await User.findById(id);
     if (!user) throw new NotFoundError('User');
 
@@ -189,6 +190,15 @@ const updateUser = async (id, { groupId, creditLimit, name }) => {
     }
 
     if (name !== undefined) user.name = name;
+    if (isApiEnabled !== undefined) {
+        user.isApiEnabled = isApiEnabled;
+        if (isApiEnabled === true) {
+            const hasApiToken = await User.exists({ _id: id, apiToken: { $nin: [null, ''] } });
+            if (!hasApiToken) {
+                user.apiToken = crypto.randomBytes(32).toString('hex');
+            }
+        }
+    }
 
     await user.save();
     return user.toSafeObject();
@@ -244,6 +254,20 @@ const updateMyAvatar = async (userId, avatar) => {
     return user.toSafeObject ? user.toSafeObject() : user.toObject();
 };
 
+const regenerateMyApiToken = async (userId) => {
+    const user = await User.findById(userId);
+    if (!user) throw new NotFoundError('User');
+
+    const apiToken = crypto.randomBytes(32).toString('hex');
+    user.apiToken = apiToken;
+    await user.save();
+
+    return {
+        apiToken,
+        user: user.toSafeObject ? user.toSafeObject() : user.toObject(),
+    };
+};
+
 module.exports = {
     listUsers,
     getUserById,
@@ -253,4 +277,5 @@ module.exports = {
     getMyProfile,
     updateMyProfile,
     updateMyAvatar,
+    regenerateMyApiToken,
 };

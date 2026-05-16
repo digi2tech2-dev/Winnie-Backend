@@ -22,7 +22,7 @@ const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
 const { User, ROLES, USER_STATUS } = require('../users/user.model');
 const { getHighestPercentageGroup } = require('../groups/group.service');
-const { sendVerificationEmail } = require('../../services/email.service');
+const { sendVerificationEmail, sendTwoFactorOtpEmail } = require('../../services/email.service');
 const {
     AuthenticationError,
     ConflictError,
@@ -31,6 +31,7 @@ const {
 } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { USER_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+const { safeCreateAdminActorNotifications } = require('../notifications/notification.service');
 
 // ─── Private Helpers ──────────────────────────────────────────────────────────
 
@@ -57,6 +58,128 @@ const _generateVerificationToken = () => {
 /** Hash an incoming raw token for DB lookup. */
 const _hashToken = (raw) =>
     crypto.createHash('sha256').update(raw).digest('hex');
+
+const TWO_FACTOR_PURPOSE = '2fa-pending';
+const TWO_FACTOR_TTL_MINUTES = 10;
+const TWO_FACTOR_TTL_MS = TWO_FACTOR_TTL_MINUTES * 60 * 1000;
+
+const signTwoFactorTempToken = (userId, role) =>
+    jwt.sign(
+        { id: userId, role, purpose: TWO_FACTOR_PURPOSE },
+        config.jwt.secret,
+        { expiresIn: `${TWO_FACTOR_TTL_MINUTES}m` }
+    );
+
+const hashSecret = (secret) =>
+    crypto.createHash('sha256').update(String(secret || '')).digest('hex');
+
+const generateOtp = () =>
+    String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+
+const timingSafeCompareHex = (left, right) => {
+    const leftValue = String(left || '');
+    const rightValue = String(right || '');
+    if (!leftValue || !rightValue || leftValue.length !== rightValue.length) {
+        return false;
+    }
+
+    try {
+        return crypto.timingSafeEqual(
+            Buffer.from(leftValue, 'hex'),
+            Buffer.from(rightValue, 'hex')
+        );
+    } catch {
+        return false;
+    }
+};
+
+const maskEmail = (email = '') => {
+    const [name, domain] = String(email || '').split('@');
+    if (!name || !domain) return email;
+    if (name.length <= 2) return `${name.slice(0, 1)}***@${domain}`;
+    return `${name.slice(0, 2)}***@${domain}`;
+};
+
+const clearTwoFactorChallenge = async (user) => {
+    user.twoFactorOtp = null;
+    user.twoFactorOtpExpires = null;
+    user.twoFactorTempToken = null;
+    user.twoFactorTempTokenExpires = null;
+    await user.save();
+    return user;
+};
+
+const issueTwoFactorChallenge = async (user) => {
+    const otp = generateOtp();
+    const tempToken = signTwoFactorTempToken(user._id, user.role);
+    const expiresAt = new Date(Date.now() + TWO_FACTOR_TTL_MS);
+
+    user.twoFactorOtp = hashSecret(otp);
+    user.twoFactorOtpExpires = expiresAt;
+    user.twoFactorTempToken = hashSecret(tempToken);
+    user.twoFactorTempTokenExpires = expiresAt;
+    await user.save();
+
+    await sendTwoFactorOtpEmail(user, otp, { expiresMinutes: TWO_FACTOR_TTL_MINUTES });
+
+    createAuditLog({
+        actorId: user._id,
+        actorRole: ACTOR_ROLES[user.role] ?? user.role,
+        action: USER_ACTIONS.TWO_FACTOR_CHALLENGE_ISSUED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: { email: user.email },
+    });
+
+    return {
+        tempToken,
+        requestId: tempToken,
+        email: user.email,
+        maskedEmail: maskEmail(user.email),
+        expiresIn: TWO_FACTOR_TTL_MS / 1000,
+    };
+};
+
+const verifyTwoFactorChallenge = (user, { otp, tempToken }) => {
+    if (!tempToken) {
+        throw new AuthenticationError('Two-factor verification token is required.');
+    }
+
+    let decoded;
+    try {
+        decoded = jwt.verify(tempToken, config.jwt.secret);
+    } catch {
+        throw new AuthenticationError('Two-factor verification has expired. Please log in again.');
+    }
+
+    if (
+        decoded.purpose !== TWO_FACTOR_PURPOSE ||
+        String(decoded.id) !== String(user._id)
+    ) {
+        throw new AuthenticationError('Invalid two-factor verification token.');
+    }
+
+    const challengeExpired = (
+        !user.twoFactorOtp ||
+        !user.twoFactorOtpExpires ||
+        user.twoFactorOtpExpires.getTime() <= Date.now() ||
+        !user.twoFactorTempToken ||
+        !user.twoFactorTempTokenExpires ||
+        user.twoFactorTempTokenExpires.getTime() <= Date.now()
+    );
+
+    if (challengeExpired) {
+        throw new BusinessRuleError('Two-factor code has expired. Request a new code.', 'OTP_EXPIRED');
+    }
+
+    if (!timingSafeCompareHex(user.twoFactorTempToken, hashSecret(tempToken))) {
+        throw new AuthenticationError('Invalid two-factor verification token.');
+    }
+
+    if (!timingSafeCompareHex(user.twoFactorOtp, hashSecret(otp))) {
+        throw new BusinessRuleError('Invalid two-factor code.', 'INVALID_OTP');
+    }
+};
 
 // ─── register ─────────────────────────────────────────────────────────────────
 
@@ -126,6 +249,24 @@ const register = async ({ name, email, password, currency, country, phone, usern
         console.error('[Auth] Failed to send verification email:', err.message);
     });
 
+    if (user.status === USER_STATUS.PENDING) {
+        void safeCreateAdminActorNotifications({
+            title: 'تسجيل مستخدم جديد',
+            message: 'قام مستخدم جديد بالتسجيل وبانتظار تفعيل حسابه.',
+            type: 'account',
+            priority: 'normal',
+            route: `/admin/users?userId=${user._id.toString()}`,
+            entityType: 'user',
+            entityId: user._id,
+            metadata: {
+                userId: user._id.toString(),
+                email: user.email,
+                name: user.name,
+                status: user.status,
+            },
+        });
+    }
+
     return {
         user: user.toSafeObject(),
         message:
@@ -147,7 +288,7 @@ const register = async ({ name, email, password, currency, country, phone, usern
  */
 const login = async ({ email, password }) => {
     const user = await User.findOne({ email: email.toLowerCase() })
-        .select('+password +verified');
+        .select('+password +verified +twoFactorOtp +twoFactorOtpExpires +twoFactorTempToken +twoFactorTempTokenExpires');
 
     if (!user) {
         throw new AuthenticationError('Invalid email or password.');
@@ -203,6 +344,18 @@ const login = async ({ email, password }) => {
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
         throw new AuthenticationError('Invalid email or password.');
+    }
+
+    if (user.isTwoFactorEnabled) {
+        const challenge = await issueTwoFactorChallenge(user);
+        return {
+            requires2FA: true,
+            tempToken: challenge.tempToken,
+            requestId: challenge.requestId,
+            email: challenge.email,
+            maskedEmail: challenge.maskedEmail,
+            expiresIn: challenge.expiresIn,
+        };
     }
 
     const token = signToken(user._id, user.role);
@@ -337,4 +490,130 @@ const loginWithGoogle = (user) => {
     return { token, user: user.toSafeObject() };
 };
 
-module.exports = { register, login, verifyEmail, resendVerification, loginWithGoogle };
+const generate2FASecret = async (userId) => {
+    const user = await User.findById(userId)
+        .select('+twoFactorOtp +twoFactorOtpExpires +twoFactorTempToken +twoFactorTempTokenExpires');
+    if (!user) throw new NotFoundError('User');
+
+    return issueTwoFactorChallenge(user);
+};
+
+const enable2FA = async ({ userId, otp, tempToken, requestId }) => {
+    const user = await User.findById(userId)
+        .select('+twoFactorOtp +twoFactorOtpExpires +twoFactorTempToken +twoFactorTempTokenExpires');
+    if (!user) throw new NotFoundError('User');
+
+    verifyTwoFactorChallenge(user, { otp, tempToken: tempToken || requestId });
+
+    user.isTwoFactorEnabled = true;
+    await clearTwoFactorChallenge(user);
+
+    createAuditLog({
+        actorId: user._id,
+        actorRole: ACTOR_ROLES[user.role] ?? user.role,
+        action: USER_ACTIONS.TWO_FACTOR_ENABLED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: { email: user.email },
+    });
+
+    return { user: user.toSafeObject(), twoFactorEnabled: true };
+};
+
+const disable2FA = async ({ userId, currentPassword }) => {
+    const user = await User.findById(userId)
+        .select('+password +twoFactorOtp +twoFactorOtpExpires +twoFactorTempToken +twoFactorTempTokenExpires');
+    if (!user) throw new NotFoundError('User');
+
+    if (!user.password) {
+        throw new BusinessRuleError('Password confirmation is not available for this account.', 'PASSWORD_NOT_AVAILABLE');
+    }
+
+    const isMatch = await user.comparePassword(currentPassword);
+    if (!isMatch) {
+        throw new AuthenticationError('Current password is incorrect.');
+    }
+
+    user.isTwoFactorEnabled = false;
+    await clearTwoFactorChallenge(user);
+
+    createAuditLog({
+        actorId: user._id,
+        actorRole: ACTOR_ROLES[user.role] ?? user.role,
+        action: USER_ACTIONS.TWO_FACTOR_DISABLED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: { email: user.email },
+    });
+
+    return { user: user.toSafeObject(), twoFactorEnabled: false };
+};
+
+const verify2FA = async ({ otp, tempToken, requestId }) => {
+    const tokenToVerify = tempToken || requestId;
+    if (!tokenToVerify) {
+        throw new AuthenticationError('Two-factor verification token is required.');
+    }
+
+    let decoded;
+    try {
+        decoded = jwt.verify(tokenToVerify, config.jwt.secret);
+    } catch {
+        throw new AuthenticationError('Two-factor verification has expired. Please log in again.');
+    }
+
+    if (decoded.purpose !== TWO_FACTOR_PURPOSE) {
+        throw new AuthenticationError('Invalid two-factor verification token.');
+    }
+
+    const user = await User.findById(decoded.id)
+        .select('+twoFactorOtp +twoFactorOtpExpires +twoFactorTempToken +twoFactorTempTokenExpires');
+    if (!user) throw new NotFoundError('User');
+
+    if (user.status !== USER_STATUS.ACTIVE) {
+        throw new AuthenticationError('Your account is not active. Contact an administrator.');
+    }
+
+    verifyTwoFactorChallenge(user, { otp, tempToken: tokenToVerify });
+    await clearTwoFactorChallenge(user);
+
+    const token = signToken(user._id, user.role);
+
+    createAuditLog({
+        actorId: user._id,
+        actorRole: ACTOR_ROLES[user.role] ?? user.role,
+        action: USER_ACTIONS.TWO_FACTOR_VERIFIED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: { email: user.email },
+    });
+
+    createAuditLog({
+        actorId: user._id,
+        actorRole: ACTOR_ROLES[user.role] ?? user.role,
+        action: USER_ACTIONS.LOGIN_SUCCESS,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: { email: user.email, twoFactor: true },
+    });
+
+    return { token, user: user.toSafeObject() };
+};
+
+module.exports = {
+    register,
+    login,
+    verifyEmail,
+    resendVerification,
+    loginWithGoogle,
+    generate2FASecret,
+    enable2FA,
+    disable2FA,
+    verify2FA,
+    signTwoFactorTempToken,
+    hashSecret,
+    generateOtp,
+    timingSafeCompareHex,
+    clearTwoFactorChallenge,
+    issueTwoFactorChallenge,
+};

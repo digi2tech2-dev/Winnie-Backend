@@ -36,6 +36,23 @@ const getUserById = catchAsync(async (req, res) => {
     sendSuccess(res, { user }, 'User retrieved');
 });
 
+// GET /admin/supervisors
+const listSupervisors = catchAsync(async (req, res) => {
+    const { status, verified, email, from, to, page, limit, sortBy, sortOrder } = req.query;
+    const result = await svc.listSupervisors({
+        status,
+        verified: verified !== undefined ? verified === 'true' : undefined,
+        email,
+        from,
+        to,
+        page: parseInt(page ?? 1, 10),
+        limit: parseInt(limit ?? 20, 10),
+        sortBy,
+        sortOrder,
+    });
+    sendPaginated(res, result.users, result.pagination, 'Supervisors retrieved');
+});
+
 // PATCH /admin/users/:id
 const updateUser = catchAsync(async (req, res) => {
     const user = await svc.updateUser(req.params.id, req.body, req.user._id);
@@ -78,8 +95,23 @@ const rejectUser = catchAsync(async (req, res) => {
 
 // PATCH /admin/users/:id/role
 const updateUserRole = catchAsync(async (req, res) => {
-    const user = await svc.updateUserRole(req.params.id, req.body.role, req.user._id);
+    const user = await svc.updateUserRole(
+        req.params.id,
+        req.body.role,
+        req.user._id,
+        req.body.permissions
+    );
     sendSuccess(res, { user }, 'User role updated');
+});
+
+// PATCH /admin/supervisors/:id/permissions
+const updateSupervisorPermissions = catchAsync(async (req, res) => {
+    const user = await svc.updateSupervisorPermissions(
+        req.params.id,
+        req.body.permissions,
+        req.user._id
+    );
+    sendSuccess(res, { user }, 'Supervisor permissions updated');
 });
 
 // PATCH /admin/users/:id/currency
@@ -109,6 +141,7 @@ const updateUserCreditLimit = catchAsync(async (req, res) => {
 
 module.exports = {
     listUsers,
+    listSupervisors,
     listDeletedUsers,
     getUserById,
     updateUser,
@@ -117,6 +150,7 @@ module.exports = {
     approveUser,
     rejectUser,
     updateUserRole,
+    updateSupervisorPermissions,
     updateUserCurrency,
     updateUserCreditLimit,
     resetUserPassword,
