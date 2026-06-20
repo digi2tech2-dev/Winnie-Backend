@@ -241,10 +241,13 @@ const getProducts = catchAsync(async (req, res) => {
     // ── 3. Apply pipeline: Base → Markup → Currency ───────────────────────────
     const converted = products.map((p) => {
         const markedUpUSD = calculateFinalPrice(p.basePrice, markupPercentage);
+        const localDisplayPrice = usdToLocal(markedUpUSD, rate);
         return {
             ...p,
+            finalPrice: markedUpUSD,
+            sellingPrice: markedUpUSD,
             markedUpPriceUSD: markedUpUSD,
-            displayPrice: usdToLocal(markedUpUSD, rate),
+            displayPrice: localDisplayPrice,
             displayCurrency: userCurrency,
         };
     });
@@ -281,11 +284,14 @@ const getProduct = catchAsync(async (req, res) => {
 
     // ── 3. Pipeline: Base → Markup → Currency ─────────────────────────────────
     const markedUpUSD = calculateFinalPrice(product.basePrice, markupPercentage);
+    const localDisplayPrice = usdToLocal(markedUpUSD, rate);
 
     sendSuccess(res, sanitizePricingForSupervisor({
         ...product,
+        finalPrice: markedUpUSD,
+        sellingPrice: markedUpUSD,
         markedUpPriceUSD: markedUpUSD,
-        displayPrice: usdToLocal(markedUpUSD, rate),
+        displayPrice: localDisplayPrice,
         displayCurrency: userCurrency,
     }, req.user));
 });
