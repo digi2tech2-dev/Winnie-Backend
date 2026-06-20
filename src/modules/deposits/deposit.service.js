@@ -8,6 +8,10 @@ const {
     safeCreateNotification,
     safeCreateAdminActorNotifications,
 } = require('../notifications/notification.service');
+const {
+    notifyDepositApproved,
+    notifyDepositRejected,
+} = require('../notifications/notification.events');
 // convertUsdToUserCurrency removed — deposits now credit requestedAmount directly
 const {
     NotFoundError,
@@ -114,6 +118,8 @@ const createDepositRequest = async ({
         entityType: 'topup',
         entityId: deposit._id,
         metadata: {
+            eventKey: `user:${userId.toString()}:topup:${deposit._id.toString()}:requested`,
+            eventType: 'topup_requested',
             depositId: deposit._id.toString(),
             requestedAmount: deposit.requestedAmount,
             currency: deposit.currency,
@@ -125,6 +131,7 @@ const createDepositRequest = async ({
     void safeCreateAdminActorNotifications({
         roles: ['ADMIN', 'SUPERVISOR'],
         permissions: ['topups.review'],
+        permissionMode: 'any',
         title: 'طلب شحن رصيد جديد',
         message: `هناك طلب شحن رصيد جديد بمبلغ ${deposit.requestedAmount} ${deposit.currency} في انتظار المراجعة.`,
         type: 'deposit',
@@ -133,6 +140,8 @@ const createDepositRequest = async ({
         entityType: 'topup',
         entityId: deposit._id,
         metadata: {
+            eventKey: `topup:${deposit._id.toString()}:requested`,
+            eventType: 'topup_requested',
             depositId: deposit._id.toString(),
             userId: userId.toString(),
             requestedAmount: deposit.requestedAmount,
@@ -311,6 +320,11 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
         .populate('userId', 'name email avatar currency walletBalance')
         .populate('reviewedBy', 'name email');
 
+    notifyDepositApproved(populated || updated, {
+        walletCreditAmount,
+        walletCurrency,
+    });
+
     return populated;
 };
 
@@ -374,6 +388,8 @@ const rejectDeposit = async (depositId, adminId, adminNotes = null, auditContext
         ipAddress: auditContext?.ipAddress ?? null,
         userAgent: auditContext?.userAgent ?? null,
     });
+
+    notifyDepositRejected(deposit);
 
     return deposit;
 };

@@ -9,11 +9,12 @@
  * instances (no replica set required).
  */
 
-const { User } = require('../users/user.model');
+const { User, ROLES } = require('../users/user.model');
 const { WalletTransaction, TRANSACTION_TYPES } = require('../wallet/walletTransaction.model');
-const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
+const { NotFoundError, BusinessRuleError, AuthorizationError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+const { notifyManualWalletAdjustment } = require('../notifications/notification.events');
 
 const MAX_ADJUSTMENT = 100_000;  // guard against fat-finger typos
 
@@ -26,6 +27,67 @@ const safeRound = (value, decimals = 2) => {
     const factor = Math.pow(10, decimals);
     return Math.round(value * factor) / factor;
 };
+
+function normalizeActorRole(role) {
+    const normalized = String(role || ACTOR_ROLES.ADMIN).toUpperCase();
+    return ACTOR_ROLES[normalized] || normalized;
+}
+
+function normalizeActorContext(actorContext) {
+    const isContextObject = actorContext && typeof actorContext === 'object' && (
+        Object.prototype.hasOwnProperty.call(actorContext, 'actorId') ||
+        Object.prototype.hasOwnProperty.call(actorContext, 'actorRole') ||
+        Object.prototype.hasOwnProperty.call(actorContext, 'role') ||
+        Object.prototype.hasOwnProperty.call(actorContext, 'ipAddress') ||
+        Object.prototype.hasOwnProperty.call(actorContext, 'userAgent')
+    );
+
+    if (!isContextObject) {
+        return {
+            actorId: actorContext || null,
+            actorRole: ACTOR_ROLES.ADMIN,
+            ipAddress: null,
+            userAgent: null,
+        };
+    }
+
+    return {
+        actorId: actorContext.actorId || actorContext._id || actorContext.id || actorContext.userId || null,
+        actorRole: normalizeActorRole(actorContext.actorRole || actorContext.role),
+        ipAddress: actorContext.ipAddress || null,
+        userAgent: actorContext.userAgent || null,
+    };
+}
+
+function isSameId(left, right) {
+    return String(left || '') === String(right || '');
+}
+
+function isSupervisorActor(actor) {
+    return actor.actorRole === ACTOR_ROLES.SUPERVISOR || actor.actorRole === ROLES.SUPERVISOR;
+}
+
+function assertSupervisorWalletAccess({ actor, targetUser, operation }) {
+    if (!isSupervisorActor(actor)) return;
+
+    if (operation !== 'ADD') {
+        throw new AuthorizationError('Supervisors can only add balance to customer wallets.');
+    }
+
+    if (isSameId(actor.actorId, targetUser?._id)) {
+        throw new AuthorizationError('Supervisors cannot adjust their own wallet balance.');
+    }
+
+    if (targetUser?.role !== ROLES.CUSTOMER) {
+        throw new AuthorizationError('Supervisors can only add balance to customer wallets.');
+    }
+}
+
+function assertAdminOnlyWalletOperation(actor, operationLabel) {
+    if (isSupervisorActor(actor)) {
+        throw new AuthorizationError(`${operationLabel} is restricted to admins.`);
+    }
+}
 
 // ─── List wallets (summary of all users) ─────────────────────────────────────
 
@@ -95,7 +157,8 @@ const getTransactionHistory = async (userId, { page = 1, limit = 20 } = {}) => {
  *
  * No MongoDB transactions — uses atomic findOneAndUpdate + sequential create.
  */
-const addFunds = async (userId, amount, reason, adminId) => {
+const addFunds = async (userId, amount, reason, actorContext) => {
+    const actor = normalizeActorContext(actorContext);
     const parsedAmount = safeRound(Number(amount));
 
     if (parsedAmount <= 0 || parsedAmount > MAX_ADJUSTMENT) {
@@ -108,6 +171,7 @@ const addFunds = async (userId, amount, reason, adminId) => {
     // Fetch user first to compute credit repayment
     const user = await User.findById(userId);
     if (!user) throw new NotFoundError('User');
+    assertSupervisorWalletAccess({ actor, targetUser: user, operation: 'ADD' });
 
     const userCurrency = user.currency || 'USD';
     const balanceBefore = safeRound(user.walletBalance || 0);
@@ -145,8 +209,8 @@ const addFunds = async (userId, amount, reason, adminId) => {
 
     // Audit (fire-and-forget)
     createAuditLog({
-        actorId: adminId,
-        actorRole: ACTOR_ROLES.ADMIN,
+        actorId: actor.actorId,
+        actorRole: actor.actorRole,
         action: ADMIN_ACTIONS.WALLET_ADJUSTED,
         entityType: ENTITY_TYPES.WALLET,
         entityId: userId,
@@ -161,6 +225,19 @@ const addFunds = async (userId, amount, reason, adminId) => {
             creditRepaid,
             transactionId: transaction._id,
         },
+        ipAddress: actor.ipAddress,
+        userAgent: actor.userAgent,
+    });
+
+    notifyManualWalletAdjustment({
+        userId,
+        operation: 'ADD',
+        amount: parsedAmount,
+        currency: userCurrency,
+        transactionId: transaction._id,
+        balanceBefore,
+        balanceAfter,
+        actorRole: actor.actorRole,
     });
 
     return { transaction };
@@ -177,7 +254,8 @@ const addFunds = async (userId, amount, reason, adminId) => {
  *   Deduction allowed only if: amount <= available
  *   newBalance = walletBalance - amount (can go negative up to -creditLimit)
  */
-const deductFunds = async (userId, amount, reason, adminId) => {
+const deductFunds = async (userId, amount, reason, actorContext) => {
+    const actor = normalizeActorContext(actorContext);
     const parsedAmount = safeRound(Number(amount));
 
     if (parsedAmount <= 0 || parsedAmount > MAX_ADJUSTMENT) {
@@ -190,6 +268,7 @@ const deductFunds = async (userId, amount, reason, adminId) => {
     // Fetch user to check credit limit
     const user = await User.findById(userId);
     if (!user) throw new NotFoundError('User');
+    assertAdminOnlyWalletOperation(actor, 'Wallet deduction');
 
     const userCurrency = user.currency || 'USD';
     const balanceBefore = safeRound(user.walletBalance || 0);
@@ -239,8 +318,8 @@ const deductFunds = async (userId, amount, reason, adminId) => {
 
     // Audit (fire-and-forget)
     createAuditLog({
-        actorId: adminId,
-        actorRole: ACTOR_ROLES.ADMIN,
+        actorId: actor.actorId,
+        actorRole: actor.actorRole,
         action: ADMIN_ACTIONS.WALLET_ADJUSTED,
         entityType: ENTITY_TYPES.WALLET,
         entityId: userId,
@@ -257,6 +336,19 @@ const deductFunds = async (userId, amount, reason, adminId) => {
             creditUsedAfter,
             transactionId: transaction._id,
         },
+        ipAddress: actor.ipAddress,
+        userAgent: actor.userAgent,
+    });
+
+    notifyManualWalletAdjustment({
+        userId,
+        operation: 'DEDUCT',
+        amount: parsedAmount,
+        currency: userCurrency,
+        transactionId: transaction._id,
+        balanceBefore,
+        balanceAfter,
+        actorRole: actor.actorRole,
     });
 
     return { transaction };
@@ -271,7 +363,8 @@ const deductFunds = async (userId, amount, reason, adminId) => {
  * The amount parameter IS the desired new balance (can be negative).
  * Credit usage is recalculated based on the new balance.
  */
-const setBalance = async (userId, targetBalance, reason, adminId) => {
+const setBalance = async (userId, targetBalance, reason, actorContext) => {
+    const actor = normalizeActorContext(actorContext);
     const newBalance = safeRound(Number(targetBalance));
 
     if (!Number.isFinite(newBalance)) {
@@ -287,6 +380,7 @@ const setBalance = async (userId, targetBalance, reason, adminId) => {
 
     const user = await User.findById(userId);
     if (!user) throw new NotFoundError('User');
+    assertAdminOnlyWalletOperation(actor, 'Setting exact wallet balance');
 
     const userCurrency = user.currency || 'USD';
     const balanceBefore = safeRound(user.walletBalance || 0);
@@ -324,8 +418,8 @@ const setBalance = async (userId, targetBalance, reason, adminId) => {
 
     // Audit (fire-and-forget)
     createAuditLog({
-        actorId: adminId,
-        actorRole: ACTOR_ROLES.ADMIN,
+        actorId: actor.actorId,
+        actorRole: actor.actorRole,
         action: ADMIN_ACTIONS.WALLET_ADJUSTED,
         entityType: ENTITY_TYPES.WALLET,
         entityId: userId,
@@ -341,6 +435,19 @@ const setBalance = async (userId, targetBalance, reason, adminId) => {
             creditUsedAfter,
             transactionId: transaction._id,
         },
+        ipAddress: actor.ipAddress,
+        userAgent: actor.userAgent,
+    });
+
+    notifyManualWalletAdjustment({
+        userId,
+        operation: 'SET',
+        amount: newBalance,
+        currency: userCurrency,
+        transactionId: transaction._id,
+        balanceBefore,
+        balanceAfter: newBalance,
+        actorRole: actor.actorRole,
     });
 
     return { transaction, user: { walletBalance: newBalance, creditUsed: creditUsedAfter } };
@@ -364,7 +471,10 @@ const setBalance = async (userId, targetBalance, reason, adminId) => {
  * @param {string}          [currencyCode] - ISO 4217 code to filter users by (e.g. 'EGP')
  * @returns {{ usersAdjusted, totalAdjustment, totalUsersInDebt, errors }}
  */
-const adjustNegativeBalancesForInflation = async (percentageIncrease, adminId, currencyCode = null) => {
+const adjustNegativeBalancesForInflation = async (percentageIncrease, actorContext, currencyCode = null) => {
+    const actor = normalizeActorContext(actorContext);
+    assertAdminOnlyWalletOperation(actor, 'Debt adjustment');
+
     if (percentageIncrease <= 0 || percentageIncrease > 100) {
         throw new BusinessRuleError(
             'Percentage must be between 0.01 and 100.',
@@ -438,8 +548,8 @@ const adjustNegativeBalancesForInflation = async (percentageIncrease, adminId, c
 
     // Single audit log for the bulk operation
     createAuditLog({
-        actorId: adminId,
-        actorRole: ACTOR_ROLES.ADMIN,
+        actorId: actor.actorId,
+        actorRole: actor.actorRole,
         action: ADMIN_ACTIONS.DEBT_ADJUSTED,
         entityType: ENTITY_TYPES.WALLET,
         entityId: null,
@@ -451,6 +561,8 @@ const adjustNegativeBalancesForInflation = async (percentageIncrease, adminId, c
             totalUsersInDebt: usersInDebt.length,
             errors: errors.length > 0 ? errors : undefined,
         },
+        ipAddress: actor.ipAddress,
+        userAgent: actor.userAgent,
     });
     return { usersAdjusted, totalAdjustment, totalUsersInDebt: usersInDebt.length, errors };
 };
@@ -473,7 +585,10 @@ const adjustNegativeBalancesForInflation = async (percentageIncrease, adminId, c
  * @param {string}          [currencyCode] - ISO 4217 code to filter users by
  * @returns {{ usersAdjusted, totalAdjustment, totalUsersInDebt, errors }}
  */
-const adjustNegativeBalancesForDeflation = async (percentageDecrease, adminId, currencyCode = null) => {
+const adjustNegativeBalancesForDeflation = async (percentageDecrease, actorContext, currencyCode = null) => {
+    const actor = normalizeActorContext(actorContext);
+    assertAdminOnlyWalletOperation(actor, 'Debt adjustment');
+
     if (percentageDecrease <= 0 || percentageDecrease > 100) {
         throw new BusinessRuleError(
             'Percentage must be between 0.01 and 100.',
@@ -545,8 +660,8 @@ const adjustNegativeBalancesForDeflation = async (percentageDecrease, adminId, c
 
     // Single audit log for the bulk operation
     createAuditLog({
-        actorId: adminId,
-        actorRole: ACTOR_ROLES.ADMIN,
+        actorId: actor.actorId,
+        actorRole: actor.actorRole,
         action: ADMIN_ACTIONS.DEBT_ADJUSTED,
         entityType: ENTITY_TYPES.WALLET,
         entityId: null,
@@ -558,6 +673,8 @@ const adjustNegativeBalancesForDeflation = async (percentageDecrease, adminId, c
             totalUsersInDebt: usersInDebt.length,
             errors: errors.length > 0 ? errors : undefined,
         },
+        ipAddress: actor.ipAddress,
+        userAgent: actor.userAgent,
     });
 
     return { usersAdjusted, totalAdjustment, totalUsersInDebt: usersInDebt.length, errors };

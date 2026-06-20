@@ -15,6 +15,7 @@ const productService = require('../products/product.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { NotFoundError } = require('../../shared/errors/AppError');
+const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -136,7 +137,7 @@ const getOrders = catchAsync(async (req, res) => {
         Order.countDocuments(filter),
     ]);
 
-    sendPaginated(res, orders, { page, limit, total, pages: Math.ceil(total / limit) }, 'Orders retrieved.');
+    sendPaginated(res, sanitizePricingForSupervisor(orders, req.user), { page, limit, total, pages: Math.ceil(total / limit) }, 'Orders retrieved.');
 });
 
 /**
@@ -144,7 +145,7 @@ const getOrders = catchAsync(async (req, res) => {
  */
 const getOrder = catchAsync(async (req, res) => {
     const order = await orderService.getOrderById(req.params.id, req.user._id);
-    sendSuccess(res, order);
+    sendSuccess(res, sanitizePricingForSupervisor(order, req.user));
 });
 
 // =============================================================================
@@ -182,9 +183,9 @@ const placeOrder = catchAsync(async (req, res) => {
     });
 
     if (idempotent) {
-        return sendSuccess(res, order, 'Order already exists (idempotent response).');
+        return sendSuccess(res, sanitizePricingForSupervisor(order, req.user), 'Order already exists (idempotent response).');
     }
-    sendCreated(res, order, 'Order placed successfully.');
+    sendCreated(res, sanitizePricingForSupervisor(order, req.user), 'Order placed successfully.');
 });
 
 // =============================================================================
@@ -248,7 +249,7 @@ const getProducts = catchAsync(async (req, res) => {
         };
     });
 
-    sendPaginated(res, converted, { page, limit, total, pages: Math.ceil(total / limit) }, 'Products retrieved.');
+    sendPaginated(res, sanitizePricingForSupervisor(converted, req.user), { page, limit, total, pages: Math.ceil(total / limit) }, 'Products retrieved.');
 });
 
 /**
@@ -281,12 +282,12 @@ const getProduct = catchAsync(async (req, res) => {
     // ── 3. Pipeline: Base → Markup → Currency ─────────────────────────────────
     const markedUpUSD = calculateFinalPrice(product.basePrice, markupPercentage);
 
-    sendSuccess(res, {
+    sendSuccess(res, sanitizePricingForSupervisor({
         ...product,
         markedUpPriceUSD: markedUpUSD,
         displayPrice: usdToLocal(markedUpUSD, rate),
         displayCurrency: userCurrency,
-    });
+    }, req.user));
 });
 
 // =============================================================================

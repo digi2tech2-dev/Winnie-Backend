@@ -24,13 +24,18 @@ const {
 } = require('../audit/audit.constants');
 const { convertUsdToUserCurrency } = require('../../services/currencyConverter.service');
 const { User } = require('../users/user.model');
-const { safeCreateAdminActorNotifications } = require('../notifications/notification.service');
+const {
+    notifyOrderCompleted,
+    notifyOrderCreated,
+    notifyOrderFailed,
+    notifyOrderRefunded,
+} = require('../notifications/notification.events');
 const { getLivePrice, invalidate: invalidatePriceCache } = require('../providers/providerPriceCache');
 const { toDecimal, toStr, toFiat, multiply, subtract, add, isPositive, compare } = require('../../shared/utils/decimalPrecision');
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // JIT PRICE AUTO-UPDATE HELPER
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Fire-and-forget: update the product's providerPrice, basePrice, and
@@ -39,7 +44,7 @@ const { toDecimal, toStr, toFiat, multiply, subtract, add, isPositive, compare }
  * Uses the same formula as the sync engine (providerProductSync.service.js)
  * so prices remain consistent.
  *
- * Runs OUTSIDE any transaction — it is OK if this fails; the next sync
+ * Runs OUTSIDE any transaction â€” it is OK if this fails; the next sync
  * cycle will correct it anyway. The important thing is that the ORDER
  * was already aborted.
  *
@@ -50,7 +55,7 @@ const { toDecimal, toStr, toFiat, multiply, subtract, add, isPositive, compare }
  * @private
  */
 const _autoUpdateProductPrice = (productId, newProviderPrice, markupType, markupValue) => {
-    // Intentionally NOT awaited — fire-and-forget
+    // Intentionally NOT awaited â€” fire-and-forget
     (async () => {
         try {
             const safeProviderPrice = String(newProviderPrice);
@@ -65,15 +70,15 @@ const _autoUpdateProductPrice = (productId, newProviderPrice, markupType, markup
                 },
             });
         } catch (err) {
-            // Swallow — the sync engine will correct this on its next run.
+            // Swallow â€” the sync engine will correct this on its next run.
             // A failed auto-update must never crash the process.
         }
     })();
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // CREATE ORDER
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Create a new order with full financial safety.
@@ -103,11 +108,11 @@ const createOrder = async ({
     quantity,
     idempotencyKey = null,
     auditContext = null,
-    orderFieldsValues = null,   // ← new param
-    provider = null,   // ← injected; null = auto-resolve from factory
+    orderFieldsValues = null,   // â† new param
+    provider = null,   // â† injected; null = auto-resolve from factory
     customerInput = null,
 }) => {
-    // ── Pre-transaction: Idempotency Check ───────────────────────────────────
+    // â”€â”€ Pre-transaction: Idempotency Check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (idempotencyKey) {
         const existing = await Order.findOne({ userId, idempotencyKey })
             .populate('productId', 'name basePrice executionType providerProduct');
@@ -116,7 +121,7 @@ const createOrder = async ({
         }
     }
 
-    // ── Auto-resolve provider adapter (production flow) ──────────────────────
+    // â”€â”€ Auto-resolve provider adapter (production flow) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // If no adapter was injected (i.e. called from HTTP controller), resolve
     // the adapter from the factory using the product's linked Provider doc.
     // Tests always inject their own mock, so this branch is never reached
@@ -124,7 +129,7 @@ const createOrder = async ({
     let resolvedProvider = provider;
 
     // providerCode is the canonical slug/name snapshot written to the Order.
-    // The cron uses this field — NOT the product — so a later admin provider
+    // The cron uses this field â€” NOT the product â€” so a later admin provider
     // swap cannot corrupt in-flight PROCESSING orders.
     let providerCode = null;
 
@@ -141,9 +146,9 @@ const createOrder = async ({
                     ? prod.provider
                     : await Provider.findById(prod.provider);
 
-                // ── Snapshot the provider code UNCONDITIONALLY ──────────────
+                // â”€â”€ Snapshot the provider code UNCONDITIONALLY â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 // providerCode must be captured even when the provider is
-                // inactive — the code identifies which provider the order
+                // inactive â€” the code identifies which provider the order
                 // belongs to for admin review / DLQ.  The adapter is only
                 // obtained when the provider is active.
                 if (providerDoc) {
@@ -154,13 +159,13 @@ const createOrder = async ({
                 if (providerDoc?.isActive) {
                     resolvedProvider = getProviderAdapter(providerDoc);
                 } else {
-                    console.warn(`[Order] Provider ${prod.provider._id} is INACTIVE — fulfillment will self-resolve.`);
+                    console.warn(`[Order] Provider ${prod.provider._id} is INACTIVE â€” fulfillment will self-resolve.`);
                 }
             }
         } catch (resolveErr) {
-            // Log instead of silently swallowing — critical for debugging
+            // Log instead of silently swallowing â€” critical for debugging
             console.error(`[Order] Provider resolution failed for product ${productId}:`, resolveErr.message);
-            // resolvedProvider stays null — executeOrder will self-resolve
+            // resolvedProvider stays null â€” executeOrder will self-resolve
             // providerCode may have been set before the error; if not, the
             // fallback inside _attemptCreateOrder will try again.
         }
@@ -181,7 +186,7 @@ const createOrder = async ({
 };
 
 /**
- * Internal helper — executes the transactional order creation.
+ * Internal helper â€” executes the transactional order creation.
  * Retried once on WriteConflict (code 112) or lock timeout (code 24).
  * @private
  */
@@ -202,7 +207,7 @@ const _attemptCreateOrder = async (
 
     const session = await mongoose.startSession();
 
-    // ── 0. Assign sequential order number (OUTSIDE txn) ──────────────────
+    // â”€â”€ 0. Assign sequential order number (OUTSIDE txn) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Auto-increment counters are intentionally non-transactional (same as
     // PostgreSQL sequences / MySQL AUTO_INCREMENT). A wasted number on
     // abort is acceptable. Running inside snapshot-isolation would fail
@@ -215,14 +220,14 @@ const _attemptCreateOrder = async (
             writeConcern: { w: 'majority' },
         });
 
-        // ── 1. Load & Validate Product ─────────────────────────────────────────
+        // â”€â”€ 1. Load & Validate Product â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const product = await Product.findById(productId).session(session);
         if (!product) throw new NotFoundError('Product');
         if (!product.isActive) {
             throw new BusinessRuleError('This product is currently unavailable.', 'PRODUCT_INACTIVE');
         }
 
-        // ── 2. Validate Quantity Bounds ────────────────────────────────────────
+        // â”€â”€ 2. Validate Quantity Bounds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const qty = parseInt(quantity, 10);
         if (qty < product.minQty || qty > product.maxQty) {
             throw new BusinessRuleError(
@@ -231,7 +236,7 @@ const _attemptCreateOrder = async (
             );
         }
 
-        // ── 2b. Validate / capture dynamic order fields ─────────────────────────
+        // â”€â”€ 2b. Validate / capture dynamic order fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Runs BEFORE any financial mutation so a bad field value costs nothing.
         //
         // If the product defines formal orderFields, validate against them.
@@ -246,12 +251,12 @@ const _attemptCreateOrder = async (
             );
             customerInput = { values, fieldsSnapshot };
         } else if (!customerInput && orderFieldsValues && typeof orderFieldsValues === 'object' && Object.keys(orderFieldsValues).length > 0) {
-            // No formal schema — save raw values so the fulfillment engine
+            // No formal schema â€” save raw values so the fulfillment engine
             // can forward them to the provider (e.g. { link: '...' }).
             customerInput = { values: orderFieldsValues, fieldsSnapshot: [] };
         }
 
-        // ── 2c. JIT Provider Price Verification ────────────────────────────────
+        // â”€â”€ 2c. JIT Provider Price Verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         //
         // If this product is linked to a provider, verify the provider's live
         // price hasn't increased since the last catalog sync.  This prevents
@@ -281,7 +286,7 @@ const _attemptCreateOrder = async (
                     if (livePrice !== null && product.providerPrice != null) {
                         // Use decimal.js for lossless comparison (prices are 50dp strings)
                         if (compare(String(livePrice), String(product.providerPrice)) > 0) {
-                            // ── Price increased — abort order, auto-update DB ──
+                            // â”€â”€ Price increased â€” abort order, auto-update DB â”€â”€
                             _autoUpdateProductPrice(product._id, livePrice, product.markupType, product.markupValue);
                             invalidatePriceCache(String(product.provider));
 
@@ -298,29 +303,29 @@ const _attemptCreateOrder = async (
                 // Re-throw our own BusinessRuleError (price increase abort)
                 if (jitErr.code === 'PROVIDER_PRICE_INCREASED') throw jitErr;
                 // Swallow all other errors (API timeout, network failure, etc.)
-                // — proceed with the cached DB price rather than blocking the order.
+                // â€” proceed with the cached DB price rather than blocking the order.
             }
         }
 
-        // ── 3. Pricing Engine (USD) ────────────────────────────────────────────
+        // â”€â”€ 3. Pricing Engine (USD) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const pricing = await calculateUserPrice(userId, product.basePrice, session);
         const usdTotalPrice = multiply(pricing.finalPrice, String(qty));
 
-        // ── 3a. Profit Calculation (USD) ────────────────────────────────────────
-        // Profit = markup portion only = (markedUpPrice - basePrice) × quantity
+        // â”€â”€ 3a. Profit Calculation (USD) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // Profit = markup portion only = (markedUpPrice - basePrice) Ã— quantity
         const profitUsd = multiply(subtract(pricing.finalPrice, pricing.basePrice), String(qty));
 
-        // ── 3b. Currency Conversion ────────────────────────────────────────────
+        // â”€â”€ 3b. Currency Conversion â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Fetch the user's preferred currency (within the session for consistency).
         // For USD users this is a no-op (rate = 1, finalAmount = usdTotalPrice).
         const userDoc = await User.findById(userId).select('currency').session(session);
         const userCurrency = userDoc?.currency ?? 'USD';
         const conversion = await convertUsdToUserCurrency(Number(toDecimal(usdTotalPrice).toNumber()), userCurrency);
-        // ── FINAL ROUNDING — only place we round to 2dp ────────────────────
+        // â”€â”€ FINAL ROUNDING â€” only place we round to 2dp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const chargedAmount = toFiat(conversion.finalAmount);
         const rateSnapshot = conversion.rate;
 
-        // ── 3c. FINAL PRICE GUARD ──────────────────────────────────────────────
+        // â”€â”€ 3c. FINAL PRICE GUARD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Prevent NaN / Infinity / zero from reaching the wallet debit.
         if (!Number.isFinite(chargedAmount) || chargedAmount <= 0) {
             throw new BusinessRuleError(
@@ -334,18 +339,18 @@ const _attemptCreateOrder = async (
 
         const orderId = new mongoose.Types.ObjectId();
 
-        // ── 4. Atomic Debit (in user currency) ────────────────────────────────
+        // â”€â”€ 4. Atomic Debit (in user currency) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const { walletDeducted, creditUsedAmount } = await debitWalletAtomic({
             userId,
-            amount: chargedAmount,     // ← wallet always in user currency
+            amount: chargedAmount,     // â† wallet always in user currency
             reference: orderId,
             description: `Payment for: ${product.name} x${qty}`,
             session,
         });
 
-        // ── 5. Determine initial status & execution type ───────────────────────
-        // An AUTOMATIC product → PROCESSING (fulfillment attempted post-commit)
-        // Any other case        → PENDING   (admin handles manually)
+        // â”€â”€ 5. Determine initial status & execution type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // An AUTOMATIC product â†’ PROCESSING (fulfillment attempted post-commit)
+        // Any other case        â†’ PENDING   (admin handles manually)
         const isAutomatic = product.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC;
         const isManualOrder = (
             product.executionType === ORDER_EXECUTION_TYPES.MANUAL ||
@@ -354,7 +359,7 @@ const _attemptCreateOrder = async (
         );
         const initialStatus = isAutomatic ? ORDER_STATUS.PROCESSING : ORDER_STATUS.PENDING;
 
-        // ── 6. Create Order ────────────────────────────────────────────────────
+        // â”€â”€ 6. Create Order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const orderData = {
             _id: orderId,
             userId,
@@ -367,15 +372,15 @@ const _attemptCreateOrder = async (
             groupIdSnapshot: pricing.groupId,
             profitUsd: profitUsd,
             unitPrice: pricing.finalPrice,
-            totalPrice: String(chargedAmount),   // legacy field — now equals chargedAmount
+            totalPrice: String(chargedAmount),   // legacy field â€” now equals chargedAmount
             walletDeducted,
             creditUsedAmount,
             status: initialStatus,
             executionType: product.executionType,
             customerInput,
-            // ── Provider code snapshot (immutable — cron uses this, not product.provider) ──
+            // â”€â”€ Provider code snapshot (immutable â€” cron uses this, not product.provider) â”€â”€
             providerCode: providerCode ?? null,
-            // ── Currency snapshot ────────────────────────────────────────────
+            // â”€â”€ Currency snapshot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             currency: userCurrency,
             rateSnapshot,
             usdAmount: usdTotalPrice,
@@ -397,12 +402,12 @@ const _attemptCreateOrder = async (
             throw createErr;
         }
 
-        // ── 8. Commit ──────────────────────────────────────────────────────────
+        // â”€â”€ 8. Commit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await session.commitTransaction();
 
         await order.populate([{ path: 'productId', select: 'name basePrice executionType providerProduct' }]);
 
-        // ── 9. Audit: AFTER commit — fire-and-forget ───────────────────────────
+        // â”€â”€ 9. Audit: AFTER commit â€” fire-and-forget â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const actorId = auditContext?.actorId ?? userId;
         const actorRole = auditContext?.actorRole ?? ACTOR_ROLES.CUSTOMER;
         const ipAddress = auditContext?.ipAddress ?? null;
@@ -446,29 +451,11 @@ const _attemptCreateOrder = async (
             },
         });
 
-        // ── 10. Trigger provider fulfillment (fire-and-forget) ──────────────────
+        // â”€â”€ 10. Trigger provider fulfillment (fire-and-forget) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Always fires for AUTOMATIC products. executeOrder self-resolves the
         // provider adapter if none was pre-resolved, and handles all failures
         // (marks FAILED + refunds the wallet).
-        if (isManualOrder) {
-            void safeCreateAdminActorNotifications({
-                title: 'طلب يدوي جديد',
-                message: 'يوجد طلب يدوي جديد يحتاج إلى التنفيذ.',
-                type: 'order',
-                priority: 'high',
-                route: `/admin/orders?orderId=${order._id.toString()}`,
-                entityType: 'order',
-                entityId: order._id,
-                metadata: {
-                    orderId: order._id.toString(),
-                    orderNumber,
-                    userId: userId.toString(),
-                    productId: product._id.toString(),
-                    quantity: qty,
-                    status: initialStatus,
-                },
-            });
-        }
+        notifyOrderCreated(order, { manualReview: isManualOrder });
 
         if (isAutomatic) {
             createAuditLog({
@@ -482,7 +469,7 @@ const _attemptCreateOrder = async (
             // Lazy-require to avoid circular dependency issues
             const { executeOrder } = require('./orderFulfillment.service');
 
-            // Fire-and-forget — client gets PROCESSING response immediately.
+            // Fire-and-forget â€” client gets PROCESSING response immediately.
             // Pass provider if we have one; executeOrder self-resolves if null.
             executeOrder(order._id, provider, auditContext).catch((err) => {
                 console.error(`[Order] executeOrder failed for ${order._id}:`, err.message);
@@ -522,9 +509,9 @@ const _attemptCreateOrder = async (
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MARK ORDER AS FAILED (REFUND) — manual admin action
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// MARK ORDER AS FAILED (REFUND) â€” manual admin action
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /**
  * Mark an order as FAILED and issue a REFUND.
@@ -536,8 +523,8 @@ const _attemptCreateOrder = async (
  *   the wrong numeric amount to be credited.
  *
  * Double-refund prevention via TWO independent guards:
- *   Guard 1 — status check:    order.status === 'FAILED'  → already failed
- *   Guard 2 — timestamp check: order.refundedAt !== null  → already refunded
+ *   Guard 1 â€” status check:    order.status === 'FAILED'  â†’ already failed
+ *   Guard 2 â€” timestamp check: order.refundedAt !== null  â†’ already refunded
  */
 const markOrderAsFailed = async (orderId, auditContext = null) => {
     const session = await mongoose.startSession();
@@ -565,14 +552,14 @@ const markOrderAsFailed = async (orderId, auditContext = null) => {
             );
         }
 
-        // ── Refund amount — use the EXACT amounts originally deducted ────────
+        // â”€â”€ Refund amount â€” use the EXACT amounts originally deducted â”€â”€â”€â”€â”€â”€â”€â”€
         // NEVER do a live currency conversion here. Exchange rates fluctuate.
         // The user must receive back exactly what was taken from their wallet.
         //
         // Source of truth (frozen at order creation):
-        //   walletDeducted   – amount taken from the wallet balance
-        //   creditUsedAmount – amount taken from the credit line
-        //   chargedAmount    – total (walletDeducted + creditUsed), fallback
+        //   walletDeducted   â€“ amount taken from the wallet balance
+        //   creditUsedAmount â€“ amount taken from the credit line
+        //   chargedAmount    â€“ total (walletDeducted + creditUsed), fallback
         const walletPortion = Number(order.walletDeducted || 0);
         const creditPortion = Number(order.creditUsedAmount || 0);
 
@@ -589,14 +576,14 @@ const markOrderAsFailed = async (orderId, auditContext = null) => {
             );
         }
 
-        // ── Update order status ──────────────────────────────────────────────
+        // â”€â”€ Update order status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         order.status = ORDER_STATUS.FAILED;
         order.failedAt = new Date();
         order.refundedAt = new Date();
         order.refunded = true;
         await order.save({ session });
 
-        // ── Credit the wallet with the exact original amounts ────────────────
+        // â”€â”€ Credit the wallet with the exact original amounts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await refundWalletAtomic({
             userId: order.userId,
             walletDeducted: refundWallet,
@@ -608,7 +595,7 @@ const markOrderAsFailed = async (orderId, auditContext = null) => {
 
         await session.commitTransaction();
 
-        // ── Audit — AFTER commit ─────────────────────────────────────────────
+        // â”€â”€ Audit â€” AFTER commit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const actorId = auditContext?.actorId ?? order.userId;
         const actorRole = auditContext?.actorRole ?? ACTOR_ROLES.ADMIN;
         const ipAddress = auditContext?.ipAddress ?? null;
@@ -645,6 +632,18 @@ const markOrderAsFailed = async (orderId, auditContext = null) => {
             },
         });
 
+        notifyOrderFailed(order, {
+            source: 'manual_refund',
+            reason: 'MANUAL_REFUND',
+            notifyUser: false,
+        });
+        notifyOrderRefunded(order, {
+            refundAmount: totalRefund,
+            currency: order.currency,
+            source: 'manual_refund',
+            reason: 'MANUAL_REFUND',
+        });
+
         return order;
     } catch (err) {
         if (session.inTransaction()) {
@@ -656,9 +655,9 @@ const markOrderAsFailed = async (orderId, auditContext = null) => {
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PROCESS ORDER REFUND — CANCELED (full) & PARTIAL (proportional)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// PROCESS ORDER REFUND - CANCELED (full) & PARTIAL (proportional)
+// -----------------------------------------------------------------------------
 
 /**
  * Process a refund for an order that was CANCELED or PARTIAL.
@@ -669,7 +668,7 @@ const markOrderAsFailed = async (orderId, auditContext = null) => {
  * PARTIAL REFUND (remains > 0, status PARTIAL):
  *   refundAmount = Math.floor((remains / order.quantity) * order.chargedAmount)
  *
- * Uses the ORIGINAL chargedAmount (what the user paid at order time) —
+ * Uses the ORIGINAL chargedAmount (what the user paid at order time) -
  * NOT live USD conversion. If they paid 100 EGP, max refund is 100 EGP.
  *
  * Idempotency: if order.refunded === true, throws ALREADY_REFUNDED.
@@ -691,7 +690,7 @@ const processOrderRefund = async (orderId, remains = 0, auditContext = null) => 
         const order = await Order.findById(orderId).session(session);
         if (!order) throw new NotFoundError('Order');
 
-        // ── Idempotency guard ────────────────────────────────────────────────
+        // Idempotency guard
         if (order.refunded === true) {
             throw new BusinessRuleError(
                 'A refund has already been issued for this order.',
@@ -699,7 +698,7 @@ const processOrderRefund = async (orderId, remains = 0, auditContext = null) => 
             );
         }
 
-        // ── Calculate refund amount ──────────────────────────────────────────
+        // Calculate refund amount
         const chargedAmount = Number(order.chargedAmount || order.walletDeducted || 0);
         if (chargedAmount <= 0) {
             throw new BusinessRuleError(
@@ -727,7 +726,7 @@ const processOrderRefund = async (orderId, remains = 0, auditContext = null) => 
             );
         }
 
-        // ── Update order state (before wallet, for idempotency) ──────────────
+        // Update order state before wallet mutation for idempotency.
         order.refunded = true;
         order.refundedAt = new Date();
         if (isPartial) {
@@ -735,7 +734,7 @@ const processOrderRefund = async (orderId, remains = 0, auditContext = null) => 
         }
         await order.save({ session });
 
-        // ── Atomic wallet refund ─────────────────────────────────────────────
+        // Atomic wallet refund
         const description = isPartial
             ? `Partial refund for Order #${order.orderNumber} (Remains: ${remainsCount}/${order.quantity})`
             : `Full refund for Order #${order.orderNumber}`;
@@ -751,7 +750,7 @@ const processOrderRefund = async (orderId, remains = 0, auditContext = null) => 
 
         await session.commitTransaction();
 
-        // ── Audit — AFTER commit (fire-and-forget) ──────────────────────────
+        // Audit after commit (fire-and-forget)
         const actorId = auditContext?.actorId ?? order.userId;
         const actorRole = auditContext?.actorRole ?? ACTOR_ROLES.SYSTEM;
         const ipAddress = auditContext?.ipAddress ?? null;
@@ -792,6 +791,15 @@ const processOrderRefund = async (orderId, remains = 0, auditContext = null) => 
             },
         });
 
+        notifyOrderRefunded(order, {
+            refundAmount,
+            currency: order.currency,
+            source: auditContext?.notificationSource || (isPartial ? 'partial_refund' : 'order_refund'),
+            reason: auditContext?.notificationReason || (isPartial ? 'PARTIAL_DELIVERY' : 'ORDER_CANCELED'),
+            providerRejected: auditContext?.providerRejected === true,
+            partial: isPartial,
+        });
+
         return order;
 
     } catch (err) {
@@ -804,9 +812,9 @@ const processOrderRefund = async (orderId, remains = 0, auditContext = null) => 
     }
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // MARK ORDER AS COMPLETED
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 const markOrderAsCompleted = async (orderId) => {
     const order = await Order.findById(orderId);
@@ -821,12 +829,13 @@ const markOrderAsCompleted = async (orderId) => {
 
     order.status = ORDER_STATUS.COMPLETED;
     await order.save();
+    notifyOrderCompleted(order, { source: 'manual_service' });
     return order;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // QUERIES
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 const listOrdersForUser = async (userId, { page = 1, limit = 20 } = {}) => {
     const skip = (page - 1) * limit;

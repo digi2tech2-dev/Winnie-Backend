@@ -15,6 +15,7 @@ const { Provider } = require('../providers/provider.model');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+const { notifyOrderCompleted, notifyOrderFailed } = require('../notifications/notification.events');
 
 // ─── List (admin) ─────────────────────────────────────────────────────────────
 
@@ -321,14 +322,29 @@ const syncOrderProviderStatus = async (orderId, adminId) => {
     // ── Trigger refund if status changed to CANCELED or PARTIAL ──────────
     if (statusChanged && (newStatus === 'CANCELED' || newStatus === 'PARTIAL')) {
         const remains = newStatus === 'PARTIAL' ? (order.remains || 0) : 0;
+        let refundIssued = false;
+        let notificationOrder = null;
         try {
-            await processOrderRefund(order._id, remains, {
+            notificationOrder = await processOrderRefund(order._id, remains, {
                 actorId: adminId,
                 actorRole: ACTOR_ROLES.ADMIN,
+                notificationSource: 'admin_provider_sync',
+                notificationReason: newStatus === 'PARTIAL' ? 'PARTIAL_DELIVERY' : 'PROVIDER_CANCELLED',
+                providerRejected: newStatus === 'CANCELED',
             });
+            refundIssued = true;
         } catch (refundErr) {
             // Don't break the sync — log the refund failure
             console.error(`[AdminOrders] Refund failed after sync for order ${orderId}:`, refundErr.message);
+            notificationOrder = await Order.findById(order._id).catch(() => null);
+        }
+
+        if (newStatus === 'CANCELED') {
+            notifyOrderFailed(notificationOrder || order, {
+                source: 'admin_provider_sync',
+                reason: 'PROVIDER_CANCELLED',
+                notifyUser: !(refundIssued || notificationOrder?.refunded === true),
+            });
         }
     }
 
@@ -347,6 +363,10 @@ const syncOrderProviderStatus = async (orderId, adminId) => {
             newStatus,
         },
     });
+
+    if (statusChanged && newStatus === 'COMPLETED') {
+        notifyOrderCompleted(order, { source: 'admin_provider_sync' });
+    }
 
     return order;
 };
@@ -417,6 +437,8 @@ const completeOrder = async (orderId, adminId) => {
             reDeducted: wasRefunded,
         },
     });
+
+    notifyOrderCompleted(order, { source: 'admin_manual' });
 
     return order;
 };

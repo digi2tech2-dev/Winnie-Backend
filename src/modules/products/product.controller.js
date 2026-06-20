@@ -3,6 +3,7 @@
 const productService = require('./product.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
+const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
 
 // ─── Sensitive fields that must NEVER reach non-admin clients ─────────────────
 
@@ -75,7 +76,8 @@ const listProducts = catchAsync(async (req, res) => {
     }
 
     const responseProducts = isAdmin ? products : sanitizeProductsForCustomer(products);
-    sendPaginated(res, responseProducts, pagination, 'Products retrieved successfully.');
+    const safeResponseProducts = sanitizePricingForSupervisor(responseProducts, req.user);
+    sendPaginated(res, safeResponseProducts, pagination, 'Products retrieved successfully.');
 });
 
 /**
@@ -85,7 +87,7 @@ const getProduct = catchAsync(async (req, res) => {
     const product = await productService.getProductById(req.params.id);
     const isAdmin = req.user?.role === 'ADMIN';
     const responseProduct = isAdmin ? product : sanitizeProductForCustomer(product);
-    sendSuccess(res, responseProduct);
+    sendSuccess(res, sanitizePricingForSupervisor(responseProduct, req.user));
 });
 
 // ─── Admin only ───────────────────────────────────────────────────────────────

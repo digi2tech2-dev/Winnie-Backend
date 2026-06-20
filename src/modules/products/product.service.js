@@ -52,7 +52,7 @@ const listProducts = async ({ activeOnly = true, page = 1, limit = 50 } = {}) =>
             .skip(skip)
             .limit(limit)
             .populate('provider', 'name slug')
-            .populate('providerProduct', 'rawName externalProductId'),
+            .populate('providerProduct', 'rawName translatedName externalProductId minQty maxQty isActive'),
         Product.countDocuments(filter),
     ]);
 
@@ -69,7 +69,7 @@ const listProducts = async ({ activeOnly = true, page = 1, limit = 50 } = {}) =>
 const getProductById = async (id) => {
     const product = await Product.findById(id)
         .populate('provider', 'name slug baseUrl isActive')
-        .populate('providerProduct', 'rawName externalProductId rawPrice lastSyncedAt');
+        .populate('providerProduct', 'rawName translatedName externalProductId rawPrice minQty maxQty isActive lastSyncedAt');
     if (!product) throw new NotFoundError('Product');
     return product;
 };
@@ -443,13 +443,59 @@ const updateProduct = async (productId, updates) => {
     await product.save();
     return product.populate([
         { path: 'provider', select: 'name slug' },
-        { path: 'providerProduct', select: 'rawName externalProductId rawPrice' },
+        { path: 'providerProduct', select: 'rawName translatedName externalProductId rawPrice minQty maxQty isActive' },
     ]);
 };
 
 // =============================================================================
 // ADMIN — TOGGLE STATUS
 // =============================================================================
+
+const syncProductPriceFromProvider = async (productId) => {
+    const product = await Product.findById(productId).populate({
+        path: 'providerProduct',
+        select: 'rawPrice rawPayload provider isActive',
+        populate: { path: 'provider', select: 'name slug isActive' },
+    });
+    if (!product) throw new NotFoundError('Product');
+    if (!product.providerProduct) {
+        throw new BusinessRuleError(
+            'Product is not linked to a provider product.',
+            'PRODUCT_NOT_PROVIDER_LINKED'
+        );
+    }
+
+    const providerProduct = product.providerProduct;
+    if (providerProduct.isActive === false) {
+        throw new BusinessRuleError(
+            'The linked provider product is inactive.',
+            'PROVIDER_PRODUCT_INACTIVE'
+        );
+    }
+    if (providerProduct.provider?.isActive === false) {
+        throw new BusinessRuleError('The linked provider is inactive.', 'PROVIDER_INACTIVE');
+    }
+
+    const rawPrice = String(providerProduct.rawPrice || providerProduct.rawPayload?.product_price || 0);
+    const finalPrice = product.enableManualPrice
+        ? add(rawPrice, String(product.manualPriceAdjustment ?? 0))
+        : computeFinalPrice(rawPrice, product.markupType, product.markupValue);
+
+    product.providerPrice = rawPrice;
+    product.finalPrice = finalPrice ?? rawPrice;
+    product.basePrice = product.finalPrice;
+    product.pricingMode = PRICING_MODES.SYNC;
+    product.syncPriceWithProvider = true;
+    if (providerProduct.provider?._id) {
+        product.provider = providerProduct.provider._id;
+    }
+
+    await product.save();
+    return product.populate([
+        { path: 'provider', select: 'name slug' },
+        { path: 'providerProduct', select: 'rawName translatedName externalProductId rawPrice minQty maxQty isActive' },
+    ]);
+};
 
 const toggleProductStatus = async (productId) => {
     const product = await Product.findById(productId);
@@ -509,6 +555,7 @@ module.exports = {
     createProduct,
     publishFromProviderProduct,
     updateProduct,
+    syncProductPriceFromProvider,
     toggleProductStatus,
     deleteProduct,
     getExternalProductId,

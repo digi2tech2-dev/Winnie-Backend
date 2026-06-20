@@ -26,8 +26,19 @@ const normalizeNotificationPayload = ({
     metadata: metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {},
 });
 
+const getEventKey = (params) => {
+    const eventKey = params?.metadata?.eventKey;
+    return eventKey ? String(eventKey).trim() : '';
+};
+
+const notificationExistsForEvent = async (userId, eventKey) => {
+    if (!userId || !eventKey) return false;
+    return Boolean(await Notification.exists({ userId, 'metadata.eventKey': eventKey }));
+};
+
 const createNotification = async (params) => {
     const isBroadcast = params?.broadcast === true || params?.broadcast === 'true';
+    const eventKey = getEventKey(params);
 
     if (isBroadcast) {
         const users = await User.find({ status: USER_STATUS.ACTIVE }).select('_id');
@@ -39,8 +50,21 @@ const createNotification = async (params) => {
             };
         }
 
+        const recipients = eventKey
+            ? (await Promise.all(users.map(async (user) => (
+                (await notificationExistsForEvent(user._id, eventKey)) ? null : user
+            )))).filter(Boolean)
+            : users;
+
+        if (recipients.length === 0) {
+            return {
+                broadcast: true,
+                createdCount: 0,
+            };
+        }
+
         const notifications = await Notification.insertMany(
-            users.map((user) => normalizeNotificationPayload({
+            recipients.map((user) => normalizeNotificationPayload({
                 ...params,
                 userId: user._id,
             })),
@@ -54,6 +78,10 @@ const createNotification = async (params) => {
     }
 
     const payload = normalizeNotificationPayload(params);
+    if (eventKey && await notificationExistsForEvent(payload.userId, eventKey)) {
+        return null;
+    }
+
     return Notification.create(payload);
 };
 
@@ -69,6 +97,7 @@ const safeCreateNotification = async (params) => {
 const createAdminActorNotifications = async ({
     roles = [ROLES.ADMIN],
     permissions = [],
+    permissionMode = 'all',
     ...notificationPayload
 }) => {
     const normalizedRoles = roles
@@ -77,6 +106,8 @@ const createAdminActorNotifications = async ({
     const requiredPermissions = permissions
         .map((permission) => String(permission || '').trim())
         .filter(Boolean);
+    const normalizedPermissionMode = String(permissionMode || 'all').trim().toLowerCase();
+    const eventKey = getEventKey(notificationPayload);
 
     const users = await User.find({
         status: USER_STATUS.ACTIVE,
@@ -89,15 +120,25 @@ const createAdminActorNotifications = async ({
         }
 
         const userPermissions = Array.isArray(user.permissions) ? user.permissions : [];
+        if (normalizedPermissionMode === 'any') {
+            return requiredPermissions.some((permission) => userPermissions.includes(permission));
+        }
+
         return requiredPermissions.every((permission) => userPermissions.includes(permission));
     });
 
-    if (recipients.length === 0) {
+    const dedupedRecipients = eventKey
+        ? (await Promise.all(recipients.map(async (user) => (
+            (await notificationExistsForEvent(user._id, eventKey)) ? null : user
+        )))).filter(Boolean)
+        : recipients;
+
+    if (dedupedRecipients.length === 0) {
         return [];
     }
 
     return Notification.insertMany(
-        recipients.map((user) => normalizeNotificationPayload({
+        dedupedRecipients.map((user) => normalizeNotificationPayload({
             ...notificationPayload,
             userId: user._id,
         })),

@@ -129,7 +129,7 @@ router.patch(
 
 router.get('/users', requirePermission('users.view'), validateQuery(schemas.listUsersQuery), usersCtrl.listUsers);
 router.get('/users/deleted', authorizeRoles('ADMIN'), usersCtrl.listDeletedUsers); // MUST be before /:id
-router.post('/users/adjust-debt', requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.debtAdjustment), walletCtrl.adjustDebt);
+router.post('/users/adjust-debt', authorizeRoles('ADMIN'), requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.debtAdjustment), walletCtrl.adjustDebt);
 router.get('/users/:id', requirePermission('users.view'), usersCtrl.getUserById);
 router.patch('/users/:id', authorizeRoles('ADMIN'), validateBody(schemas.updateUser), usersCtrl.updateUser);
 router.delete('/users/:id', requirePermission('users.delete'), usersCtrl.deleteUser);
@@ -180,8 +180,8 @@ router.get('/orders/:id', requirePermission('orders.view'), ordersCtrl.getOrderB
 router.get('/wallets', requirePermission('wallet.view'), walletCtrl.listWallets);
 router.get('/wallets/:userId/transactions', requirePermission('wallet.view'), walletCtrl.getTransactionHistory);
 router.post('/wallets/:userId/add', requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.walletAdjustment), walletCtrl.addFunds);
-router.post('/wallets/:userId/deduct', requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.walletAdjustment), walletCtrl.deductFunds);
-router.put('/wallets/:userId/set', requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.walletSetBalance), walletCtrl.setBalance);
+router.post('/wallets/:userId/deduct', authorizeRoles('ADMIN'), requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.walletAdjustment), walletCtrl.deductFunds);
+router.put('/wallets/:userId/set', authorizeRoles('ADMIN'), requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.walletSetBalance), walletCtrl.setBalance);
 router.get('/wallets/:userId', requirePermission('wallet.view'), walletCtrl.getWallet);
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -33,6 +33,12 @@ const {
     ACTOR_ROLES,
 } = require('../audit/audit.constants');
 const { toInternalStatus, isTerminal, requiresRefund } = require('../providers/statusMapper');
+const {
+    notifyOrderCompleted,
+    notifyOrderFailed,
+    notifyOrderManualReview,
+    notifyOrderRefunded,
+} = require('../notifications/notification.events');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IDEMPOTENT REFUND
@@ -51,7 +57,7 @@ const { toInternalStatus, isTerminal, requiresRefund } = require('../providers/s
  * @param {Object} order  - Mongoose Order document
  * @returns {Promise<boolean>} true if refund was applied, false if already refunded
  */
-const refundFailedOrder = async (order) => {
+const refundFailedOrder = async (order, notificationContext = {}) => {
     // Compare-and-swap: only proceeds when refunded===false
     const swapped = await Order.findOneAndUpdate(
         { _id: order._id, refunded: false },
@@ -140,6 +146,14 @@ const refundFailedOrder = async (order) => {
                 currency: order.currency,
                 reason: 'PROVIDER_ORDER_FAILED',
             },
+        });
+
+        notifyOrderRefunded(order, {
+            refundAmount: totalRefund,
+            currency: order.currency,
+            source: notificationContext.source || 'provider_failure',
+            reason: notificationContext.reason || 'PROVIDER_ORDER_FAILED',
+            providerRejected: notificationContext.providerRejected === true,
         });
 
         return true;
@@ -247,7 +261,15 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             let refundIssued = false;
             try {
                 const freshOrder = await Order.findById(orderId);
-                refundIssued = await refundFailedOrder(freshOrder);
+                refundIssued = await refundFailedOrder(freshOrder, {
+                    source: 'provider_resolution_failed',
+                    reason: 'PROVIDER_RESOLUTION_FAILED',
+                });
+                notifyOrderFailed(freshOrder, {
+                    source: 'provider_resolution_failed',
+                    reason: 'PROVIDER_RESOLUTION_FAILED',
+                    notifyUser: !(refundIssued || freshOrder?.refunded === true),
+                });
             } catch (refundErr) {
                 console.error(`[Fulfillment] Refund FAILED for order ${orderId}:`, refundErr.message);
             }
@@ -379,7 +401,16 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         // Refund
         try {
             const freshOrder = await Order.findById(orderId);
-            refundIssued = await refundFailedOrder(freshOrder);
+            refundIssued = await refundFailedOrder(freshOrder, {
+                source: 'provider_rejected',
+                reason: 'PROVIDER_REJECTED',
+                providerRejected: true,
+            });
+            notifyOrderFailed(freshOrder, {
+                source: 'provider_rejected',
+                reason: 'PROVIDER_REJECTED',
+                notifyUser: !(refundIssued || freshOrder?.refunded === true),
+            });
         } catch (refundErr) {
             console.error(`[Fulfillment] Refund FAILED for order ${orderId}:`, refundErr.message);
         }
@@ -443,7 +474,12 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         metadata: { orderId: orderId.toString() },
     });
 
-    return { order: await Order.findById(orderId), placed: true, refunded: false };
+    const completedOrder = await Order.findById(orderId);
+    if (newStatus === ORDER_STATUS.COMPLETED) {
+        notifyOrderCompleted(completedOrder, { source: 'provider_immediate' });
+    }
+
+    return { order: completedOrder, placed: true, refunded: false };
 
     // ─── END OF TOP-LEVEL CRASH GUARD ──────────────────────────────────────
     } catch (fatalErr) {
@@ -463,7 +499,15 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
 
             const freshOrder = await Order.findById(orderId);
             if (freshOrder) {
-                await refundFailedOrder(freshOrder);
+                const refundIssued = await refundFailedOrder(freshOrder, {
+                    source: 'fulfillment_crash',
+                    reason: 'FULFILLMENT_CRASH',
+                });
+                notifyOrderFailed(freshOrder, {
+                    source: 'fulfillment_crash',
+                    reason: 'FULFILLMENT_CRASH',
+                    notifyUser: !(refundIssued || freshOrder?.refunded === true),
+                });
             }
         } catch (cleanupErr) {
             console.error(`[Fulfillment] Cleanup also failed for ${orderId}:`, cleanupErr.message);
@@ -535,9 +579,20 @@ const processOrderStatusResult = async (order, statusResult) => {
             });
 
             const freshOrder = await Order.findById(order._id);
-            await refundFailedOrder(freshOrder).catch((e) =>
-                console.error(`[Fulfillment] Refund error (retry limit) for ${order._id}:`, e.message)
-            );
+            let refundIssued = false;
+            try {
+                refundIssued = await refundFailedOrder(freshOrder, {
+                    source: 'retry_limit_exceeded',
+                    reason: 'RETRY_LIMIT_EXCEEDED',
+                });
+            } catch (e) {
+                console.error(`[Fulfillment] Refund error (retry limit) for ${order._id}:`, e.message);
+            }
+            notifyOrderFailed(freshOrder, {
+                source: 'retry_limit_exceeded',
+                reason: 'RETRY_LIMIT_EXCEEDED',
+                notifyUser: !(refundIssued || freshOrder?.refunded === true),
+            });
 
             return { action: 'failed' };
         }
@@ -588,6 +643,9 @@ const processOrderStatusResult = async (order, statusResult) => {
             metadata: { orderId: order._id.toString() },
         });
 
+        const completedOrder = await Order.findById(order._id);
+        notifyOrderCompleted(completedOrder, { source: 'provider_poll' });
+
         return { action: 'completed' };
     }
 
@@ -632,6 +690,8 @@ const processOrderStatusResult = async (order, statusResult) => {
             await processOrderRefund(order._id, remains, {
                 actorId: order.userId,
                 actorRole: ACTOR_ROLES.SYSTEM,
+                notificationSource: 'provider_partial',
+                notificationReason: 'PARTIAL_DELIVERY',
             });
         } catch (e) {
             console.error(`[Fulfillment] Partial refund error for ${order._id}:`, e.message);
@@ -676,14 +736,26 @@ const processOrderStatusResult = async (order, statusResult) => {
 
         // Trigger full refund via processOrderRefund
         const { processOrderRefund } = require('./order.service');
+        let refundIssued = false;
+        let notificationOrder = null;
         try {
-            await processOrderRefund(order._id, 0, {
+            notificationOrder = await processOrderRefund(order._id, 0, {
                 actorId: order.userId,
                 actorRole: ACTOR_ROLES.SYSTEM,
+                notificationSource: 'provider_canceled',
+                notificationReason: 'PROVIDER_CANCELLED',
+                providerRejected: true,
             });
+            refundIssued = true;
         } catch (e) {
             console.error(`[Fulfillment] Full refund error for ${order._id}:`, e.message);
+            notificationOrder = await Order.findById(order._id).catch(() => null);
         }
+        notifyOrderFailed(notificationOrder || order, {
+            source: 'provider_canceled',
+            reason: 'PROVIDER_CANCELLED',
+            notifyUser: !(refundIssued || notificationOrder?.refunded === true),
+        });
 
         return { action: 'failed' };
     }
@@ -722,9 +794,21 @@ const processOrderStatusResult = async (order, statusResult) => {
     });
 
     const freshOrder = await Order.findById(order._id);
-    await refundFailedOrder(freshOrder).catch((e) =>
-        console.error(`[Fulfillment] Refund error (failed) for ${order._id}:`, e.message)
-    );
+    let refundIssued = false;
+    try {
+        refundIssued = await refundFailedOrder(freshOrder, {
+            source: 'provider_failed',
+            reason: 'PROVIDER_FAILED',
+            providerRejected: true,
+        });
+    } catch (e) {
+        console.error(`[Fulfillment] Refund error (failed) for ${order._id}:`, e.message);
+    }
+    notifyOrderFailed(freshOrder, {
+        source: 'provider_failed',
+        reason: 'PROVIDER_FAILED',
+        notifyUser: !(refundIssued || freshOrder?.refunded === true),
+    });
 
     return { action: 'failed' };
 };
@@ -796,12 +880,12 @@ const pollProcessingOrders = async (providerOverride = null) => {
 
         await Promise.all(exhausted.map(async (order) => {
             try {
-                await Order.findByIdAndUpdate(order._id, {
+                const manualReviewOrder = await Order.findByIdAndUpdate(order._id, {
                     $set: {
                         status: ORDER_STATUS.MANUAL_REVIEW,
                         lastCheckedAt: now,
                     },
-                });
+                }, { new: true });
 
                 createAuditLog({
                     actorId:    order.userId,
@@ -818,6 +902,8 @@ const pollProcessingOrders = async (providerOverride = null) => {
                         reason:         'PROVIDER_OFFLINE_OR_STUCK',
                     },
                 });
+
+                notifyOrderManualReview(manualReviewOrder || order, { reason: 'PROVIDER_OFFLINE_OR_STUCK' });
 
                 stats.manualReview++;
                 console.warn(

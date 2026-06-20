@@ -7,6 +7,7 @@
 const svc = require('./admin.providers.service');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
+const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
 
 // GET /admin/providers
 const listProviders = catchAsync(async (req, res) => {
@@ -55,7 +56,7 @@ const getProviderBalance = catchAsync(async (req, res) => {
 // GET /admin/providers/:id/products
 const getProviderLiveProducts = catchAsync(async (req, res) => {
     const data = await svc.getProviderLiveProducts(req.params.id);
-    sendSuccess(res, data, 'Provider products retrieved');
+    sendSuccess(res, sanitizePricingForSupervisor(data, req.user), 'Provider products retrieved');
 });
 
 // POST /admin/providers/:id/test-connection
@@ -67,13 +68,13 @@ const testProviderConnection = catchAsync(async (req, res) => {
 // GET /admin/providers/:providerId/products/:externalProductId/price
 const getProductPrice = catchAsync(async (req, res) => {
     const data = await svc.getProductPrice(req.params.providerId, req.params.externalProductId);
-    sendSuccess(res, data, data.found ? 'Price retrieved' : 'Product not found in provider catalog');
+    sendSuccess(res, sanitizePricingForSupervisor(data, req.user), data.found ? 'Price retrieved' : 'Product not found in provider catalog');
 });
 
 // GET /admin/providers/:id/check-order?orderId=123
 const checkProviderOrder = catchAsync(async (req, res) => {
     const data = await svc.checkProviderOrder(req.params.id, req.query.orderId);
-    sendSuccess(res, data, 'Order status retrieved');
+    sendSuccess(res, sanitizePricingForSupervisor(data, req.user), 'Order status retrieved');
 });
 
 module.exports = {

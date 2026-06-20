@@ -9,6 +9,7 @@ const { User, USER_STATUS } = require('../users/user.model');
 const { Product } = require('../products/product.model');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess } = require('../../shared/utils/apiResponse');
+const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
 
 const getDashboardStats = catchAsync(async (req, res) => {
     const parseDate = (value, { endOfDay = false } = {}) => {
@@ -200,7 +201,7 @@ const getDashboardStats = catchAsync(async (req, res) => {
     const userStats = userStatsResult?.[0] || {};
     const productStats = productStatsResult?.[0] || {};
 
-    sendSuccess(res, {
+    const response = {
         orders: {
             total: totals.totalOrders || 0,
             completed: totals.completedOrders || 0,
@@ -227,7 +228,9 @@ const getDashboardStats = catchAsync(async (req, res) => {
             total: productStats.totalProducts || 0,
             active: productStats.activeProducts || 0,
         },
-    }, 'Dashboard statistics retrieved.');
+    };
+
+    sendSuccess(res, sanitizePricingForSupervisor(response, req.user), 'Dashboard statistics retrieved.');
 });
 
 module.exports = { getDashboardStats };

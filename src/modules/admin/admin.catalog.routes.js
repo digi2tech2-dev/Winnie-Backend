@@ -39,11 +39,15 @@ const {
     listProviderProducts,
     getProviderProduct,
     getProviderProductPrice,
+    listProductProviderOptions,
+    listProductProviderProductOptions,
     setTranslatedName,
     listProducts,
     createProduct,
     createProductFromProvider,
     updateProduct,
+    linkProductProvider,
+    syncProductProviderPrice,
     toggleProduct,
     deleteProduct,
 } = require('./admin.catalog.controller');
@@ -70,6 +74,9 @@ router.get('/provider-products/item/:id/price', requirePermission('suppliers.man
 router.patch('/provider-products/item/:id/translated-name', requirePermission('suppliers.manage'), setTranslatedName);
 router.get('/provider-products/:providerId', requirePermission('suppliers.manage'), listProviderProducts);
 
+router.get('/product-provider-options', requirePermission('products.provider.sync'), listProductProviderOptions);
+router.get('/product-provider-options/:providerId/products', requirePermission('products.provider.sync'), listProductProviderProductOptions);
+
 // ── Layer 3 — Platform Products ───────────────────────────────────────────────
 //
 // NOTE: /from-provider must be defined BEFORE /:id to avoid param conflict.
@@ -77,6 +84,8 @@ router.get('/provider-products/:providerId', requirePermission('suppliers.manage
 router.get('/products', requirePermission('products.view'), listProducts);
 router.post('/products', requirePermission('products.manage'), createProduct);                   // ← manual product creation
 router.post('/products/from-provider', requirePermission('products.manage'), createProductFromProvider);
+router.patch('/products/:id/provider-link', requirePermission('products.provider.sync'), linkProductProvider);
+router.post('/products/:id/provider-sync', requirePermission('products.provider.sync'), syncProductProviderPrice);
 router.patch('/products/:id/toggle', requirePermission('products.manage'), toggleProduct);
 router.delete('/products/:id', requirePermission('products.manage'), deleteProduct);
 router.patch('/products/:id', requirePermission('products.manage'), updateProduct);

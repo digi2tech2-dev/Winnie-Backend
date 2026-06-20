@@ -8,6 +8,13 @@ const svc = require('./admin.wallet.service');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 
+const getActorContext = (req) => req.auditContext || {
+    actorId: req.user?._id,
+    actorRole: req.user?.role,
+    ipAddress: req.ip,
+    userAgent: req.get('User-Agent'),
+};
+
 // GET /admin/wallets
 const listWallets = catchAsync(async (req, res) => {
     const { page, limit } = req.query;
@@ -37,28 +44,28 @@ const getTransactionHistory = catchAsync(async (req, res) => {
 // POST /admin/wallets/:userId/add
 const addFunds = catchAsync(async (req, res) => {
     const { amount, reason, description } = req.body;
-    const result = await svc.addFunds(req.params.userId, amount, reason || description, req.user._id);
+    const result = await svc.addFunds(req.params.userId, amount, reason || description, getActorContext(req));
     sendCreated(res, { transaction: result.transaction }, 'Funds added to wallet');
 });
 
 // POST /admin/wallets/:userId/deduct
 const deductFunds = catchAsync(async (req, res) => {
     const { amount, reason, description } = req.body;
-    const result = await svc.deductFunds(req.params.userId, amount, reason || description, req.user._id);
+    const result = await svc.deductFunds(req.params.userId, amount, reason || description, getActorContext(req));
     sendSuccess(res, { transaction: result.transaction }, 'Funds deducted from wallet');
 });
 
 // PUT /admin/wallets/:userId/set
 const setBalance = catchAsync(async (req, res) => {
     const { targetBalance, reason, description } = req.body;
-    const result = await svc.setBalance(req.params.userId, targetBalance, reason || description, req.user._id);
+    const result = await svc.setBalance(req.params.userId, targetBalance, reason || description, getActorContext(req));
     sendSuccess(res, { transaction: result.transaction, user: result.user }, 'Balance set successfully');
 });
 
 // POST /admin/users/adjust-debt
 const adjustDebt = catchAsync(async (req, res) => {
     const { percentage } = req.body;
-    const result = await svc.adjustNegativeBalancesForInflation(percentage, req.user._id);
+    const result = await svc.adjustNegativeBalancesForInflation(percentage, getActorContext(req));
     sendSuccess(res, {
         usersAdjusted: result.usersAdjusted,
         totalAdjustment: result.totalAdjustment,
