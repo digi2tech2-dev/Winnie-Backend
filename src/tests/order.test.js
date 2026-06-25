@@ -97,6 +97,11 @@ describe('Order within wallet balance', () => {
         expect(txns[0].amount).toBe(100);
         expect(txns[0].balanceBefore).toBe(200);
         expect(txns[0].balanceAfter).toBe(100);
+        expect(txns[0].semanticType).toBe('ORDER_DEBIT');
+        expect(txns[0].sourceType).toBe('ORDER');
+        expect(txns[0].sourceId.toString()).toBe(order._id.toString());
+        expect(txns[0].direction).toBe('DEBIT');
+        expect(txns[0].currency).toBe('USD');
     });
 });
 
@@ -212,6 +217,11 @@ describe('Refund — wallet-only order', () => {
         const refundTxn = txns.find((t) => t.type === 'REFUND');
         expect(refundTxn).toBeDefined();
         expect(refundTxn.amount).toBe(100);
+        expect(refundTxn.semanticType).toBe('ORDER_REFUND');
+        expect(refundTxn.sourceType).toBe('ORDER');
+        expect(refundTxn.sourceId.toString()).toBe(order._id.toString());
+        expect(refundTxn.direction).toBe('CREDIT');
+        expect(refundTxn.currency).toBe('USD');
     });
 });
 

@@ -1,7 +1,13 @@
 'use strict';
 
 const { User, USER_STATUS } = require('../users/user.model');
-const { WalletTransaction, TRANSACTION_TYPES } = require('./walletTransaction.model');
+const {
+    WalletTransaction,
+    TRANSACTION_TYPES,
+    LEDGER_TRANSACTION_TYPES,
+    TRANSACTION_DIRECTIONS,
+    TRANSACTION_SOURCE_TYPES,
+} = require('./walletTransaction.model');
 const { NotFoundError, BusinessRuleError, InsufficientFundsError } = require('../../shared/errors/AppError');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -17,22 +23,40 @@ const { NotFoundError, BusinessRuleError, InsufficientFundsError } = require('..
 const _createTransactionRecord = async ({
     userId,
     type,
+    semanticType,
+    sourceType,
+    sourceId,
+    direction,
     amount,
     balanceBefore,
     balanceAfter,
     reference,
+    currency = 'USD',
     description,
+    metadata,
+    idempotencyKey,
+    actorId,
+    actorRole,
     session,
 }) => {
     const doc = {
         userId,
         type,
+        semanticType,
+        sourceType,
+        sourceId: sourceId || reference || null,
+        direction,
         amount,
         balanceBefore,
         balanceAfter,
         reference,
+        currency,
         status: 'COMPLETED',
         description,
+        metadata,
+        idempotencyKey,
+        actorId,
+        actorRole,
     };
 
     if (session) {
@@ -69,7 +93,21 @@ const _createTransactionRecord = async ({
  *
  * @returns {{ walletDeducted: number, creditUsedAmount: number, transaction: WalletTransaction }}
  */
-const debitWalletAtomic = async ({ userId, amount, reference = null, description = '', session }) => {
+const debitWalletAtomic = async ({
+    userId,
+    amount,
+    reference = null,
+    description = '',
+    semanticType = LEDGER_TRANSACTION_TYPES.ORDER_DEBIT,
+    sourceType = TRANSACTION_SOURCE_TYPES.ORDER,
+    sourceId = null,
+    currency = 'USD',
+    metadata,
+    idempotencyKey,
+    actorId,
+    actorRole,
+    session,
+}) => {
     if (amount <= 0) {
         throw new BusinessRuleError('Debit amount must be greater than zero.', 'INVALID_AMOUNT');
     }
@@ -115,11 +153,20 @@ const debitWalletAtomic = async ({ userId, amount, reference = null, description
     const transaction = await _createTransactionRecord({
         userId,
         type: TRANSACTION_TYPES.DEBIT,
+        semanticType,
+        sourceType,
+        sourceId,
+        direction: TRANSACTION_DIRECTIONS.DEBIT,
         amount,
         balanceBefore: oldBalance,
         balanceAfter: newBalance,
         reference,
+        currency,
         description,
+        metadata,
+        idempotencyKey,
+        actorId,
+        actorRole,
         session,
     });
 
@@ -145,7 +192,21 @@ const debitWalletAtomic = async ({ userId, amount, reference = null, description
  * @param {ClientSession}   [params.session]
  * @returns {{ transaction: WalletTransaction }}
  */
-const forcedDebitWallet = async ({ userId, amount, reference = null, description = '', session }) => {
+const forcedDebitWallet = async ({
+    userId,
+    amount,
+    reference = null,
+    description = '',
+    semanticType = LEDGER_TRANSACTION_TYPES.ADMIN_ADJUSTMENT,
+    sourceType = TRANSACTION_SOURCE_TYPES.ADMIN_ADJUSTMENT,
+    sourceId = null,
+    currency = 'USD',
+    metadata,
+    idempotencyKey,
+    actorId,
+    actorRole,
+    session,
+}) => {
     if (amount <= 0) {
         throw new BusinessRuleError('Debit amount must be greater than zero.', 'INVALID_AMOUNT');
     }
@@ -165,11 +226,20 @@ const forcedDebitWallet = async ({ userId, amount, reference = null, description
     const transaction = await _createTransactionRecord({
         userId,
         type: TRANSACTION_TYPES.DEBIT,
+        semanticType,
+        sourceType,
+        sourceId,
+        direction: TRANSACTION_DIRECTIONS.DEBIT,
         amount,
         balanceBefore,
         balanceAfter,
         reference,
+        currency,
         description,
+        metadata,
+        idempotencyKey,
+        actorId,
+        actorRole,
         session,
     });
 
@@ -190,6 +260,14 @@ const refundWalletAtomic = async ({
     creditUsedAmount,
     reference,
     description = '',
+    semanticType = LEDGER_TRANSACTION_TYPES.ORDER_REFUND,
+    sourceType = TRANSACTION_SOURCE_TYPES.ORDER,
+    sourceId = null,
+    currency = 'USD',
+    metadata,
+    idempotencyKey,
+    actorId,
+    actorRole,
     session,
 }) => {
     const totalRefund = parseFloat((walletDeducted + creditUsedAmount).toFixed(2));
@@ -221,11 +299,20 @@ const refundWalletAtomic = async ({
     const transaction = await _createTransactionRecord({
         userId,
         type: TRANSACTION_TYPES.REFUND,
+        semanticType,
+        sourceType,
+        sourceId,
+        direction: TRANSACTION_DIRECTIONS.CREDIT,
         amount: walletDeducted,
         balanceBefore: oldBal,
         balanceAfter: Number((oldBal + walletDeducted).toFixed(2)),
         reference,
+        currency,
         description,
+        metadata,
+        idempotencyKey,
+        actorId,
+        actorRole,
         session,
     });
 
@@ -240,7 +327,21 @@ const refundWalletAtomic = async ({
  * Atomically credit a flat amount directly to a user's walletBalance.
  * Session is optional — works on standalone MongoDB instances.
  */
-const creditWalletDirect = async ({ userId, amount, reference = null, description = '', session }) => {
+const creditWalletDirect = async ({
+    userId,
+    amount,
+    reference = null,
+    description = '',
+    semanticType = LEDGER_TRANSACTION_TYPES.DEPOSIT_APPROVED,
+    sourceType = TRANSACTION_SOURCE_TYPES.DEPOSIT,
+    sourceId = null,
+    currency = 'USD',
+    metadata,
+    idempotencyKey,
+    actorId,
+    actorRole,
+    session,
+}) => {
     if (amount <= 0) {
         throw new BusinessRuleError('Credit amount must be greater than zero.', 'INVALID_AMOUNT');
     }
@@ -260,11 +361,20 @@ const creditWalletDirect = async ({ userId, amount, reference = null, descriptio
     const transaction = await _createTransactionRecord({
         userId,
         type: TRANSACTION_TYPES.CREDIT,
+        semanticType,
+        sourceType,
+        sourceId,
+        direction: TRANSACTION_DIRECTIONS.CREDIT,
         amount,
         balanceBefore: oldBal,
         balanceAfter: Number((oldBal + amount).toFixed(2)),
         reference,
+        currency,
         description,
+        metadata,
+        idempotencyKey,
+        actorId,
+        actorRole,
         session,
     });
 

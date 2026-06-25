@@ -275,6 +275,12 @@ describe('[3] approveDeposit', () => {
         expect(tx.amount).toBe(500);
         expect(tx.balanceBefore).toBe(0);
         expect(tx.balanceAfter).toBe(500);
+        expect(tx.semanticType).toBe('DEPOSIT_APPROVED');
+        expect(tx.sourceType).toBe('DEPOSIT');
+        expect(tx.sourceId.toString()).toBe(deposit._id.toString());
+        expect(tx.direction).toBe('CREDIT');
+        expect(tx.currency).toBe('USD');
+        expect(tx.idempotencyKey).toBe(`deposit:${deposit._id.toString()}:approved`);
     });
 
     it('uses admin amount override when provided', async () => {

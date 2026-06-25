@@ -23,6 +23,10 @@ const mongoose = require('mongoose');
 const { Order, ORDER_STATUS, MAX_RETRY_COUNT, ORDER_EXECUTION_TYPES } = require('../orders/order.model');
 const { getExternalProductId } = require('../products/product.service');
 const { refundWalletAtomic } = require('../wallet/wallet.service');
+const {
+    LEDGER_TRANSACTION_TYPES,
+    TRANSACTION_SOURCE_TYPES,
+} = require('../wallet/walletTransaction.model');
 const { createAuditLog } = require('../audit/audit.service');
 const { applyProviderMapping } = require('./orderFields.validator');
 const {
@@ -106,7 +110,23 @@ const refundFailedOrder = async (order, notificationContext = {}) => {
             walletDeducted: refundWallet,
             creditUsedAmount: refundCredit,
             reference: order._id,
+            semanticType: LEDGER_TRANSACTION_TYPES.ORDER_REFUND,
+            sourceType: TRANSACTION_SOURCE_TYPES.ORDER,
+            sourceId: order._id,
+            currency: order.currency || 'USD',
             description: `Auto-refund: provider order ${order.providerOrderId ?? 'N/A'} failed (${totalRefund} ${order.currency || 'USD'})`,
+            metadata: {
+                orderId: order._id.toString(),
+                orderNumber: order.orderNumber,
+                providerOrderId: order.providerOrderId,
+                walletRefunded: refundWallet,
+                creditRefunded: refundCredit,
+                totalRefund,
+                reason: 'PROVIDER_ORDER_FAILED',
+            },
+            idempotencyKey: `order:${order._id.toString()}:refund:provider`,
+            actorId: order.userId,
+            actorRole: ACTOR_ROLES.SYSTEM,
             session,
         });
 

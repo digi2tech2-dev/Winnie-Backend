@@ -220,6 +220,11 @@ describe('[2] Admin Wallet Service', () => {
         const txn = await WalletTransaction.findOne({ userId: customer._id, type: 'CREDIT' });
         expect(txn).not.toBeNull();
         expect(txn.amount).toBe(50);
+        expect(txn.semanticType).toBe('ADMIN_ADJUSTMENT');
+        expect(txn.sourceType).toBe('ADMIN_ADJUSTMENT');
+        expect(txn.direction).toBe('CREDIT');
+        expect(txn.currency).toBe(customer.currency || 'USD');
+        expect(txn.actorId.toString()).toBe(admin._id.toString());
     });
 
     it('addFunds rejects amount = 0', async () => {
@@ -246,6 +251,11 @@ describe('[2] Admin Wallet Service', () => {
         const txn = await WalletTransaction.findOne({ userId: customer._id, type: 'DEBIT' });
         expect(txn).not.toBeNull();
         expect(txn.amount).toBe(30);
+        expect(txn.semanticType).toBe('ADMIN_ADJUSTMENT');
+        expect(txn.sourceType).toBe('ADMIN_ADJUSTMENT');
+        expect(txn.direction).toBe('DEBIT');
+        expect(txn.currency).toBe(customer.currency || 'USD');
+        expect(txn.actorId.toString()).toBe(admin._id.toString());
     });
 
     it('deductFunds throws INSUFFICIENT_BALANCE when wallet is too low', async () => {

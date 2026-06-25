@@ -10,6 +10,10 @@ const mongoose = require('mongoose');
 const { Order, ORDER_STATUS } = require('../orders/order.model');
 const { markOrderAsFailed, processOrderRefund } = require('../orders/order.service');
 const { forcedDebitWallet } = require('../wallet/wallet.service');
+const {
+    LEDGER_TRANSACTION_TYPES,
+    TRANSACTION_SOURCE_TYPES,
+} = require('../wallet/walletTransaction.model');
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { Provider } = require('../providers/provider.model');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
@@ -412,7 +416,20 @@ const completeOrder = async (orderId, adminId) => {
                 userId: order.userId,
                 amount: reDeductAmount,
                 reference: order._id,
+                semanticType: LEDGER_TRANSACTION_TYPES.ORDER_DEBIT,
+                sourceType: TRANSACTION_SOURCE_TYPES.ORDER,
+                sourceId: order._id,
+                currency: order.currency || 'USD',
                 description: `Admin forced completion re-deduction for order #${order.orderNumber || order._id} (previously refunded ${reDeductAmount} ${order.currency || 'USD'})`,
+                metadata: {
+                    orderId: order._id.toString(),
+                    orderNumber: order.orderNumber,
+                    reason: 'ADMIN_FORCED_COMPLETION_REDEDUCTION',
+                    previousStatus: order.status,
+                },
+                idempotencyKey: `order:${order._id.toString()}:forced-complete-rededuction`,
+                actorId: adminId,
+                actorRole: ACTOR_ROLES.ADMIN,
             });
         }
 

@@ -58,18 +58,23 @@ Suggested models: extend `WalletTransaction` or introduce a stricter ledger entr
 
 Suggested endpoints: preserve existing wallet history routes; add admin filters by ledger type/source.
 
-Dependencies: migration plan for existing `CREDIT`, `DEBIT`, `REFUND`, `DEBT_ADJUSTMENT` records.
+Phase 2.1 status: the existing `WalletTransaction` model now keeps legacy `type` values and adds `semanticType`, `sourceType`, `sourceId`, `direction`, `currency`, metadata, actor fields, and optional idempotency keys. See `docs/LEDGER_ARCHITECTURE.md`.
+
+Dependencies still remaining: migration plan for existing `CREDIT`, `DEBIT`, `REFUND`, `DEBT_ADJUSTMENT` records; admin/reporting filters by semantic type/source; final payment/referral business rules.
 
 Risks: breaking balance reconciliation, mixing display labels with accounting semantics.
 
-Candidate types:
+Active or reserved semantic types:
 
+- `DEPOSIT_APPROVED`
+- `ORDER_DEBIT`
+- `ORDER_REFUND`
+- `ADMIN_ADJUSTMENT`
+- `DEBT_ADJUSTMENT`
 - `CARD_PAYMENT_SUCCESS`
 - `CARD_PAYMENT_FAILED`
 - `REFERRAL_COMMISSION`
-- `ADMIN_ADJUSTMENT`
-- `ORDER_DEBIT`
-- `ORDER_REFUND`
+- `REFERRAL_REVERSAL`
 
 ## Frontend API Compatibility Layer
 

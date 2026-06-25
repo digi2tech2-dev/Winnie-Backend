@@ -7,6 +7,10 @@ const { ProviderProduct } = require('../providers/providerProduct.model');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('./order.model');
 const { getNextSequence } = require('./counter.model');
 const { debitWalletAtomic, refundWalletAtomic } = require('../wallet/wallet.service');
+const {
+    LEDGER_TRANSACTION_TYPES,
+    TRANSACTION_SOURCE_TYPES,
+} = require('../wallet/walletTransaction.model');
 const { calculateUserPrice } = require('./pricing.service');
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { validateOrderFields } = require('./orderFields.validator');
@@ -344,7 +348,22 @@ const _attemptCreateOrder = async (
             userId,
             amount: chargedAmount,     // â† wallet always in user currency
             reference: orderId,
+            semanticType: LEDGER_TRANSACTION_TYPES.ORDER_DEBIT,
+            sourceType: TRANSACTION_SOURCE_TYPES.ORDER,
+            sourceId: orderId,
+            currency: userCurrency,
             description: `Payment for: ${product.name} x${qty}`,
+            metadata: {
+                orderId: orderId.toString(),
+                productId: product._id.toString(),
+                quantity: qty,
+                usdAmount: usdTotalPrice,
+                rateSnapshot,
+                chargedAmount,
+            },
+            idempotencyKey: `order:${orderId.toString()}:debit`,
+            actorId: auditContext?.actorId ?? userId,
+            actorRole: auditContext?.actorRole ?? ACTOR_ROLES.CUSTOMER,
             session,
         });
 
@@ -589,7 +608,22 @@ const markOrderAsFailed = async (orderId, auditContext = null) => {
             walletDeducted: refundWallet,
             creditUsedAmount: refundCredit,
             reference: order._id,
+            semanticType: LEDGER_TRANSACTION_TYPES.ORDER_REFUND,
+            sourceType: TRANSACTION_SOURCE_TYPES.ORDER,
+            sourceId: order._id,
+            currency: order.currency || 'USD',
             description: `Refund for failed order #${order.orderNumber || order._id} (${totalRefund} ${order.currency || 'USD'})`,
+            metadata: {
+                orderId: order._id.toString(),
+                orderNumber: order.orderNumber,
+                walletRefunded: refundWallet,
+                creditRefunded: refundCredit,
+                totalRefund,
+                reason: 'ORDER_FAILED',
+            },
+            idempotencyKey: `order:${order._id.toString()}:refund:failed`,
+            actorId: auditContext?.actorId ?? order.userId,
+            actorRole: auditContext?.actorRole ?? ACTOR_ROLES.ADMIN,
             session,
         });
 
@@ -744,7 +778,23 @@ const processOrderRefund = async (orderId, remains = 0, auditContext = null) => 
             walletDeducted: refundAmount,
             creditUsedAmount: 0,
             reference: order._id,
+            semanticType: LEDGER_TRANSACTION_TYPES.ORDER_REFUND,
+            sourceType: TRANSACTION_SOURCE_TYPES.ORDER,
+            sourceId: order._id,
+            currency: order.currency || 'USD',
             description,
+            metadata: {
+                orderId: order._id.toString(),
+                orderNumber: order.orderNumber,
+                refundAmount,
+                remains: remainsCount,
+                quantity: order.quantity,
+                isPartial,
+                reason: isPartial ? 'PARTIAL_DELIVERY' : 'ORDER_CANCELED',
+            },
+            idempotencyKey: `order:${order._id.toString()}:refund:${isPartial ? `partial:${remainsCount}` : 'full'}`,
+            actorId: auditContext?.actorId ?? order.userId,
+            actorRole: auditContext?.actorRole ?? ACTOR_ROLES.SYSTEM,
             session,
         });
 

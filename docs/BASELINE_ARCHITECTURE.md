@@ -45,7 +45,7 @@ Deposits are customer-created requests with a receipt stored under `uploads/depo
 
 Orders debit wallet balance atomically, create order records, and either fulfill through a provider adapter or enter manual/provider-processing states. Refund and forced-complete paths use wallet service helpers and audit logs.
 
-The current wallet transaction types are `CREDIT`, `DEBIT`, `REFUND`, and `DEBT_ADJUSTMENT`. Phase 2 should expand ledger semantics before card payments or referral commissions are added.
+Wallet transactions keep legacy `type` values (`CREDIT`, `DEBIT`, `REFUND`, `DEBT_ADJUSTMENT`) and now carry Phase 2 ledger fields such as `semanticType`, `direction`, `sourceType`, `sourceId`, `currency`, metadata, actor fields, and optional idempotency keys. See `docs/LEDGER_ARCHITECTURE.md`.
 
 ## Provider Architecture
 

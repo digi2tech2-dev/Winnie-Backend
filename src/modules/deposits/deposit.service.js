@@ -267,20 +267,33 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
         conversionNote = `${finalAmount} ${finalCurrency} → ${amountInUsd} USD → ${walletCreditAmount} ${walletCurrency}`;
     }
 
-    // Credit the wallet
-    await creditWalletDirect({
-        userId: updated.userId,
-        amount: walletCreditAmount,
-        reference: updated._id,
-        description: `Deposit #${updated._id.toString().slice(-6)} (${finalAmount} ${finalCurrency})`,
-    });
-
-    // ── Audit: fire-and-forget ────────────────────────────────────────────
     const actorId = auditContext?.actorId ?? adminId;
     const actorRole = auditContext?.actorRole ?? ACTOR_ROLES.ADMIN;
     const ipAddress = auditContext?.ipAddress ?? null;
     const userAgent = auditContext?.userAgent ?? null;
 
+    // Credit the wallet
+    await creditWalletDirect({
+        userId: updated.userId,
+        amount: walletCreditAmount,
+        reference: updated._id,
+        sourceId: updated._id,
+        currency: walletCurrency,
+        description: `Deposit #${updated._id.toString().slice(-6)} (${finalAmount} ${finalCurrency})`,
+        metadata: {
+            depositId: updated._id.toString(),
+            finalAmount,
+            finalCurrency,
+            walletCurrency,
+            walletCreditAmount,
+            conversionNote,
+        },
+        idempotencyKey: `deposit:${updated._id.toString()}:approved`,
+        actorId,
+        actorRole,
+    });
+
+    // ── Audit: fire-and-forget ────────────────────────────────────────────
     createAuditLog({
         actorId, actorRole, ipAddress, userAgent,
         action: DEPOSIT_ACTIONS.APPROVED,

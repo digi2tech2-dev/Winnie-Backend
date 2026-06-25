@@ -221,6 +221,10 @@ describe('[2] executeOrder -- provider cases', () => {
         });
         expect(refundTxns.length).toBe(1);
         expect(refundTxns[0].amount).toBe(50);
+        expect(refundTxns[0].semanticType).toBe('ORDER_REFUND');
+        expect(refundTxns[0].sourceType).toBe('ORDER');
+        expect(refundTxns[0].sourceId.toString()).toBe(order._id.toString());
+        expect(refundTxns[0].direction).toBe('CREDIT');
     });
 
     it('Guard: non-PROCESSING order -> executeOrder is a no-op', async () => {
@@ -334,6 +338,10 @@ describe('[3] refundFailedOrder -- idempotency', () => {
             type: 'REFUND',
         });
         expect(txns.length).toBe(1);
+        expect(txns[0].semanticType).toBe('ORDER_REFUND');
+        expect(txns[0].sourceType).toBe('ORDER');
+        expect(txns[0].sourceId.toString()).toBe(order._id.toString());
+        expect(txns[0].direction).toBe('CREDIT');
     });
 });
 

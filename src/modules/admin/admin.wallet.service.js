@@ -10,7 +10,13 @@
  */
 
 const { User, ROLES } = require('../users/user.model');
-const { WalletTransaction, TRANSACTION_TYPES } = require('../wallet/walletTransaction.model');
+const {
+    WalletTransaction,
+    TRANSACTION_TYPES,
+    LEDGER_TRANSACTION_TYPES,
+    TRANSACTION_DIRECTIONS,
+    TRANSACTION_SOURCE_TYPES,
+} = require('../wallet/walletTransaction.model');
 const { NotFoundError, BusinessRuleError, AuthorizationError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
@@ -199,12 +205,25 @@ const addFunds = async (userId, amount, reason, actorContext) => {
     const transaction = await WalletTransaction.create({
         userId,
         type: TRANSACTION_TYPES.CREDIT,
+        semanticType: LEDGER_TRANSACTION_TYPES.ADMIN_ADJUSTMENT,
+        sourceType: TRANSACTION_SOURCE_TYPES.ADMIN_ADJUSTMENT,
+        direction: TRANSACTION_DIRECTIONS.CREDIT,
         amount: parsedAmount,
         balanceBefore,
         balanceAfter,
         reference: null,
+        currency: userCurrency,
         status: 'COMPLETED',
         description: reason || `Admin manual credit (${userCurrency})`,
+        metadata: {
+            operation: 'ADD',
+            reason,
+            creditRepaid,
+            creditUsedBefore,
+            creditUsedAfter,
+        },
+        actorId: actor.actorId,
+        actorRole: actor.actorRole,
     });
 
     // Audit (fire-and-forget)
@@ -308,12 +327,25 @@ const deductFunds = async (userId, amount, reason, actorContext) => {
     const transaction = await WalletTransaction.create({
         userId,
         type: TRANSACTION_TYPES.DEBIT,
+        semanticType: LEDGER_TRANSACTION_TYPES.ADMIN_ADJUSTMENT,
+        sourceType: TRANSACTION_SOURCE_TYPES.ADMIN_ADJUSTMENT,
+        direction: TRANSACTION_DIRECTIONS.DEBIT,
         amount: parsedAmount,
         balanceBefore,
         balanceAfter,
         reference: null,
+        currency: userCurrency,
         status: 'COMPLETED',
         description: reason || `Admin manual debit (${userCurrency})`,
+        metadata: {
+            operation: 'DEDUCT',
+            reason,
+            creditDrawn,
+            creditUsedBefore,
+            creditUsedAfter,
+        },
+        actorId: actor.actorId,
+        actorRole: actor.actorRole,
     });
 
     // Audit (fire-and-forget)
@@ -403,17 +435,31 @@ const setBalance = async (userId, targetBalance, reason, actorContext) => {
     // Determine transaction type based on direction
     const delta = safeRound(newBalance - balanceBefore);
     const txType = delta >= 0 ? TRANSACTION_TYPES.CREDIT : TRANSACTION_TYPES.DEBIT;
+    const txDirection = delta >= 0 ? TRANSACTION_DIRECTIONS.CREDIT : TRANSACTION_DIRECTIONS.DEBIT;
 
     // Create the wallet transaction record
     const transaction = await WalletTransaction.create({
         userId,
         type: txType,
+        semanticType: LEDGER_TRANSACTION_TYPES.ADMIN_ADJUSTMENT,
+        sourceType: TRANSACTION_SOURCE_TYPES.ADMIN_ADJUSTMENT,
+        direction: txDirection,
         amount: safeRound(Math.abs(delta)),
         balanceBefore,
         balanceAfter: newBalance,
         reference: null,
+        currency: userCurrency,
         status: 'COMPLETED',
         description: reason || `Admin set balance to ${newBalance} (${userCurrency})`,
+        metadata: {
+            operation: 'SET',
+            reason,
+            targetBalance: newBalance,
+            delta,
+            creditUsedAfter,
+        },
+        actorId: actor.actorId,
+        actorRole: actor.actorRole,
     });
 
     // Audit (fire-and-forget)
@@ -530,12 +576,25 @@ const adjustNegativeBalancesForInflation = async (percentageIncrease, actorConte
             await WalletTransaction.create({
                 userId: user._id,
                 type: TRANSACTION_TYPES.DEBT_ADJUSTMENT,
+                semanticType: LEDGER_TRANSACTION_TYPES.DEBT_ADJUSTMENT,
+                sourceType: TRANSACTION_SOURCE_TYPES.DEBT_ADJUSTMENT,
+                direction: TRANSACTION_DIRECTIONS.DEBIT,
                 amount: adjustment,
                 balanceBefore,
                 balanceAfter,
                 reference: null,
+                currency: user.currency || currencyCode || 'USD',
                 status: 'COMPLETED',
                 description: `Debt adjustment due to ${currencyCode || 'currency'} rate increase (${percentageIncrease}%)`,
+                metadata: {
+                    operation: 'INFLATION',
+                    percentageIncrease,
+                    currencyCode,
+                    creditUsedBefore,
+                    creditUsedAfter,
+                },
+                actorId: actor.actorId,
+                actorRole: actor.actorRole,
             });
 
 
@@ -643,12 +702,24 @@ const adjustNegativeBalancesForDeflation = async (percentageDecrease, actorConte
             await WalletTransaction.create({
                 userId: user._id,
                 type: TRANSACTION_TYPES.DEBT_ADJUSTMENT,
+                semanticType: LEDGER_TRANSACTION_TYPES.DEBT_ADJUSTMENT,
+                sourceType: TRANSACTION_SOURCE_TYPES.DEBT_ADJUSTMENT,
+                direction: TRANSACTION_DIRECTIONS.CREDIT,
                 amount: adjustment,
                 balanceBefore,
                 balanceAfter,
                 reference: null,
+                currency: user.currency || currencyCode || 'USD',
                 status: 'COMPLETED',
                 description: `Debt relief due to ${currencyCode || 'currency'} rate decrease (${percentageDecrease}%)`,
+                metadata: {
+                    operation: 'DEFLATION',
+                    percentageDecrease,
+                    currencyCode,
+                    creditUsedAfter,
+                },
+                actorId: actor.actorId,
+                actorRole: actor.actorRole,
             });
 
             usersAdjusted++;
