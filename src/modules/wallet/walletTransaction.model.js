@@ -12,6 +12,10 @@ const TRANSACTION_TYPES = Object.freeze({
     DEBT_ADJUSTMENT: 'DEBT_ADJUSTMENT',
 });
 
+// PHASE 2 TODO: expand ledger semantics before payment/referral features.
+// Candidate types: CARD_PAYMENT_SUCCESS, CARD_PAYMENT_FAILED,
+// REFERRAL_COMMISSION, ADMIN_ADJUSTMENT, ORDER_DEBIT, ORDER_REFUND.
+
 /**
  * Transaction status values.
  */

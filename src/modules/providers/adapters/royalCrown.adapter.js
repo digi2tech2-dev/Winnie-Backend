@@ -11,7 +11,7 @@
  *   - structured error wrapping so upstream failures never leak raw axios errors
  *
  * Provider API spec:
- *   Base URL       : provider.baseUrl  (e.g. https://royal-croown.com)
+ *   Base URL       : provider.baseUrl  (e.g. https://provider.example.com)
  *   Auth header    : api-token: <token>
  *
  *   GET  /api/api/AllProducts                       — fetch product catalogue

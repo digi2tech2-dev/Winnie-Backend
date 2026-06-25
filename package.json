@@ -1,14 +1,15 @@
 {
-  "name": "digital-products-platform",
+  "name": "digital-products-platform-backend",
   "version": "1.0.0",
-  "description": "Production-grade Digital Products Platform with financial logic",
+  "description": "Clean Express and MongoDB backend base for a digital products and recharge platform",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "seed": "node src/scripts/seed.js",
     "seed:clear": "node src/scripts/seed.js --clear",
-    "test": "jest --runInBand --forceExit"
+    "test": "jest --runInBand --forceExit",
+    "lint": "node scripts/check-syntax.js"
   },
   "keywords": [
     "digital-products",

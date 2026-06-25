@@ -179,6 +179,10 @@ const countTransactions = (userId) => WalletTransaction.countDocuments({ userId 
 const getTransactions = (userId) =>
     WalletTransaction.find({ userId }).sort({ createdAt: -1 });
 
+const expectDecimalString = (received, expected) => {
+    expect(String(received)).toBe(String(expected));
+};
+
 module.exports = {
     connectTestDB,
     disconnectTestDB,
@@ -192,6 +196,7 @@ module.exports = {
     freshGroup,
     countTransactions,
     getTransactions,
+    expectDecimalString,
     USER_STATUS,  // re-exported for convenient use in test files
     ROLES,
 };

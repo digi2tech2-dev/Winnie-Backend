@@ -430,7 +430,8 @@ describe('[5] Integration – Order refund', () => {
 
         expect(refundLog).not.toBeNull();
         expect(refundLog.entityId.toString()).toBe(order._id.toString());
-        expect(refundLog.metadata.totalRefunded).toBe(100);
+        expect(refundLog.metadata.totalRefund).toBe(100);
+        expect(refundLog.metadata.walletRefunded).toBe(100);
 
         expect(creditLog).not.toBeNull();
         expect(creditLog.entityId.toString()).toBe(customer._id.toString());

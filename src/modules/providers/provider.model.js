@@ -48,7 +48,8 @@ const providerSchema = new mongoose.Schema(
 
         /**
          * Primary API token / key for this provider.
-         * Stored in plain text — use env vars for production secrets.
+         * SECURITY_TODO: currently stored in plain text. Encrypt provider
+         * credentials at rest before production use and never seed real tokens.
          * Aliased as apiKey for backward compatibility with existing code.
          */
         apiToken: {

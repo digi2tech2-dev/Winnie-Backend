@@ -17,7 +17,7 @@
 const { User } = require('../users/user.model');
 const Group = require('../groups/group.model');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
-const { toDecimal, toStr, isPositive, multiply, add } = require('../../shared/utils/decimalPrecision');
+const { Decimal, toDecimal, toStr, isPositive, multiply, add } = require('../../shared/utils/decimalPrecision');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PURE CALCULATION
@@ -44,8 +44,20 @@ const calculateFinalPrice = (basePrice, percentage) => {
             'INVALID_BASE_PRICE'
         );
     }
-    const pct = Number(percentage);
-    if (!Number.isFinite(pct) || pct < 0) {
+    let pct;
+    try {
+        if (percentage === null || percentage === undefined || percentage === '') {
+            throw new Error('Missing percentage');
+        }
+        pct = new Decimal(percentage);
+    } catch {
+        throw new BusinessRuleError(
+            'percentage must be a non-negative number.',
+            'INVALID_PERCENTAGE'
+        );
+    }
+
+    if (!pct.isFinite() || pct.isNegative()) {
         throw new BusinessRuleError(
             'percentage must be a non-negative number.',
             'INVALID_PERCENTAGE'
@@ -53,7 +65,7 @@ const calculateFinalPrice = (basePrice, percentage) => {
     }
 
     // basePrice + basePrice * (percentage / 100)
-    const markup = multiply(basePrice, String(pct / 100));
+    const markup = multiply(basePrice, toStr(pct.dividedBy(100)));
     return add(basePrice, markup);
 };
 

@@ -18,10 +18,10 @@ const startServer = async () => {
         const server = app.listen(config.port, () => {
             console.log('');
             console.log('═══════════════════════════════════════════════════════');
-            console.log(`  🚀  Digital Products Platform`);
-            console.log(`  🌍  Environment : ${config.env}`);
-            console.log(`  📡  Port        : ${config.port}`);
-            console.log(`  🔗  Base URL    : http://localhost:${config.port}/api`);
+            console.log('  Digital Products Platform Backend');
+            console.log(`  Environment : ${config.env}`);
+            console.log(`  Port        : ${config.port}`);
+            console.log(`  Base URL    : http://localhost:${config.port}/api`);
             console.log('═══════════════════════════════════════════════════════');
             console.log('');
         });

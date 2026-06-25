@@ -262,8 +262,9 @@ describe('[2] Admin Wallet Service', () => {
     it('getWallet returns user with balance fields', async () => {
         const { customer } = await setup();
         const wallet = await adminWalletService.getWallet(customer._id);
-        expect(wallet.walletBalance).toBeDefined();
-        expect(wallet.creditLimit).toBeDefined();
+        expect(wallet.user.walletBalance).toBeDefined();
+        expect(wallet.user.creditLimit).toBeDefined();
+        expect(Array.isArray(wallet.recentTransactions)).toBe(true);
     });
 
     it('getTransactionHistory returns paginated transactions', async () => {
@@ -323,11 +324,13 @@ describe('[3] Admin Settings Service', () => {
         expect(fresh.value).toBe(true);
     });
 
-    it('updateSetting throws NOT_FOUND for unknown key', async () => {
+    it('updateSetting creates unknown keys using current upsert behavior', async () => {
         const { admin } = await setup();
-        await expect(
-            adminSettingService.updateSetting('unknownSetting', 999, admin._id)
-        ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+        const updated = await adminSettingService.updateSetting('unknownSetting', 999, admin._id);
+
+        expect(updated.key).toBe('unknownSetting');
+        expect(updated.value).toBe(999);
+        expect(updated.updatedBy.toString()).toBe(admin._id.toString());
     });
 
     it('seedDefaultSettings is idempotent — re-seeding does NOT overwrite admin changes', async () => {

@@ -104,8 +104,8 @@ const makeAlkasrAdapter = (clientOverrides = {}) => {
 describe('[1] TorosfonAdapter — getProducts()', () => {
     it('returns normalised DTOs from a plain array response', async () => {
         const raw = [
-            { id: 'T1', name: 'Widget', price: 5.50, min_order: 1, max_order: 100, active: true },
-            { id: 'T2', name: 'Gadget', price: 12.0, min_order: 2, max_order: 50, active: false },
+            { id: 'T1', product_name: 'Widget', product_price: 5.50, min: 1, max: 100, active: true },
+            { id: 'T2', product_name: 'Gadget', product_price: 12.0, min: 2, max: 50, active: false },
         ];
         const { adapter, client } = makeTorosAdapter();
         client.get.mockResolvedValueOnce({ data: raw });
@@ -116,7 +116,7 @@ describe('[1] TorosfonAdapter — getProducts()', () => {
         expect(products[0]).toMatchObject({
             externalProductId: 'T1',
             rawName: 'Widget',
-            rawPrice: 5.5,
+            rawPrice: '5.5',
             minQty: 1,
             maxQty: 100,
             isActive: true,
@@ -128,7 +128,7 @@ describe('[1] TorosfonAdapter — getProducts()', () => {
         const { adapter, client } = makeTorosAdapter();
         client.get.mockResolvedValueOnce({
             data: {
-                data: [{ id: 'TD1', name: 'X', price: 1, min_order: 1, max_order: 10, active: true }],
+                data: [{ id: 'TD1', product_name: 'X', product_price: 1, min: 1, max: 10, active: true }],
             },
         });
         const products = await adapter.getProducts();
@@ -139,18 +139,18 @@ describe('[1] TorosfonAdapter — getProducts()', () => {
         const { adapter, client } = makeTorosAdapter();
         client.get.mockResolvedValueOnce({
             data: {
-                products: [{ id: 'TP1', name: 'Y', price: 2, min_order: 1, max_order: 20, active: true }],
+                products: [{ id: 'TP1', product_name: 'Y', product_price: 2, min: 1, max: 20, active: true }],
             },
         });
         const products = await adapter.getProducts();
         expect(products[0].externalProductId).toBe('TP1');
     });
 
-    it('getProducts() calls /api/products', async () => {
+    it('getProducts() calls /api/AllProducts', async () => {
         const { adapter, client } = makeTorosAdapter();
         client.get.mockResolvedValueOnce({ data: [] });
         await adapter.getProducts();
-        expect(client.get).toHaveBeenCalledWith('/api/products');
+        expect(client.get).toHaveBeenCalledWith('/api/AllProducts');
     });
 });
 
@@ -161,8 +161,8 @@ describe('[1] TorosfonAdapter — getProducts()', () => {
 describe('[2] TorosfonAdapter — placeOrder()', () => {
     it('returns success result when provider responds with id and status=processing', async () => {
         const { adapter, client } = makeTorosAdapter();
-        client.post.mockResolvedValueOnce({
-            data: { id: 500, status: 'processing', product_id: 'T1', quantity: 2 },
+        client.get.mockResolvedValueOnce({
+            data: { id: 500, status: 'Pending', product_id: 'T1', quantity: 2 },
         });
 
         const result = await adapter.placeOrder({
@@ -174,13 +174,13 @@ describe('[2] TorosfonAdapter — placeOrder()', () => {
 
         expect(result.success).toBe(true);
         expect(result.providerOrderId).toBe(500);
-        expect(result.providerStatus).toBe('Pending');   // normalised
+        expect(result.providerStatus).toBe('Pending');
         expect(result.errorMessage).toBeNull();
     });
 
     it('returns success=true and Completed when status=completed', async () => {
         const { adapter, client } = makeTorosAdapter();
-        client.post.mockResolvedValueOnce({ data: { id: 501, status: 'completed' } });
+        client.get.mockResolvedValueOnce({ data: { id: 501, status: 'Completed' } });
         const result = await adapter.placeOrder({ productId: 'T1', amount: 1 });
         expect(result.success).toBe(true);
         expect(result.providerStatus).toBe('Completed');
@@ -188,7 +188,7 @@ describe('[2] TorosfonAdapter — placeOrder()', () => {
 
     it('accepts legacy externalProductId + quantity aliases', async () => {
         const { adapter, client } = makeTorosAdapter();
-        client.post.mockResolvedValueOnce({ data: { id: 502, status: 'pending' } });
+        client.get.mockResolvedValueOnce({ data: { id: 502, status: 'Pending' } });
         const result = await adapter.placeOrder({ externalProductId: 'T99', quantity: 3 });
         expect(result.success).toBe(true);
         expect(result.providerOrderId).toBe(502);
@@ -196,7 +196,7 @@ describe('[2] TorosfonAdapter — placeOrder()', () => {
 
     it('returns success=false when provider responds with success:false', async () => {
         const { adapter, client } = makeTorosAdapter();
-        client.post.mockResolvedValueOnce({
+        client.get.mockResolvedValueOnce({
             data: { success: false, message: 'Out of stock' },
         });
         const result = await adapter.placeOrder({ productId: 'T1', amount: 1 });
@@ -207,7 +207,7 @@ describe('[2] TorosfonAdapter — placeOrder()', () => {
 
     it('returns success=false when provider returns no order id', async () => {
         const { adapter, client } = makeTorosAdapter();
-        client.post.mockResolvedValueOnce({ data: { status: 'success' } });   // no id
+        client.get.mockResolvedValueOnce({ data: { status: 'Completed' } });   // no id
         const result = await adapter.placeOrder({ productId: 'T1', amount: 1 });
         expect(result.success).toBe(false);
         expect(result.errorMessage).toMatch(/no order id/i);
@@ -217,15 +217,15 @@ describe('[2] TorosfonAdapter — placeOrder()', () => {
         const { adapter, client } = makeTorosAdapter();
         const networkErr = new Error('ECONNREFUSED');
         networkErr.providerBody = null;
-        client.post.mockRejectedValueOnce(networkErr);
+        client.get.mockRejectedValueOnce(networkErr);
         const result = await adapter.placeOrder({ productId: 'T1', amount: 1 });
         expect(result.success).toBe(false);
         expect(result.errorMessage).toMatch(/ECONNREFUSED/);
     });
 
-    it('sends correct POST body to /api/orders', async () => {
+    it('sends correct GET params to /api/PlaceOrder/{productId}/data', async () => {
         const { adapter, client } = makeTorosAdapter();
-        client.post.mockResolvedValueOnce({ data: { id: 505, status: 'pending' } });
+        client.get.mockResolvedValueOnce({ data: { id: 505, status: 'Pending' } });
         await adapter.placeOrder({
             productId: 'T2',
             amount: 5,
@@ -233,11 +233,12 @@ describe('[2] TorosfonAdapter — placeOrder()', () => {
             referenceId: 'ref-xyz',
         });
 
-        expect(client.post).toHaveBeenCalledWith('/api/orders', {
-            product_id: 'T2',
-            quantity: 5,
-            player_id: 'player99',
-            reference_id: 'ref-xyz',
+        expect(client.get).toHaveBeenCalledWith('/api/PlaceOrder/T2/data', {
+            params: {
+                amount: 5,
+                player_Id: 'player99',
+                referenceId: 'ref-xyz',
+            },
         });
     });
 });
@@ -247,36 +248,38 @@ describe('[2] TorosfonAdapter — placeOrder()', () => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('[3] TorosfonAdapter — checkOrder() / checkOrders()', () => {
-    it('checkOrder() calls /api/orders/:id and normalises status', async () => {
+    it('checkOrder() calls /api/CheckOrder and returns provider status', async () => {
         const { adapter, client } = makeTorosAdapter();
-        client.get.mockResolvedValueOnce({ data: { id: 600, status: 'completed' } });
+        client.get.mockResolvedValueOnce({ data: { order_id: 600, status: 'Completed' } });
         const result = await adapter.checkOrder(600);
         expect(result.providerOrderId).toBe(600);
         expect(result.providerStatus).toBe('Completed');
-        expect(client.get).toHaveBeenCalledWith('/api/orders/600');
+        expect(client.get).toHaveBeenCalledWith('/api/CheckOrder', { params: { order_id: 600 } });
     });
 
-    it('checkOrder() maps toros "failed" → Cancelled', async () => {
+    it('checkOrder() preserves toros raw failed status for the shared mapper', async () => {
         const { adapter, client } = makeTorosAdapter();
-        client.get.mockResolvedValueOnce({ data: { id: 601, status: 'failed' } });
+        client.get.mockResolvedValueOnce({ data: { order_id: 601, status: 'failed' } });
         const result = await adapter.checkOrder(601);
-        expect(result.providerStatus).toBe('Cancelled');
+        expect(result.providerStatus).toBe('failed');
     });
 
-    it('checkOrders() POSTs to /api/orders/batch-status and returns array', async () => {
+    it('checkOrders() GETs /api/CheckListOrders and returns array from object map', async () => {
         const { adapter, client } = makeTorosAdapter();
-        client.post.mockResolvedValueOnce({
-            data: [
-                { id: 700, status: 'completed' },
-                { id: 701, status: 'processing' },
-            ],
+        client.get.mockResolvedValueOnce({
+            data: {
+                700: { status: 'Completed' },
+                701: { status: 'Pending' },
+            },
         });
 
         const results = await adapter.checkOrders([700, 701]);
         expect(results).toHaveLength(2);
         expect(results[0]).toMatchObject({ providerOrderId: 700, providerStatus: 'Completed' });
         expect(results[1]).toMatchObject({ providerOrderId: 701, providerStatus: 'Pending' });
-        expect(client.post).toHaveBeenCalledWith('/api/orders/batch-status', { order_ids: [700, 701] });
+        expect(client.get).toHaveBeenCalledWith('/api/CheckListOrders', {
+            params: { orders: JSON.stringify([700, 701]) },
+        });
     });
 
     it('checkOrders() returns [] for empty input', async () => {
@@ -285,10 +288,10 @@ describe('[3] TorosfonAdapter — checkOrder() / checkOrders()', () => {
         expect(results).toEqual([]);
     });
 
-    it('checkOrders() unwraps { orders: [...] } envelope', async () => {
+    it('checkOrders() reads provider object-map responses', async () => {
         const { adapter, client } = makeTorosAdapter();
-        client.post.mockResolvedValueOnce({
-            data: { orders: [{ id: 800, status: 'done' }] },
+        client.get.mockResolvedValueOnce({
+            data: { 800: { status: 'Completed' } },
         });
         const results = await adapter.checkOrders([800]);
         expect(results[0].providerStatus).toBe('Completed');
@@ -304,11 +307,10 @@ describe('[4] AlkasrVipAdapter — getProducts()', () => {
         const raw = {
             services: [
                 {
-                    service_id: 'A1',
-                    service_name: 'Alkasr Package',
-                    cost_per_unit: 7.25,
-                    min: 1,
-                    max: 200,
+                    id: 'A1',
+                    name: 'Alkasr Package',
+                    price: 7.25,
+                    qty_values: { min: 1, max: 200 },
                     is_active: true,
                 },
             ],
@@ -321,7 +323,7 @@ describe('[4] AlkasrVipAdapter — getProducts()', () => {
         expect(products[0]).toMatchObject({
             externalProductId: 'A1',
             rawName: 'Alkasr Package',
-            rawPrice: 7.25,
+            rawPrice: '7.25',
             minQty: 1,
             maxQty: 200,
             isActive: true,
@@ -331,17 +333,17 @@ describe('[4] AlkasrVipAdapter — getProducts()', () => {
     it('returns normalised DTOs from a plain array', async () => {
         const { adapter, client } = makeAlkasrAdapter();
         client.get.mockResolvedValueOnce({
-            data: [{ service_id: 'A2', service_name: 'X', cost_per_unit: 1, min: 1, max: 50 }],
+            data: [{ id: 'A2', name: 'X', price: 1, qty_values: { min: 1, max: 50 } }],
         });
         const products = await adapter.getProducts();
         expect(products[0].externalProductId).toBe('A2');
     });
 
-    it('calls GET /services', async () => {
+    it('calls GET /client/api/products', async () => {
         const { adapter, client } = makeAlkasrAdapter();
         client.get.mockResolvedValueOnce({ data: [] });
         await adapter.getProducts();
-        expect(client.get).toHaveBeenCalledWith('/services');
+        expect(client.get).toHaveBeenCalledWith('/client/api/products');
     });
 });
 
@@ -352,7 +354,7 @@ describe('[4] AlkasrVipAdapter — getProducts()', () => {
 describe('[5] AlkasrVipAdapter — placeOrder()', () => {
     it('returns success=true when Alkasr status=wait (→ Pending / still processing)', async () => {
         const { adapter, client } = makeAlkasrAdapter();
-        client.post.mockResolvedValueOnce({
+        client.get.mockResolvedValueOnce({
             data: { order_id: 1001, status: 'wait' },
         });
 
@@ -364,14 +366,14 @@ describe('[5] AlkasrVipAdapter — placeOrder()', () => {
         });
 
         expect(result.success).toBe(true);
-        expect(result.providerOrderId).toBe(1001);
+        expect(result.providerOrderId).toBe('1001');
         expect(result.providerStatus).toBe('Pending');   // wait → Pending
         expect(result.errorMessage).toBeNull();
     });
 
     it('returns success=true when Alkasr status=accept (→ Completed)', async () => {
         const { adapter, client } = makeAlkasrAdapter();
-        client.post.mockResolvedValueOnce({ data: { order_id: 1002, status: 'accept' } });
+        client.get.mockResolvedValueOnce({ data: { order_id: 1002, status: 'accept' } });
         const result = await adapter.placeOrder({ productId: 'A1', amount: 1 });
         expect(result.success).toBe(true);
         expect(result.providerStatus).toBe('Completed');
@@ -379,8 +381,8 @@ describe('[5] AlkasrVipAdapter — placeOrder()', () => {
 
     it('returns success=false when Alkasr status=reject', async () => {
         const { adapter, client } = makeAlkasrAdapter();
-        client.post.mockResolvedValueOnce({
-            data: { status: 'reject', message: 'Invalid uid' },
+        client.get.mockResolvedValueOnce({
+            data: { success: false, status: 'reject', message: 'Invalid uid' },
         });
         const result = await adapter.placeOrder({ productId: 'A1', amount: 1, playerId: 'bad' });
         expect(result.success).toBe(false);
@@ -390,7 +392,7 @@ describe('[5] AlkasrVipAdapter — placeOrder()', () => {
 
     it('returns success=false when order_id is absent from response', async () => {
         const { adapter, client } = makeAlkasrAdapter();
-        client.post.mockResolvedValueOnce({ data: { status: 'wait' } });   // no order_id
+        client.get.mockResolvedValueOnce({ data: { status: 'wait' } });   // no order_id
         const result = await adapter.placeOrder({ productId: 'A1', amount: 1 });
         expect(result.success).toBe(false);
         expect(result.errorMessage).toMatch(/no order id/i);
@@ -400,15 +402,15 @@ describe('[5] AlkasrVipAdapter — placeOrder()', () => {
         const { adapter, client } = makeAlkasrAdapter();
         const err = new Error('Timeout');
         err.providerBody = null;
-        client.post.mockRejectedValueOnce(err);
+        client.get.mockRejectedValueOnce(err);
         const result = await adapter.placeOrder({ productId: 'A1', amount: 1 });
         expect(result.success).toBe(false);
         expect(result.errorMessage).toMatch(/Timeout/);
     });
 
-    it('sends correct POST body to /order/create', async () => {
+    it('sends correct GET params to /client/api/newOrder/{productId}/params', async () => {
         const { adapter, client } = makeAlkasrAdapter();
-        client.post.mockResolvedValueOnce({ data: { order_id: 1005, status: 'wait' } });
+        client.get.mockResolvedValueOnce({ data: { order_id: 1005, status: 'wait' } });
 
         await adapter.placeOrder({
             productId: 'A3',
@@ -417,21 +419,22 @@ describe('[5] AlkasrVipAdapter — placeOrder()', () => {
             referenceId: 'ref-7',
         });
 
-        expect(client.post).toHaveBeenCalledWith('/order/create', {
-            service_id: 'A3',
-            qty: 7,
-            uid: 'uid555',
-            ref: 'ref-7',
+        expect(client.get).toHaveBeenCalledWith('/client/api/newOrder/A3/params', {
+            params: {
+                qty: 7,
+                playerId: 'uid555',
+                order_uuid: expect.any(String),
+            },
         });
     });
 
-    it('does not include uid/ref when playerId/referenceId are absent', async () => {
+    it('uses an empty playerId when playerId is absent', async () => {
         const { adapter, client } = makeAlkasrAdapter();
-        client.post.mockResolvedValueOnce({ data: { order_id: 1006, status: 'wait' } });
+        client.get.mockResolvedValueOnce({ data: { order_id: 1006, status: 'wait' } });
         await adapter.placeOrder({ productId: 'A4', amount: 2 });
-        const body = client.post.mock.calls[0][1];
-        expect(body).not.toHaveProperty('uid');
-        expect(body).not.toHaveProperty('ref');
+        const { params } = client.get.mock.calls[0][1];
+        expect(params.playerId).toBe('');
+        expect(params).not.toHaveProperty('referenceId');
     });
 });
 
@@ -444,9 +447,11 @@ describe('[6] AlkasrVipAdapter — checkOrder() / checkOrders()', () => {
         const { adapter, client } = makeAlkasrAdapter();
         client.get.mockResolvedValueOnce({ data: { order_id: 2001, status: 'accepted' } });
         const result = await adapter.checkOrder(2001);
-        expect(result.providerOrderId).toBe(2001);
+        expect(result.providerOrderId).toBe('2001');
         expect(result.providerStatus).toBe('Completed');
-        expect(client.get).toHaveBeenCalledWith('/order/status', { params: { order_id: 2001 } });
+        expect(client.get).toHaveBeenCalledWith('/client/api/check', {
+            params: { orders: JSON.stringify([2001]) },
+        });
     });
 
     it('checkOrder() maps "waiting" → Pending', async () => {
@@ -463,21 +468,21 @@ describe('[6] AlkasrVipAdapter — checkOrder() / checkOrders()', () => {
         expect(result.providerStatus).toBe('Cancelled');
     });
 
-    it('checkOrders() POSTs to /order/status/bulk', async () => {
+    it('checkOrders() GETs /client/api/check', async () => {
         const { adapter, client } = makeAlkasrAdapter();
-        client.post.mockResolvedValueOnce({
-            data: {
-                orders: [
-                    { order_id: 3001, status: 'accept' },
-                    { order_id: 3002, status: 'reject' },
-                ],
-            },
+        client.get.mockResolvedValueOnce({
+            data: [
+                { order_id: 3001, status: 'accept' },
+                { order_id: 3002, status: 'reject' },
+            ],
         });
         const results = await adapter.checkOrders([3001, 3002]);
         expect(results).toHaveLength(2);
-        expect(results[0]).toMatchObject({ providerOrderId: 3001, providerStatus: 'Completed' });
-        expect(results[1]).toMatchObject({ providerOrderId: 3002, providerStatus: 'Cancelled' });
-        expect(client.post).toHaveBeenCalledWith('/order/status/bulk', { order_ids: [3001, 3002] });
+        expect(results[0]).toMatchObject({ providerOrderId: '3001', providerStatus: 'Completed' });
+        expect(results[1]).toMatchObject({ providerOrderId: '3002', providerStatus: 'Cancelled' });
+        expect(client.get).toHaveBeenCalledWith('/client/api/check', {
+            params: { orders: JSON.stringify([3001, 3002]) },
+        });
     });
 
     it('checkOrders() returns [] for empty input', async () => {
@@ -496,6 +501,7 @@ describe('[7] statusMapper — Toros + Alkasr + canonical vocabulary', () => {
     const COMPLETED = 'COMPLETED';
     const PROCESSING = 'PROCESSING';
     const FAILED = 'FAILED';
+    const CANCELED = 'CANCELED';
 
     it.each([
         ['Completed', COMPLETED],
@@ -522,20 +528,28 @@ describe('[7] statusMapper — Toros + Alkasr + canonical vocabulary', () => {
     });
 
     it.each([
-        ['Cancelled', FAILED],
-        ['cancelled', FAILED],
-        ['canceled', FAILED],
+        ['Cancelled', CANCELED],
+        ['cancelled', CANCELED],
+        ['canceled', CANCELED],
+        ['cancel', CANCELED],
+    ])('"%s" → CANCELED', (status, expected) => {
+        expect(toInternalStatus(status)).toBe(expected);
+    });
+
+    it.each([
         ['failed', FAILED],
         ['rejected', FAILED],
         ['error', FAILED],
         ['reject', FAILED],
-        ['cancel', FAILED],
     ])('"%s" → FAILED', (status, expected) => {
         expect(toInternalStatus(status)).toBe(expected);
     });
 
-    it('throws on completely unknown status', () => {
-        expect(() => toInternalStatus('ZOMBIE_STATUS')).toThrow(/Unknown provider status/);
+    it('defaults completely unknown status to PROCESSING', () => {
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        expect(toInternalStatus('ZOMBIE_STATUS')).toBe(PROCESSING);
+        expect(warnSpy).toHaveBeenCalled();
+        warnSpy.mockRestore();
     });
 
     // ── isTerminal ────────────────────────────────────────────────────────────
@@ -658,21 +672,21 @@ describe('[8] adapter.factory — resolution', () => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('[9] getBalance()', () => {
-    it('TorosfonAdapter.getBalance() calls /api/account/balance', async () => {
+    it('TorosfonAdapter.getBalance() calls /api/GetMyInfo', async () => {
         const { adapter, client } = makeTorosAdapter();
         const balanceData = { balance: 500.00, currency: 'USD' };
         client.get.mockResolvedValueOnce({ data: balanceData });
         const result = await adapter.getBalance();
         expect(result).toEqual(balanceData);
-        expect(client.get).toHaveBeenCalledWith('/api/account/balance');
+        expect(client.get).toHaveBeenCalledWith('/api/GetMyInfo');
     });
 
-    it('AlkasrVipAdapter.getBalance() calls /account/info', async () => {
+    it('AlkasrVipAdapter.getBalance() calls /client/api/profile', async () => {
         const { adapter, client } = makeAlkasrAdapter();
         const info = { balance: 1000, username: 'alkasrvip_user' };
         client.get.mockResolvedValueOnce({ data: info });
         const result = await adapter.getBalance();
         expect(result).toEqual(info);
-        expect(client.get).toHaveBeenCalledWith('/account/info');
+        expect(client.get).toHaveBeenCalledWith('/client/api/profile');
     });
 });

@@ -1,38 +1,33 @@
+'use strict';
+
 /**
- * PM2 Ecosystem Configuration
+ * PM2 ecosystem configuration.
  *
- * Start:  pm2 start ecosystem.config.js --env production
- * Stop:   pm2 stop all
- * Logs:   pm2 logs
- *
- * Cluster mode uses all available CPU cores on the VPS.
+ * Start: pm2 start ecosystem.config.js --env production
+ * Logs:  pm2 logs digital-products-platform-backend
  */
 module.exports = {
     apps: [
         {
-            name: 'digital-platform-api',
+            name: 'digital-products-platform-backend',
             script: 'src/server.js',
-
-            // ── Cluster mode — utilise all CPU cores ──────────────────────
             instances: 'max',
             exec_mode: 'cluster',
-
-            // ── Graceful restart settings ─────────────────────────────────
             watch: false,
             max_memory_restart: '512M',
             kill_timeout: 5000,
             wait_ready: true,
             listen_timeout: 10000,
-
-            // ── Logging ──────────────────────────────────────────────────
             log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
             error_file: './logs/pm2-error.log',
             out_file: './logs/pm2-out.log',
             merge_logs: true,
-
-            // ── Environment Variables ─────────────────────────────────────
             env: {
                 NODE_ENV: 'development',
+                PORT: 5000,
+                APP_URL: 'http://localhost:5000',
+                FRONTEND_URL: 'http://localhost:5173',
+                ALLOWED_ORIGINS: 'http://localhost:5173',
             },
             env_production: {
                 NODE_ENV: 'production',

@@ -48,6 +48,7 @@ const {
     createCustomerWithGroup,
     freshUser,
     freshGroup,
+    expectDecimalString,
 } = require('./testHelpers');
 
 // ─── Suite Lifecycle ──────────────────────────────────────────────────────────
@@ -420,10 +421,10 @@ describe('Edge cases', () => {
 
         // All order snapshot fields must be unchanged
         const freshOrder = await Order.findById(order._id);
-        expect(freshOrder.unitPrice).toBe(110);              // unchanged
-        expect(freshOrder.basePriceSnapshot).toBe(100);      // unchanged
+        expectDecimalString(freshOrder.unitPrice, '110');    // unchanged
+        expectDecimalString(freshOrder.basePriceSnapshot, '100'); // unchanged
         expect(freshOrder.markupPercentageSnapshot).toBe(10); // unchanged — still 10, not 50
-        expect(freshOrder.finalPriceCharged).toBe(110);      // unchanged
+        expectDecimalString(freshOrder.finalPriceCharged, '110'); // unchanged
 
         // Group has the new percentage (only affects future orders)
         const freshGrp = await freshGroup(group._id);

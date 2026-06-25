@@ -51,6 +51,28 @@ const userSchema = new mongoose.Schema(
             match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email address'],
         },
 
+        username: {
+            type: String,
+            lowercase: true,
+            trim: true,
+            maxlength: [100, 'Username cannot exceed 100 characters'],
+            default: null,
+        },
+
+        phone: {
+            type: String,
+            trim: true,
+            maxlength: [30, 'Phone cannot exceed 30 characters'],
+            default: null,
+        },
+
+        country: {
+            type: String,
+            trim: true,
+            maxlength: [100, 'Country cannot exceed 100 characters'],
+            default: null,
+        },
+
         password: {
             type: String,
             // Not required for OAuth users (Google sign-in never sets a password)
@@ -278,6 +300,20 @@ const userSchema = new mongoose.Schema(
             default: null,
         },
 
+        referralCode: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            default: null,
+        },
+
+        // Placeholder only. Referral commissions are intentionally Phase 2 work.
+        referredBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+        },
+
         /** Soft-delete timestamp. Null = not deleted. */
         deletedAt: {
             type: Date,
@@ -297,6 +333,14 @@ userSchema.index({ role: 1 });
 userSchema.index({ permissions: 1 });
 userSchema.index({ groupId: 1 });
 userSchema.index({ deletedAt: 1 }, { sparse: true });  // fast filter for non-deleted users
+userSchema.index(
+    { username: 1 },
+    { unique: true, partialFilterExpression: { username: { $type: 'string' } } }
+);
+userSchema.index(
+    { referralCode: 1 },
+    { unique: true, partialFilterExpression: { referralCode: { $type: 'string' } } }
+);
 // status index defined inline above
 
 // ─── Virtuals ────────────────────────────────────────────────────────────────

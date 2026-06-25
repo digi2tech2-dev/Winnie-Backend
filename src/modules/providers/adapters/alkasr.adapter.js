@@ -6,7 +6,7 @@
  * HTTP adapter for the **Alkasr VIP** external provider.
  *
  * ─── API Overview ─────────────────────────────────────────────────────────────
- *  Base URL    : provider.baseUrl  (e.g. https://alkasr-vip.com)
+ *  Base URL    : provider.baseUrl  (e.g. https://provider.example.com)
  *  Auth        : api-token: <token>  header on every request
  *
  *  GET  /client/api/products                         — fetch product catalogue

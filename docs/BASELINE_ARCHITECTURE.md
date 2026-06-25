@@ -1,0 +1,113 @@
+# Baseline Architecture
+
+## Current Architecture
+
+The backend is a modular Express monolith. `src/app.js` builds the Express app, installs security, CORS, parsing, static uploads, rate limits, and route modules. `src/server.js` connects MongoDB, starts HTTP, and starts background jobs outside test mode.
+
+MongoDB access is through Mongoose models inside each module. Controllers stay thin, services hold business rules, and shared middleware handles authentication, authorization, validation, uploads, and error handling.
+
+## Modules
+
+- `auth`: registration, login, email verification, 2FA, optional Google OAuth.
+- `users`: admin and self-service user profile/account actions.
+- `me`: active-user panel for profile, wallet, products, orders, and deposits.
+- `groups`: pricing group tiers and active/inactive group management.
+- `wallet`: balance mutations and wallet transaction history.
+- `deposits`: deposit request lifecycle and admin review.
+- `products` and `categories`: platform catalog.
+- `providers`: provider records, adapter factory, live adapter calls, catalog sync.
+- `orders`: order pricing, wallet debit/refund, provider fulfillment, status polling.
+- `notifications`: user/admin notification records and event helpers.
+- `audit`: audit log creation and sensitive metadata redaction.
+- `currency`: active currencies, exchange rates, and debt adjustment helpers.
+- `admin`: dashboard and back-office orchestration routes.
+- `client`: API-token customer integration routes.
+
+## Auth Flow
+
+Registration validates `name`, `email`, `password`, and optional profile fields. A customer is created as `PENDING`, `verified=false`, assigned to the highest-percentage active group, and sent an email verification link.
+
+Login requires a verified email and `status=ACTIVE`. JWTs contain `id` and `role`. 2FA-enabled accounts receive a temporary 2FA token until OTP verification succeeds. Google OAuth is initialized only when Google credentials exist.
+
+## User Status Flow
+
+`User.status` is the access source of truth:
+
+- `PENDING`: registered but not approved.
+- `ACTIVE`: approved and allowed through active-user routes.
+- `REJECTED`: denied or revoked.
+
+`isActive` is a virtual compatibility shim for `status === ACTIVE`.
+
+## Wallet, Deposit, and Order Flow
+
+Deposits are customer-created requests with a receipt stored under `uploads/deposits`. Admin review approves or rejects. Approval credits the user's wallet using the current deposit service conversion logic and writes wallet/audit records.
+
+Orders debit wallet balance atomically, create order records, and either fulfill through a provider adapter or enter manual/provider-processing states. Refund and forced-complete paths use wallet service helpers and audit logs.
+
+The current wallet transaction types are `CREDIT`, `DEBIT`, `REFUND`, and `DEBT_ADJUSTMENT`. Phase 2 should expand ledger semantics before card payments or referral commissions are added.
+
+## Provider Architecture
+
+Provider records store `name`, `slug`, `baseUrl`, `apiToken`/`apiKey`, active state, sync interval, and supported features. The adapter factory maps known provider slugs/names to adapter classes and falls back to the mock adapter for unknown providers unless strict mode is requested.
+
+No provider is seeded by default. Provider tokens are currently plaintext and must be encrypted before production.
+
+## RBAC and Supervisor Permissions
+
+Roles are `ADMIN`, `SUPERVISOR`, and `CUSTOMER`. Admins bypass permission checks. Supervisors must have route-specific permission strings.
+
+Permission keys currently used by route guards:
+
+- `dashboard.view`
+- `users.view`
+- `users.delete`
+- `users.status`
+- `wallet.view`
+- `wallet.adjust`
+- `suppliers.manage`
+- `products.view`
+- `products.manage`
+- `products.provider.sync`
+- `orders.view`
+- `orders.update`
+- `orders.refund`
+- `groups.manage`
+- `topups.review`
+- Legacy aliases on provider listing only: `manage_providers`, `manage_products`
+
+Admin-only areas include supervisor management, settings, currencies, audit logs, role changes, password resets, user currency changes, and some wallet operations.
+
+## Upload Handling
+
+The active upload root is `uploads/` at the repository root. Express serves it at `/uploads`. Multer writes category folders such as:
+
+- `uploads/avatars`
+- `uploads/products`
+- `uploads/categories`
+- `uploads/payments`
+- `uploads/deposits`
+
+The copied `Project/uploads` tree is not an active upload root and is ignored for the clean base.
+
+## Background Jobs
+
+- Order fulfillment/status polling job starts from `src/modules/orders/fulfillmentJob.js`.
+- Provider catalog sync job starts from `src/modules/providers/syncProvidersJob.js`.
+- Exchange-rate sync service/job exists and is environment-configurable.
+
+Jobs skip startup work in `NODE_ENV=test` where implemented.
+
+## Audit Logs
+
+Audit logs record actor, action, entity, metadata, IP, and user agent. The audit service redacts sensitive keys such as passwords, tokens, secrets, API keys, and card-like fields before saving.
+
+## Known Limitations
+
+- Provider and customer API tokens are plaintext.
+- No refresh-token, logout, or token revocation model exists.
+- Permissions have no central whitelist or data scoping.
+- Some legacy permission aliases remain for provider list compatibility.
+- Local disk uploads are not suitable for multi-instance production without shared storage.
+- Existing provider adapters are legacy/sample until confirmed for the new platform.
+- Card payments, payment webhooks, referral commissions, and group-change workflows are intentionally not implemented in Phase 1.

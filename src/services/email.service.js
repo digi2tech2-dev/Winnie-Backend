@@ -15,8 +15,8 @@
  *   SMTP_PORT   - SMTP port (587 = STARTTLS, 465 = SSL, 2525 = Mailtrap)
  *   SMTP_USER   - Auth username
  *   SMTP_PASS   - Auth password / app password
- *   EMAIL_FROM  - Sender address (default: noreply@platform.com)
- *   APP_URL     - Base URL for verification links (default: http://localhost:3000)
+ *   EMAIL_FROM  - Sender address (default: noreply@example.com)
+ *   APP_URL     - Base URL for verification links (default: http://localhost:5000)
  *
  * In NODE_ENV=test all sends are silently skipped (no real email sent).
  */
@@ -59,7 +59,7 @@ const sendEmail = async ({ to, subject, html, text }) => {
     const transporter = _getTransporter();
 
     await transporter.sendMail({
-        from: `"Digital Platform" <${config.email.from}>`,
+        from: `"Platform" <${config.email.from}>`,
         to,
         subject,
         html,
@@ -96,7 +96,7 @@ const _verificationTemplate = ({ name, verifyUrl }) => `
             <td style="background:linear-gradient(135deg,#4f46e5,#7c3aed);
                        padding:40px 48px;text-align:center;">
               <h1 style="margin:0;color:#fff;font-size:26px;font-weight:700;
-                          letter-spacing:-0.5px;">Digital Platform</h1>
+                          letter-spacing:-0.5px;">Platform</h1>
               <p style="margin:8px 0 0;color:rgba(255,255,255,.75);font-size:14px;">
                 Account Verification
               </p>
@@ -144,7 +144,7 @@ const _verificationTemplate = ({ name, verifyUrl }) => `
             <td style="background:#f9fafb;padding:24px 48px;border-top:1px solid #e5e7eb;
                        text-align:center;">
               <p style="margin:0;font-size:12px;color:#9ca3af;">
-                &copy; ${new Date().getFullYear()} Digital Platform. All rights reserved.
+                &copy; ${new Date().getFullYear()} Platform. All rights reserved.
               </p>
             </td>
           </tr>
@@ -175,7 +175,7 @@ const _twoFactorOtpTemplate = ({ name, otp, expiresMinutes }) => `
           <tr>
             <td style="background:linear-gradient(135deg,#4f46e5,#7c3aed);
                        padding:36px 48px;text-align:center;">
-              <h1 style="margin:0;color:#fff;font-size:24px;font-weight:700;">Digital Platform</h1>
+              <h1 style="margin:0;color:#fff;font-size:24px;font-weight:700;">Platform</h1>
               <p style="margin:8px 0 0;color:rgba(255,255,255,.75);font-size:14px;">
                 Two-Factor Authentication
               </p>
@@ -204,7 +204,7 @@ const _twoFactorOtpTemplate = ({ name, otp, expiresMinutes }) => `
             <td style="background:#f9fafb;padding:22px 48px;border-top:1px solid #e5e7eb;
                        text-align:center;">
               <p style="margin:0;font-size:12px;color:#9ca3af;">
-                &copy; ${new Date().getFullYear()} Digital Platform. All rights reserved.
+                &copy; ${new Date().getFullYear()} Platform. All rights reserved.
               </p>
             </td>
           </tr>
@@ -232,7 +232,7 @@ const sendVerificationEmail = async (user, rawToken) => {
 
     await sendEmail({
         to: user.email,
-        subject: 'Verify your email address – Digital Platform',
+        subject: 'Verify your email address - Platform',
         html: _verificationTemplate({ name: user.name, verifyUrl }),
     });
 };

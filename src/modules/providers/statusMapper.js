@@ -10,17 +10,19 @@
  * Royal Crown / Torosfon Store (canonical)
  *   "Completed"            →  COMPLETED
  *   "Pending"              →  PROCESSING
- *   "Cancelled"            →  FAILED
+ *   "Cancelled"            →  CANCELED
  *
  * Torosfon-specific raw values (adapter normalises these, listed here as fallback)
  *   "completed", "success", "done"               →  COMPLETED
  *   "processing", "pending", "queued"             →  PROCESSING
- *   "failed", "rejected", "error", "cancelled"   →  FAILED
+ *   "failed", "rejected", "error"                →  FAILED
+ *   "cancelled", "canceled"                      →  CANCELED
  *
  * Alkasr VIP-specific raw values (adapter normalises too; listed as fallback)
  *   "accept", "accepted"               →  COMPLETED
  *   "wait", "waiting", "in_process"    →  PROCESSING
  *   "reject", "rejected"               →  FAILED
+ *   "cancelled", "canceled"            →  CANCELED
  *
  * Case-insensitive lookup so minor API inconsistencies don't crash the engine.
  */

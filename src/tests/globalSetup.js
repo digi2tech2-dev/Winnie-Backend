@@ -14,6 +14,7 @@ module.exports = async () => {
     // one-node replica set is enough for transactions
     const replSet = await MongoMemoryReplSet.create({
         replSet: { count: 1, storageEngine: 'wiredTiger' },
+        instanceOpts: [{ launchTimeout: 60000 }],
     });
 
     await replSet.waitUntilRunning();

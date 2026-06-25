@@ -242,17 +242,14 @@ const register = async ({ name, email, password, currency, country, phone, usern
     });
 
     // ── 6. Send verification email (fire-and-forget — never block registration) ──
-    const baseUrl = process.env.APP_URL || 'http://localhost:5000';
-    const verificationUrl = `${baseUrl}/api/auth/verify-email?token=${encodeURIComponent(rawToken)}`;
-
     sendVerificationEmail(user, rawToken).catch((err) => {
         console.error('[Auth] Failed to send verification email:', err.message);
     });
 
     if (user.status === USER_STATUS.PENDING) {
         void safeCreateAdminActorNotifications({
-            title: 'تسجيل مستخدم جديد',
-            message: 'قام مستخدم جديد بالتسجيل وبانتظار تفعيل حسابه.',
+            title: 'New user registration',
+            message: 'A new user registered and is waiting for account approval.',
             type: 'account',
             priority: 'normal',
             route: `/admin/users?userId=${user._id.toString()}`,

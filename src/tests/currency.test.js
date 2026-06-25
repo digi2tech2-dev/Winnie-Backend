@@ -224,7 +224,7 @@ describe('[5] currency.service admin operations', () => {
 
     it('updateCurrencyRate changes platformRate and invalidates cache', async () => {
         await makeCurrency({ code: 'SAR', platformRate: 4.00 });
-        const updated = await currencyService.updateCurrencyRate('SAR', { platformRate: 4.50 });
+        const { currency: updated } = await currencyService.updateCurrencyRate('SAR', { platformRate: 4.50 });
         expect(updated.platformRate).toBeCloseTo(4.50, 4);
     });
 
@@ -302,7 +302,7 @@ describe('[6] Order creation with currency conversion', () => {
 
         expect(order.currency).toBe('SAR');
         expect(order.rateSnapshot).toBe(4.00);
-        expect(order.usdAmount).toBeCloseTo(10, 2);
+        expect(Number(order.usdAmount)).toBeCloseTo(10, 2);
         expect(order.chargedAmount).toBeCloseTo(40, 2);
     });
 
@@ -330,7 +330,7 @@ describe('[6] Order creation with currency conversion', () => {
 
         expect(order.currency).toBe('USD');
         expect(order.rateSnapshot).toBe(1);
-        expect(order.usdAmount).toBeCloseTo(10, 2);
+        expect(Number(order.usdAmount)).toBeCloseTo(10, 2);
         expect(order.chargedAmount).toBeCloseTo(10, 2);
     });
 
@@ -344,7 +344,7 @@ describe('[6] Order creation with currency conversion', () => {
         });
 
         // 3 × 10 USD = 30 USD → 30 × 4.00 = 120 SAR
-        expect(order.usdAmount).toBeCloseTo(30, 2);
+        expect(Number(order.usdAmount)).toBeCloseTo(30, 2);
         expect(order.chargedAmount).toBeCloseTo(120, 2);
     });
 

@@ -12,7 +12,7 @@
  *  [1] pollPendingOrders — core mechanics
  *      Basic poll finds PROCESSING orders
  *      Updates completed orders to COMPLETED
- *      Updates cancelled/failed orders to FAILED + refunds wallet
+ *      Updates cancelled orders to CANCELED + refunds wallet
  *      Leaves still-pending orders as PROCESSING
  *      Returns zero stats when no orders exist
  *      Skips orders without providerOrderId
@@ -70,6 +70,8 @@ beforeAll(() => connectTestDB());
 afterAll(() => disconnectTestDB());
 beforeEach(() => clearCollections());
 
+let directOrderSeq = 0;
+
 // =============================================================================
 // FIXTURE FACTORIES
 // =============================================================================
@@ -124,6 +126,7 @@ const makeProductChain = async (providerOverrides = {}) => {
 const makeProcessingOrder = ({ userId, productId, groupId, providerOrderId = 9001, walletDeducted = 10 }) =>
     Order.create({
         userId,
+        orderNumber: 800000 + (++directOrderSeq),
         productId,
         quantity: 1,
         unitPrice: 10,
@@ -223,7 +226,7 @@ describe('[1] pollPendingOrders — core mechanics', () => {
         expect(updated.lastCheckedAt).not.toBeNull();
     });
 
-    it('transitions a Cancelled order to ORDER_STATUS.FAILED and refunds wallet', async () => {
+    it('transitions a Cancelled order to ORDER_STATUS.CANCELED and refunds wallet', async () => {
         const order = await makeProcessingOrder({
             userId: customer._id,
             productId: productChain.product._id,
@@ -243,7 +246,7 @@ describe('[1] pollPendingOrders — core mechanics', () => {
         expect(stats.failed).toBe(1);
 
         const updated = await Order.findById(order._id);
-        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.status).toBe(ORDER_STATUS.CANCELED);
         expect(updated.failedAt).not.toBeNull();
         expect(updated.refunded).toBe(true);  // refund applied
 
@@ -282,6 +285,7 @@ describe('[1] pollPendingOrders — core mechanics', () => {
         // Create a PROCESSING order with no providerOrderId
         await Order.create({
             userId: customer._id,
+            orderNumber: 800000 + (++directOrderSeq),
             productId: productChain.product._id,
             quantity: 1,
             unitPrice: 10,
@@ -304,6 +308,7 @@ describe('[1] pollPendingOrders — core mechanics', () => {
         // Create a COMPLETED order (should be ignored completely)
         const order = await Order.create({
             userId: customer._id,
+            orderNumber: 800000 + (++directOrderSeq),
             productId: productChain.product._id,
             quantity: 1,
             unitPrice: 10,

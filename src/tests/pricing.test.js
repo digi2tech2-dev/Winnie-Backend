@@ -48,6 +48,7 @@ const {
     createCustomerWithGroup,
     createProduct,
     freshUser,
+    expectDecimalString,
 } = require('./testHelpers');
 
 // ─── Suite Lifecycle ──────────────────────────────────────────────────────────
@@ -75,31 +76,31 @@ const placeOrder = ({ userId, productId, quantity = 1, idempotencyKey = null }) 
 
 describe('calculateFinalPrice — pure function', () => {
     it('returns basePrice unchanged when percentage = 0', () => {
-        expect(calculateFinalPrice(100, 0)).toBe(100);
-        expect(calculateFinalPrice(29.99, 0)).toBe(29.99);
+        expectDecimalString(calculateFinalPrice(100, 0), '100');
+        expectDecimalString(calculateFinalPrice(29.99, 0), '29.99');
     });
 
     it('applies 15% markup correctly: 100 × 1.15 = 115', () => {
-        expect(calculateFinalPrice(100, 15)).toBe(115);
+        expectDecimalString(calculateFinalPrice(100, 15), '115');
     });
 
-    it('rounds to 2 decimal places', () => {
-        // 9.99 × 1.15 = 11.4885 → should round to 11.49
-        expect(calculateFinalPrice(9.99, 15)).toBe(11.49);
+    it('preserves arbitrary precision instead of rounding product prices to 2 decimal places', () => {
+        // Wallet-facing chargedAmount is rounded elsewhere; product price math preserves precision.
+        expectDecimalString(calculateFinalPrice(9.99, 15), '11.4885');
         // 1/3 markup edge case
-        expect(calculateFinalPrice(10, 33.333)).toBe(13.33);
+        expectDecimalString(calculateFinalPrice(10, 33.333), '13.3333');
     });
 
     it('applies 200% markup: 50 + 100 = 150', () => {
-        expect(calculateFinalPrice(50, 200)).toBe(150);
+        expectDecimalString(calculateFinalPrice(50, 200), '150');
     });
 
     it('handles large values accurately', () => {
-        expect(calculateFinalPrice(99999.99, 25)).toBe(124999.99);
+        expectDecimalString(calculateFinalPrice(99999.99, 25), '124999.9875');
     });
 
     it('returns 0 when basePrice = 0 (no markup on nothing)', () => {
-        expect(calculateFinalPrice(0, 50)).toBe(0);
+        expectDecimalString(calculateFinalPrice(0, 50), '0');
     });
 
     it('throws INVALID_BASE_PRICE for negative basePrice', () => {
@@ -114,19 +115,13 @@ describe('calculateFinalPrice — pure function', () => {
         );
     });
 
-    it('throws INVALID_BASE_PRICE for non-number basePrice', () => {
-        expect(() => calculateFinalPrice('100', 10)).toThrow(
-            expect.objectContaining({ code: 'INVALID_BASE_PRICE' })
-        );
-        expect(() => calculateFinalPrice(null, 10)).toThrow(
-            expect.objectContaining({ code: 'INVALID_BASE_PRICE' })
-        );
+    it('accepts numeric string basePrice and treats null basePrice as zero', () => {
+        expectDecimalString(calculateFinalPrice('100', 10), '110');
+        expectDecimalString(calculateFinalPrice(null, 10), '0');
     });
 
-    it('throws INVALID_PERCENTAGE for non-number percentage', () => {
-        expect(() => calculateFinalPrice(100, '10')).toThrow(
-            expect.objectContaining({ code: 'INVALID_PERCENTAGE' })
-        );
+    it('accepts numeric string percentage and rejects missing percentage', () => {
+        expectDecimalString(calculateFinalPrice(100, '10'), '110');
         expect(() => calculateFinalPrice(100, undefined)).toThrow(
             expect.objectContaining({ code: 'INVALID_PERCENTAGE' })
         );
@@ -144,12 +139,10 @@ describe('calculateUserPrice — DB-backed', () => {
 
         const result = await calculateUserPrice(customer._id, 100);
 
-        expect(result).toMatchObject({
-            basePrice: 100,
-            markupPercentage: 20,
-            finalPrice: 120,          // 100 + 20%
-            groupId: group._id,
-        });
+        expectDecimalString(result.basePrice, '100');
+        expect(result.markupPercentage).toBe(20);
+        expectDecimalString(result.finalPrice, '120');          // 100 + 20%
+        expect(result.groupId.toString()).toBe(group._id.toString());
     });
 
     it('correctly applies the group markup to basePrice', async () => {
@@ -158,8 +151,8 @@ describe('calculateUserPrice — DB-backed', () => {
 
         const { finalPrice } = await calculateUserPrice(customer._id, 9.99);
 
-        // 9.99 × 1.15 = 11.4885 → rounds to 11.49
-        expect(finalPrice).toBe(11.49);
+        // 9.99 × 1.15 = 11.4885; product price snapshots preserve precision.
+        expectDecimalString(finalPrice, '11.4885');
     });
 
     it('returns finalPrice = basePrice when group percentage = 0', async () => {
@@ -169,7 +162,7 @@ describe('calculateUserPrice — DB-backed', () => {
         const { finalPrice, markupPercentage } = await calculateUserPrice(customer._id, 50);
 
         expect(markupPercentage).toBe(0);
-        expect(finalPrice).toBe(50);
+        expectDecimalString(finalPrice, '50');
     });
 
     it('throws NotFoundError for a non-existent userId', async () => {
@@ -223,7 +216,7 @@ describe('Order snapshot fields', () => {
 
         const { order } = await placeOrder({ userId: customer._id, productId: product._id });
 
-        expect(order.basePriceSnapshot).toBe(50);
+        expectDecimalString(order.basePriceSnapshot, '50');
     });
 
     it('markupPercentageSnapshot equals group.percentage at order time', async () => {
@@ -244,8 +237,8 @@ describe('Order snapshot fields', () => {
         const { order } = await placeOrder({ userId: customer._id, productId: product._id });
 
         // 200 + 10% = 220
-        expect(order.finalPriceCharged).toBe(220);
-        expect(order.unitPrice).toBe(220);   // unitPrice is an alias for finalPriceCharged
+        expectDecimalString(order.finalPriceCharged, '220');
+        expectDecimalString(order.unitPrice, '220');   // unitPrice is an alias for finalPriceCharged
     });
 
     it('groupIdSnapshot equals the group ID at order time', async () => {
@@ -271,8 +264,8 @@ describe('Order snapshot fields', () => {
 
         // finalPriceCharged = 10 + 20% = 12
         // totalPrice = 12 × 5 = 60
-        expect(order.finalPriceCharged).toBe(12);
-        expect(order.totalPrice).toBe(60);
+        expectDecimalString(order.finalPriceCharged, '12');
+        expectDecimalString(order.totalPrice, '60');
 
         // Wallet was also debited by finalPrice, not basePrice
         const user = await freshUser(customer._id);
@@ -298,8 +291,8 @@ describe('Order snapshot fields', () => {
         const freshOrder = await Order.findById(order._id);
 
         expect(freshOrder.markupPercentageSnapshot).toBe(origMarkup); // still 10
-        expect(freshOrder.finalPriceCharged).toBe(origFinal);         // still 110
-        expect(freshOrder.basePriceSnapshot).toBe(origBase);          // still 100
+        expectDecimalString(freshOrder.finalPriceCharged, origFinal); // still 110
+        expectDecimalString(freshOrder.basePriceSnapshot, origBase);  // still 100
     });
 
     it('changing user group AFTER order → groupIdSnapshot is UNCHANGED', async () => {

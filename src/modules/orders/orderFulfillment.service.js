@@ -182,7 +182,7 @@ const { Product } = require('../products/product.model');
  *
  * Case A: success=true  + Completed  → COMPLETED
  * Case B: success=true  + Pending    → keep PROCESSING, save providerOrderId
- * Case C: success=true  + Cancelled  → FAILED + refund
+ * Case C: success=true  + Cancelled  → CANCELED + refund
  * Case D: success=false              → FAILED + refund
  *
  * If no provider adapter is passed, the function self-resolves it from
@@ -363,6 +363,34 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
 
     // ── Persist the provider response onto the order ───────────────────────────
     const now = new Date();
+
+    if (newStatus === ORDER_STATUS.CANCELED || newStatus === ORDER_STATUS.PARTIAL) {
+        const preparedOrder = await Order.findByIdAndUpdate(
+            orderId,
+            {
+                $set: {
+                    providerOrderId: result.providerOrderId,
+                    providerStatus: result.providerStatus,
+                    providerRawResponse: result.rawResponse,
+                    lastCheckedAt: now,
+                },
+            },
+            { new: true }
+        );
+
+        const { action } = await processOrderStatusResult(preparedOrder, {
+            providerOrderId: result.providerOrderId,
+            providerStatus: result.providerStatus,
+            rawResponse: result.rawResponse,
+        });
+        const resolvedOrder = await Order.findById(orderId);
+
+        return {
+            order: resolvedOrder,
+            placed: action !== 'skipped',
+            refunded: resolvedOrder?.refunded === true,
+        };
+    }
 
     if (newStatus === ORDER_STATUS.FAILED) {
         await Order.findByIdAndUpdate(orderId, {
@@ -838,7 +866,8 @@ const _escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  *   2. Call adapter.checkOrders(ids) — one HTTP batch call per provider
  *   3. For each result:
  *       Completed / accept    → COMPLETED
- *       Cancelled / reject    → FAILED + refund  (via processOrderStatusResult)
+ *       Cancelled             → CANCELED + refund (via processOrderStatusResult)
+ *       reject / failed       → FAILED + refund   (via processOrderStatusResult)
  *       wait / Pending / 5xx  → leave PROCESSING, increment retryCount
  *
  * @param {Object|null} [providerOverride]  - single mock provider (tests only)

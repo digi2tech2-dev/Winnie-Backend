@@ -14,7 +14,7 @@ require('dotenv').config();
 
 const mongoose = require('mongoose');
 const config = require('../config/config');
-const { User, ROLES } = require('../modules/users/user.model');
+const { User, ROLES, USER_STATUS } = require('../modules/users/user.model');
 const Group = require('../modules/groups/group.model');
 const { Product } = require('../modules/products/product.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
@@ -62,38 +62,44 @@ const seed = async () => {
 
         // ── 2. Create Admin User ───────────────────────────────────────────────────
         // Admins are assigned the Standard group (lowest markup) by convention.
-        const adminExists = await User.findOne({ email: 'admin@platform.com' });
+        const adminExists = await User.findOne({ email: 'admin@example.com' });
         let admin;
         if (!adminExists) {
             admin = await User.create({
-                name: 'Platform Admin',
-                email: 'admin@platform.com',
-                password: 'Admin@1234',
+                name: 'Admin User',
+                email: 'admin@example.com',
+                password: 'AdminExample123',
                 role: ROLES.ADMIN,
                 groupId: standardGroup._id,
                 walletBalance: 0,
                 creditLimit: 0,
+                currency: 'USD',
+                status: USER_STATUS.ACTIVE,
+                verified: true,
             });
-            console.log(`✅ Admin created → email: admin@platform.com | password: Admin@1234`);
+            console.log('Admin created: admin@example.com / AdminExample123');
         } else {
             admin = adminExists;
             console.log(`ℹ️  Admin already exists (id: ${admin._id})`);
         }
 
         // ── 3. Create Customer User ────────────────────────────────────────────────
-        const customerExists = await User.findOne({ email: 'customer@platform.com' });
+        const customerExists = await User.findOne({ email: 'customer@example.com' });
         let customer;
         if (!customerExists) {
             customer = await User.create({
-                name: 'Test Customer',
-                email: 'customer@platform.com',
-                password: 'Customer@1234',
+                name: 'Customer User',
+                email: 'customer@example.com',
+                password: 'CustomerExample123',
                 role: ROLES.CUSTOMER,
                 groupId: standardGroup._id,  // Admin-overridden to Standard for testing
                 walletBalance: 500,           // Pre-loaded wallet for testing
                 creditLimit: 200,
+                currency: 'USD',
+                status: USER_STATUS.ACTIVE,
+                verified: true,
             });
-            console.log(`✅ Customer created → email: customer@platform.com | password: Customer@1234`);
+            console.log('Customer created: customer@example.com / CustomerExample123');
             console.log(`   walletBalance: $500 | creditLimit: $200 | group: Standard`);
         } else {
             customer = customerExists;
@@ -121,8 +127,8 @@ const seed = async () => {
         console.log('');
         console.log('═══════════════════════════════════════════════════');
         console.log('  Seed complete. Test credentials:');
-        console.log('  ADMIN    → admin@platform.com    / Admin@1234');
-        console.log('  CUSTOMER → customer@platform.com / Customer@1234');
+        console.log('  ADMIN    -> admin@example.com    / AdminExample123');
+        console.log('  CUSTOMER -> customer@example.com / CustomerExample123');
         console.log('═══════════════════════════════════════════════════');
 
         process.exit(0);

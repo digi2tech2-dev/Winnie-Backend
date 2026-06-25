@@ -110,8 +110,8 @@ const createDepositRequest = async ({
 
     void safeCreateNotification({
         userId,
-        title: 'تم استلام طلب الشحن',
-        message: `تم استلام طلب شحن الرصيد بمبلغ ${deposit.requestedAmount} ${deposit.currency} وجاري مراجعته من قبل الإدارة.`,
+        title: 'Deposit request received',
+        message: `Your deposit request for ${deposit.requestedAmount} ${deposit.currency} was received and is pending review.`,
         type: 'deposit',
         priority: 'normal',
         route: '/wallet',
@@ -132,8 +132,8 @@ const createDepositRequest = async ({
         roles: ['ADMIN', 'SUPERVISOR'],
         permissions: ['topups.review'],
         permissionMode: 'any',
-        title: 'طلب شحن رصيد جديد',
-        message: `هناك طلب شحن رصيد جديد بمبلغ ${deposit.requestedAmount} ${deposit.currency} في انتظار المراجعة.`,
+        title: 'New deposit request',
+        message: `A new deposit request for ${deposit.requestedAmount} ${deposit.currency} is waiting for review.`,
         type: 'deposit',
         priority: 'high',
         route: `/admin/payments?topupId=${deposit._id.toString()}`,

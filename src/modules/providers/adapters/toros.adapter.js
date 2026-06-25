@@ -8,7 +8,7 @@
  * Torosfon's API is an exact clone of the Royal Crown API.
  *
  * ─── API Overview ─────────────────────────────────────────────────────────────
- *  Base URL    : provider.baseUrl  (e.g. https://torosfon.com)
+ *  Base URL    : provider.baseUrl  (e.g. https://provider.example.com)
  *  Auth        : api-token: <token>
  *
  *  GET  /api/AllProducts                       — fetch product catalogue
