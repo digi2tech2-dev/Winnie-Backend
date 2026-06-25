@@ -80,8 +80,13 @@ const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendPaginated } = require('../../shared/utils/apiResponse');
 const { createUpload } = require('../../shared/middlewares/upload');
 const { walletLimiter } = require('../../shared/middlewares/rateLimiter');
+const validate = require('../../shared/middlewares/validate');
 
 const { validateBody, validateQuery, schemas } = require('./admin.validation');
+const {
+    paymentIdValidation,
+    listPaymentsValidation,
+} = require('../payments/payment.validation');
 
 const avatarUpload = createUpload('avatars');
 
@@ -92,6 +97,7 @@ const ordersCtrl = require('./admin.orders.controller');
 const walletCtrl = require('./admin.wallet.controller');
 const settingsCtrl = require('./admin.settings.controller');
 const statsCtrl = require('./admin.stats.controller');
+const paymentsCtrl = require('../payments/payment.controller');
 const categoriesCtrl = require('../categories/category.controller');
 const categoryValidation = require('../categories/category.validation');
 
@@ -172,6 +178,10 @@ router.post('/orders/:id/sync-status', requirePermission('orders.update'), order
 router.post('/orders/:id/complete', requirePermission('orders.update'), ordersCtrl.completeOrder);
 router.patch('/orders/:id/status', requirePermission('orders.update'), validateBody(schemas.updateOrderStatus), ordersCtrl.updateStatus);
 router.get('/orders/:id', requirePermission('orders.view'), ordersCtrl.getOrderById);
+
+// PAYMENTS
+router.get('/payments', requirePermission('payments.view'), listPaymentsValidation, validate, paymentsCtrl.adminListPayments);
+router.get('/payments/:id', requirePermission('payments.view'), paymentIdValidation, validate, paymentsCtrl.adminGetPayment);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WALLETS

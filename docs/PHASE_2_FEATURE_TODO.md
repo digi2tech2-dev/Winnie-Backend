@@ -6,13 +6,17 @@ Phase 2 should build new business features on top of the cleaned baseline. None 
 
 Purpose: let customers fund wallets or pay invoices through an online payment gateway.
 
-Suggested models: `PaymentIntent`, `PaymentMethod`, `PaymentTransaction`.
+Phase 2.2 status: a wallet top-up only payments base module exists with `Payment`, mock gateway support, real gateway placeholders, and one-time wallet credit through `CARD_PAYMENT_SUCCESS`. See `docs/PAYMENTS_ARCHITECTURE.md`.
 
-Suggested endpoints: `POST /api/payments/intents`, `GET /api/payments/:id`, admin list/reconcile endpoints.
+Suggested future models: gateway-specific `PaymentWebhookEvent`, optional `PaymentMethod`, and reconciliation records.
 
-Dependencies: gateway SDK/API choice, wallet ledger expansion, idempotency policy, admin settings.
+Current endpoints: `POST /api/payments/intents`, `GET /api/payments`, `GET /api/payments/:id`, `GET /api/admin/payments`, `GET /api/admin/payments/:id`, plus non-production mock confirmation/failure endpoints.
 
-Risks: double-crediting, chargebacks, currency conversion drift, PCI/security boundaries.
+Suggested future endpoints: real gateway checkout/webhook endpoints and admin reconcile endpoints.
+
+Dependencies: gateway SDK/API choice, webhook signature verification, settlement/fee rules, admin settings.
+
+Risks: double-crediting, chargebacks, currency conversion drift, PCI/security boundaries, replayed webhooks.
 
 ## Payment Gateway Webhooks
 
@@ -22,7 +26,7 @@ Suggested models: `PaymentWebhookEvent`, webhook event metadata on `PaymentTrans
 
 Suggested endpoints: `POST /api/webhooks/payments/:provider`.
 
-Dependencies: signature verification, replay protection, payment transaction state machine.
+Dependencies: signature verification, replay protection, payment state machine, gateway-specific event schemas.
 
 Risks: replay attacks, out-of-order events, retry storms, partial wallet updates.
 

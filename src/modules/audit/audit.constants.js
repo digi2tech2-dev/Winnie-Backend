@@ -59,6 +59,13 @@ const DEPOSIT_ACTIONS = Object.freeze({
     UPDATED: 'DEPOSIT_UPDATED',
 });
 
+/** Actions on online wallet top-up payments. */
+const PAYMENT_ACTIONS = Object.freeze({
+    INTENT_CREATED: 'PAYMENT_INTENT_CREATED',
+    SUCCEEDED: 'PAYMENT_SUCCEEDED',
+    FAILED: 'PAYMENT_FAILED',
+});
+
 /**
  * Actions on the Provider Fulfillment layer.
  * These are emitted by the fulfillment service and the cron polling job.
@@ -123,6 +130,7 @@ const ALL_ACTIONS = Object.freeze([
     ...Object.values(WALLET_ACTIONS),
     ...Object.values(GROUP_ACTIONS),
     ...Object.values(DEPOSIT_ACTIONS),
+    ...Object.values(PAYMENT_ACTIONS),
     ...Object.values(PROVIDER_ACTIONS),
     ...Object.values(SYSTEM_ACTIONS),
     ...Object.values(ADMIN_ACTIONS),
@@ -135,6 +143,7 @@ const ENTITY_TYPES = Object.freeze({
     USER: 'USER',
     ORDER: 'ORDER',
     WALLET: 'WALLET',
+    PAYMENT: 'PAYMENT',
     GROUP: 'GROUP',
     DEPOSIT: 'DEPOSIT',
     PROVIDER: 'PROVIDER',
@@ -158,6 +167,7 @@ module.exports = {
     WALLET_ACTIONS,
     GROUP_ACTIONS,
     DEPOSIT_ACTIONS,
+    PAYMENT_ACTIONS,
     PROVIDER_ACTIONS,
     SYSTEM_ACTIONS,
     ADMIN_ACTIONS,

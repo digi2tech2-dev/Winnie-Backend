@@ -14,6 +14,7 @@ MongoDB access is through Mongoose models inside each module. Controllers stay t
 - `groups`: pricing group tiers and active/inactive group management.
 - `wallet`: balance mutations and wallet transaction history.
 - `deposits`: deposit request lifecycle and admin review.
+- `payments`: wallet top-up payment intents with mock-only confirmation in non-production.
 - `products` and `categories`: platform catalog.
 - `providers`: provider records, adapter factory, live adapter calls, catalog sync.
 - `orders`: order pricing, wallet debit/refund, provider fulfillment, status polling.
@@ -47,6 +48,8 @@ Orders debit wallet balance atomically, create order records, and either fulfill
 
 Wallet transactions keep legacy `type` values (`CREDIT`, `DEBIT`, `REFUND`, `DEBT_ADJUSTMENT`) and now carry Phase 2 ledger fields such as `semanticType`, `direction`, `sourceType`, `sourceId`, `currency`, metadata, actor fields, and optional idempotency keys. See `docs/LEDGER_ARCHITECTURE.md`.
 
+Online payments are prepared for wallet top-ups only. `POST /api/payments/intents` creates a payment intent and never credits the wallet. In development/test, the mock gateway can confirm success and credit the wallet once with `CARD_PAYMENT_SUCCESS`. Real gateways and production webhooks remain future work. See `docs/PAYMENTS_ARCHITECTURE.md`.
+
 ## Provider Architecture
 
 Provider records store `name`, `slug`, `baseUrl`, `apiToken`/`apiKey`, active state, sync interval, and supported features. The adapter factory maps known provider slugs/names to adapter classes and falls back to the mock adapter for unknown providers unless strict mode is requested.
@@ -65,6 +68,7 @@ Permission keys currently used by route guards:
 - `users.status`
 - `wallet.view`
 - `wallet.adjust`
+- `payments.view`
 - `suppliers.manage`
 - `products.view`
 - `products.manage`

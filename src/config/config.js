@@ -51,6 +51,19 @@ const config = {
     cors: {
         allowedOrigins: process.env.ALLOWED_ORIGINS || 'http://localhost:5173',
     },
+
+    payments: {
+        enabled: process.env.PAYMENTS_ENABLED !== 'false',
+        defaultGateway: (process.env.PAYMENT_DEFAULT_GATEWAY || 'MOCK').toUpperCase(),
+        allowedGateways: (process.env.PAYMENT_ALLOWED_GATEWAYS || 'MOCK')
+            .split(',')
+            .map((gateway) => gateway.trim().toUpperCase())
+            .filter(Boolean),
+        minAmount: parseFloat(process.env.PAYMENT_MIN_AMOUNT || '1'),
+        maxAmount: parseFloat(process.env.PAYMENT_MAX_AMOUNT || '10000'),
+        mockCheckoutBaseUrl: process.env.MOCK_PAYMENT_CHECKOUT_BASE_URL ||
+            `${process.env.FRONTEND_URL || 'http://localhost:5173'}/mock-payment`,
+    },
 };
 
 // Guard: fail fast if critical configs are missing
