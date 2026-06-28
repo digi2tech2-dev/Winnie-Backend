@@ -34,13 +34,13 @@ Risks: replay attacks, out-of-order events, retry storms, partial wallet updates
 
 Purpose: track invited users and optionally credit commissions when configured business events occur.
 
-Suggested models: `ReferralInvitation`, `ReferralRule`, `ReferralCommission`.
+Phase 2.3 status: implemented as a safe referral module with `ReferralRelationship`, `ReferralCommission`, global `referrals` settings, customer/admin routes, registration invite-code support, and idempotent commission crediting for `DEPOSIT_APPROVED` and `CARD_PAYMENT_SUCCESS`. See `docs/REFERRALS_ARCHITECTURE.md`.
 
-Suggested endpoints: `GET /api/me/referrals`, `POST /api/me/referrals/invite`, admin rule management.
+Current endpoints: `GET /api/me/referrals`, `GET /api/me/referrals/commissions`, `POST /api/referrals/validate-code`, `GET /api/admin/referral-settings`, `PATCH /api/admin/referral-settings`, `GET /api/admin/referrals/relationships`, `GET /api/admin/referrals/commissions`.
 
-Dependencies: final commission policy, wallet ledger types, fraud controls.
+Future dependencies: group-based referral rates, reversal policy, fraud scoring, and richer admin reporting.
 
-Risks: self-referral, duplicate commission credit, unclear reversal behavior on refunds.
+Remaining risks: reversal behavior on refunds is intentionally reserved; advanced abuse controls are outside Phase 2.3.
 
 ## Group-Change / Sub-Agent Request Workflow
 
@@ -96,10 +96,10 @@ Risks: duplicate routes drifting from canonical services, accidental breaking ch
 
 Purpose: let admins configure payment provider behavior, referral rules, commission rates, and operational limits.
 
-Suggested models: extend `Setting` or add typed `PaymentSetting` and `ReferralSetting` models.
+Phase 2.3 status: referral settings are stored as one `referrals` `Setting` value with `enabled`, `depositCommissionPercentage`, `applyTo`, `minSourceAmount`, and `maxCommissionAmount`.
 
-Suggested endpoints: admin settings read/update routes with strict validation.
+Current referral endpoints: `GET /api/admin/referral-settings` and `PATCH /api/admin/referral-settings`.
 
-Dependencies: final policy decisions, audit requirements, supervisor permissions.
+Dependencies still remaining: payment provider settings beyond Phase 2.2 placeholders and any future typed settings split.
 
-Risks: unsafe defaults, unvalidated money rules, changing live rules without audit trail.
+Risks: changing live rules without operational communication; Phase 2.3 validates percentage ranges and audits referral settings updates.

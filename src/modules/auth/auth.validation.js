@@ -39,6 +39,18 @@ const registerValidation = [
         .optional()
         .trim()
         .isLength({ max: 100 }),
+
+    body('inviteCode')
+        .optional()
+        .trim()
+        .isString().withMessage('inviteCode must be a string')
+        .isLength({ min: 3, max: 32 }).withMessage('inviteCode must be between 3 and 32 characters'),
+
+    body('referralCode')
+        .optional()
+        .trim()
+        .isString().withMessage('referralCode must be a string')
+        .isLength({ min: 3, max: 32 }).withMessage('referralCode must be between 3 and 32 characters'),
 ];
 
 const loginValidation = [

@@ -15,6 +15,7 @@ MongoDB access is through Mongoose models inside each module. Controllers stay t
 - `wallet`: balance mutations and wallet transaction history.
 - `deposits`: deposit request lifecycle and admin review.
 - `payments`: wallet top-up payment intents with mock-only confirmation in non-production.
+- `referrals`: referral codes, inviter relationships, global referral settings, and idempotent commission credits.
 - `products` and `categories`: platform catalog.
 - `providers`: provider records, adapter factory, live adapter calls, catalog sync.
 - `orders`: order pricing, wallet debit/refund, provider fulfillment, status polling.
@@ -26,7 +27,7 @@ MongoDB access is through Mongoose models inside each module. Controllers stay t
 
 ## Auth Flow
 
-Registration validates `name`, `email`, `password`, and optional profile fields. A customer is created as `PENDING`, `verified=false`, assigned to the highest-percentage active group, and sent an email verification link.
+Registration validates `name`, `email`, `password`, optional profile fields, and optional `inviteCode`/`referralCode`. A valid invite code links the new user to the inviter; an invalid or self-referral code rejects registration. A customer is created as `PENDING`, `verified=false`, assigned to the highest-percentage active group, and sent an email verification link.
 
 Login requires a verified email and `status=ACTIVE`. JWTs contain `id` and `role`. 2FA-enabled accounts receive a temporary 2FA token until OTP verification succeeds. Google OAuth is initialized only when Google credentials exist.
 
@@ -50,6 +51,8 @@ Wallet transactions keep legacy `type` values (`CREDIT`, `DEBIT`, `REFUND`, `DEB
 
 Online payments are prepared for wallet top-ups only. `POST /api/payments/intents` creates a payment intent and never credits the wallet. In development/test, the mock gateway can confirm success and credit the wallet once with `CARD_PAYMENT_SUCCESS`. Real gateways and production webhooks remain future work. See `docs/PAYMENTS_ARCHITECTURE.md`.
 
+Referrals are active for invitation tracking and global commission settings. Eligible successful wallet credits (`DEPOSIT_APPROVED` and `CARD_PAYMENT_SUCCESS`) can credit the inviter with `REFERRAL_COMMISSION` when the configured percentage is greater than zero. Admin wallet adjustments, order debits, and order refunds do not trigger referral commission. See `docs/REFERRALS_ARCHITECTURE.md`.
+
 ## Provider Architecture
 
 Provider records store `name`, `slug`, `baseUrl`, `apiToken`/`apiKey`, active state, sync interval, and supported features. The adapter factory maps known provider slugs/names to adapter classes and falls back to the mock adapter for unknown providers unless strict mode is requested.
@@ -69,6 +72,7 @@ Permission keys currently used by route guards:
 - `wallet.view`
 - `wallet.adjust`
 - `payments.view`
+- `referrals.view`
 - `suppliers.manage`
 - `products.view`
 - `products.manage`
@@ -114,4 +118,4 @@ Audit logs record actor, action, entity, metadata, IP, and user agent. The audit
 - Some legacy permission aliases remain for provider list compatibility.
 - Local disk uploads are not suitable for multi-instance production without shared storage.
 - Existing provider adapters are legacy/sample until confirmed for the new platform.
-- Card payments, payment webhooks, referral commissions, and group-change workflows are intentionally not implemented in Phase 1.
+- Real card gateways, payment webhooks, referral reversal, group-based referral rates, and group-change workflows are intentionally not implemented in the current baseline.

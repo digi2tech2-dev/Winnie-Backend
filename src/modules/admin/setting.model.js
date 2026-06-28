@@ -59,6 +59,17 @@ const DEFAULT_SETTINGS = [
     { key: 'paymentCountryAccounts', value: [], description: 'Country-specific payment accounts' },
     { key: 'paymentInstructions', value: '', description: 'General payment instructions shown to customers' },
     { key: 'whatsappNumber', value: '', description: 'WhatsApp number for customer support' },
+    {
+        key: 'referrals',
+        value: {
+            enabled: true,
+            depositCommissionPercentage: 0,
+            applyTo: 'EVERY_ELIGIBLE_WALLET_CREDIT',
+            minSourceAmount: null,
+            maxCommissionAmount: null,
+        },
+        description: 'Referral and invitation commission settings',
+    },
 ];
 
 /**

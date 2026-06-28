@@ -66,6 +66,14 @@ const PAYMENT_ACTIONS = Object.freeze({
     FAILED: 'PAYMENT_FAILED',
 });
 
+/** Actions on referral relationships and commissions. */
+const REFERRAL_ACTIONS = Object.freeze({
+    RELATIONSHIP_CREATED: 'REFERRAL_RELATIONSHIP_CREATED',
+    COMMISSION_CREDITED: 'REFERRAL_COMMISSION_CREDITED',
+    COMMISSION_SKIPPED: 'REFERRAL_COMMISSION_SKIPPED',
+    SETTINGS_UPDATED: 'REFERRAL_SETTINGS_UPDATED',
+});
+
 /**
  * Actions on the Provider Fulfillment layer.
  * These are emitted by the fulfillment service and the cron polling job.
@@ -131,6 +139,7 @@ const ALL_ACTIONS = Object.freeze([
     ...Object.values(GROUP_ACTIONS),
     ...Object.values(DEPOSIT_ACTIONS),
     ...Object.values(PAYMENT_ACTIONS),
+    ...Object.values(REFERRAL_ACTIONS),
     ...Object.values(PROVIDER_ACTIONS),
     ...Object.values(SYSTEM_ACTIONS),
     ...Object.values(ADMIN_ACTIONS),
@@ -150,6 +159,8 @@ const ENTITY_TYPES = Object.freeze({
     PRODUCT: 'PRODUCT',
     CATEGORY: 'CATEGORY',
     SETTING: 'SETTING',
+    REFERRAL_RELATIONSHIP: 'REFERRAL_RELATIONSHIP',
+    REFERRAL_COMMISSION: 'REFERRAL_COMMISSION',
     SYSTEM: 'SYSTEM',
 });
 
@@ -168,6 +179,7 @@ module.exports = {
     GROUP_ACTIONS,
     DEPOSIT_ACTIONS,
     PAYMENT_ACTIONS,
+    REFERRAL_ACTIONS,
     PROVIDER_ACTIONS,
     SYSTEM_ACTIONS,
     ADMIN_ACTIONS,

@@ -14,6 +14,7 @@ const { getPaymentGateway, normalizeGatewayKey } = require('./gateways/gateway.f
 const { Currency } = require('../currency/currency.model');
 const { User, ROLES } = require('../users/user.model');
 const { creditWalletDirect } = require('../wallet/wallet.service');
+const { processWalletCreditSafely } = require('../referrals/referral.service');
 const {
     LEDGER_TRANSACTION_TYPES,
     TRANSACTION_SOURCE_TYPES,
@@ -479,6 +480,8 @@ const confirmMockPayment = async (paymentId, { actor, requestMeta = {} } = {}) =
     } finally {
         try { session.endSession(); } catch (_) { /* session already ended */ }
     }
+
+    await processWalletCreditSafely(transaction);
 
     void createAuditLog({
         actorId: actor?.actorId || actor?._id || actor?.userId || creditedPayment.userId,

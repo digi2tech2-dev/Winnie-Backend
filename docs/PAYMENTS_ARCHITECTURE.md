@@ -17,7 +17,7 @@ Out of scope:
 - Real gateway API calls.
 - Production webhooks.
 - Card number, CVV, or sensitive card data collection/storage.
-- Referral commissions.
+- Referral commission policy/calculation inside the payments module.
 - Group-change or sub-agent workflows.
 
 ## Module Layout
@@ -102,6 +102,8 @@ Mock success confirmation calls the wallet service with:
 
 Mock failure does not create a wallet ledger entry because no money moved.
 
+After a successful wallet credit commits, Phase 2.3 calls the referral processor with the resulting wallet transaction. If the user has an active inviter and referral settings allow commission, the referral module may create a separate `REFERRAL_COMMISSION` wallet credit for the inviter. Payment failure and pending states never trigger referral commission.
+
 ## Idempotency
 
 Payment creation accepts an optional `Idempotency-Key` header or `idempotencyKey` body field. If the same user repeats a create request with the same key, the existing payment is returned.
@@ -178,7 +180,7 @@ Future gateway credentials are optional placeholders and are not required for st
 - Mock success/failure endpoints are blocked when `NODE_ENV=production`.
 - Real webhooks must be implemented with signature verification and replay protection in a future phase.
 
-## Phase 2.3 Reserved Work
+## Future Reserved Work
 
 - Real gateway SDK/API integration.
 - Hosted checkout/webview return handling.

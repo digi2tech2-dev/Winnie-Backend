@@ -43,10 +43,10 @@ Active ledger entries now support:
 | `ADMIN_ADJUSTMENT` | `CREDIT` or `DEBIT` | `CREDIT` or `DEBIT` | Active |
 | `CARD_PAYMENT_SUCCESS` | `CREDIT` | `CREDIT` | Active for mock wallet top-ups |
 | `CARD_PAYMENT_FAILED` | `CREDIT`, `DEBIT`, or `REFUND` | `NEUTRAL` by expected use | Reserved |
-| `REFERRAL_COMMISSION` | `CREDIT` | `CREDIT` | Reserved |
+| `REFERRAL_COMMISSION` | `CREDIT` | `CREDIT` | Active |
 | `REFERRAL_REVERSAL` | `DEBIT` or `REFUND` | `DEBIT` by expected use | Reserved |
 
-Reserved means the enum accepts the value, but no current business flow writes it yet. Real gateway card payments remain future work.
+Reserved means the enum accepts the value, but no current business flow writes it yet. Real gateway card payments and referral reversal remain future work.
 
 ## Active Write Flows
 
@@ -57,6 +57,7 @@ Reserved means the enum accepts the value, but no current business flow writes i
 - Admin add, deduct, and set-balance operations write `semanticType: ADMIN_ADJUSTMENT`.
 - Bulk debt inflation and deflation keep `type: DEBT_ADJUSTMENT` and write `semanticType: DEBT_ADJUSTMENT`.
 - Non-production mock wallet top-up confirmation writes `type: CREDIT`, `semanticType: CARD_PAYMENT_SUCCESS`, `sourceType: PAYMENT`.
+- Referral commission writes `type: CREDIT`, `semanticType: REFERRAL_COMMISSION`, `sourceType: REFERRAL`.
 
 ## Idempotency
 
@@ -72,6 +73,7 @@ The ledger now supports an optional unique `idempotencyKey`. Current flows use n
 - `order:<orderId>:refund:partial:<remains>`
 - `order:<orderId>:forced-complete-rededuction`
 - `payment:<paymentId>:wallet-credit`
+- `referral:<sourceWalletTransactionId>`
 
 Manual admin add/deduct/set entries do not currently have a natural idempotency key.
 
@@ -98,5 +100,5 @@ Do not infer deposit/order/admin semantics blindly for old `CREDIT` or `DEBIT` r
 
 - Money is still stored as `Number` in `WalletTransaction`; Decimal/string monetary normalization remains outside Phase 2.1.
 - `reference` is retained as a legacy populated field and may point at non-order ids in older flows.
-- Card payment, webhook, referral commission, and referral reversal logic is not implemented.
+- Real card gateway, webhook, and referral reversal logic is not implemented.
 - Wallet stats still aggregate by legacy `type` to preserve existing behavior.
