@@ -33,6 +33,13 @@ const USER_STATUS = Object.freeze({
     REJECTED: 'REJECTED',
 });
 
+const SUB_AGENT_STATUS = Object.freeze({
+    NONE: 'NONE',
+    PENDING: 'PENDING',
+    ACTIVE: 'ACTIVE',
+    REJECTED: 'REJECTED',
+});
+
 const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const REFERRAL_CODE_LENGTH = 8;
 
@@ -247,6 +254,30 @@ const userSchema = new mongoose.Schema(
             default: null,
         },
 
+        isSubAgent: {
+            type: Boolean,
+            default: false,
+            index: true,
+        },
+
+        subAgentStatus: {
+            type: String,
+            enum: Object.values(SUB_AGENT_STATUS),
+            default: SUB_AGENT_STATUS.NONE,
+            index: true,
+        },
+
+        subAgentApprovedAt: {
+            type: Date,
+            default: null,
+        },
+
+        subAgentApprovedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+        },
+
         // ── Wallet ───────────────────────────────────────────────────────────
         /**
          * User's wallet balance in their local currency.
@@ -434,5 +465,5 @@ userSchema.methods.toSafeObject = function () {
 
 const User = mongoose.model('User', userSchema);
 
-module.exports = { User, ROLES, USER_STATUS };
+module.exports = { User, ROLES, USER_STATUS, SUB_AGENT_STATUS };
 module.exports.User = User; // CommonJS default export convenience

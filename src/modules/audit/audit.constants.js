@@ -74,6 +74,16 @@ const REFERRAL_ACTIONS = Object.freeze({
     SETTINGS_UPDATED: 'REFERRAL_SETTINGS_UPDATED',
 });
 
+/** Actions on group change and sub-agent requests. */
+const GROUP_REQUEST_ACTIONS = Object.freeze({
+    CREATED: 'GROUP_REQUEST_CREATED',
+    CANCELED: 'GROUP_REQUEST_CANCELED',
+    APPROVED: 'GROUP_REQUEST_APPROVED',
+    REJECTED: 'GROUP_REQUEST_REJECTED',
+    USER_GROUP_CHANGED: 'GROUP_REQUEST_USER_GROUP_CHANGED',
+    USER_MARKED_SUB_AGENT: 'GROUP_REQUEST_USER_MARKED_SUB_AGENT',
+});
+
 /**
  * Actions on the Provider Fulfillment layer.
  * These are emitted by the fulfillment service and the cron polling job.
@@ -140,6 +150,7 @@ const ALL_ACTIONS = Object.freeze([
     ...Object.values(DEPOSIT_ACTIONS),
     ...Object.values(PAYMENT_ACTIONS),
     ...Object.values(REFERRAL_ACTIONS),
+    ...Object.values(GROUP_REQUEST_ACTIONS),
     ...Object.values(PROVIDER_ACTIONS),
     ...Object.values(SYSTEM_ACTIONS),
     ...Object.values(ADMIN_ACTIONS),
@@ -161,6 +172,7 @@ const ENTITY_TYPES = Object.freeze({
     SETTING: 'SETTING',
     REFERRAL_RELATIONSHIP: 'REFERRAL_RELATIONSHIP',
     REFERRAL_COMMISSION: 'REFERRAL_COMMISSION',
+    GROUP_REQUEST: 'GROUP_REQUEST',
     SYSTEM: 'SYSTEM',
 });
 
@@ -180,6 +192,7 @@ module.exports = {
     DEPOSIT_ACTIONS,
     PAYMENT_ACTIONS,
     REFERRAL_ACTIONS,
+    GROUP_REQUEST_ACTIONS,
     PROVIDER_ACTIONS,
     SYSTEM_ACTIONS,
     ADMIN_ACTIONS,

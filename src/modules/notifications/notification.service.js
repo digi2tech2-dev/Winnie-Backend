@@ -89,7 +89,10 @@ const safeCreateNotification = async (params) => {
     try {
         return await createNotification(params);
     } catch (error) {
-        console.error('[Notifications] Failed to create notification:', error.message);
+        const msg = error.message || '';
+        if (!msg.includes('client was closed') && !msg.includes('connection was destroyed')) {
+            console.error('[Notifications] Failed to create notification:', msg);
+        }
         return null;
     }
 };
@@ -150,7 +153,10 @@ const safeCreateAdminActorNotifications = async (params) => {
     try {
         return await createAdminActorNotifications(params);
     } catch (error) {
-        console.error('[Notifications] Failed to create admin notifications:', error.message);
+        const msg = error.message || '';
+        if (!msg.includes('client was closed') && !msg.includes('connection was destroyed')) {
+            console.error('[Notifications] Failed to create admin notifications:', msg);
+        }
         return [];
     }
 };

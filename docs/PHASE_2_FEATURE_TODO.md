@@ -46,13 +46,15 @@ Remaining risks: reversal behavior on refunds is intentionally reserved; advance
 
 Purpose: let users request different pricing groups or sub-agent status for admin review.
 
-Suggested models: `GroupChangeRequest`, optional `SubAgentProfile`.
+Phase 2.4 status: implemented as a safe request workflow with `GroupChangeRequest`, customer request/cancel routes, admin review routes, explicit supervisor permissions, and business-level sub-agent flags on `User`. See `docs/GROUP_REQUESTS_ARCHITECTURE.md`.
 
-Suggested endpoints: `POST /api/me/group-change-requests`, `GET /api/admin/group-change-requests`, approve/reject routes.
+Current customer endpoints: `POST /api/me/group-change-requests`, `GET /api/me/group-change-requests`, `GET /api/me/group-change-requests/:id`, `POST /api/me/group-change-requests/:id/cancel`.
 
-Dependencies: final hierarchy policy, group eligibility rules, supervisor permissions.
+Current admin endpoints: `GET /api/admin/group-change-requests`, `GET /api/admin/group-change-requests/:id`, `PATCH /api/admin/group-change-requests/:id/approve`, `PATCH /api/admin/group-change-requests/:id/reject`.
 
-Risks: unauthorized group escalation, stale pricing assumptions, unclear audit ownership.
+Future dependencies: richer group eligibility policy, optional sub-agent profile fields, frontend compatibility aliases, and any hierarchy/reporting model.
+
+Remaining risks: pricing changes naturally apply to future orders only after user group update; sub-agent is intentionally not a privileged role and does not grant permissions.
 
 ## Updated Wallet Ledger Types
 

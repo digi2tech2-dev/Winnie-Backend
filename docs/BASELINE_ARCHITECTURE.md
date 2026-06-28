@@ -16,6 +16,7 @@ MongoDB access is through Mongoose models inside each module. Controllers stay t
 - `deposits`: deposit request lifecycle and admin review.
 - `payments`: wallet top-up payment intents with mock-only confirmation in non-production.
 - `referrals`: referral codes, inviter relationships, global referral settings, and idempotent commission credits.
+- `groupRequests`: customer group-change and sub-agent requests with admin/supervisor review.
 - `products` and `categories`: platform catalog.
 - `providers`: provider records, adapter factory, live adapter calls, catalog sync.
 - `orders`: order pricing, wallet debit/refund, provider fulfillment, status polling.
@@ -53,6 +54,8 @@ Online payments are prepared for wallet top-ups only. `POST /api/payments/intent
 
 Referrals are active for invitation tracking and global commission settings. Eligible successful wallet credits (`DEPOSIT_APPROVED` and `CARD_PAYMENT_SUCCESS`) can credit the inviter with `REFERRAL_COMMISSION` when the configured percentage is greater than zero. Admin wallet adjustments, order debits, and order refunds do not trigger referral commission. See `docs/REFERRALS_ARCHITECTURE.md`.
 
+Group-change and sub-agent requests are customer self-service workflows reviewed by admins. A group-change approval updates `User.groupId`, so pricing changes apply naturally to future orders. A sub-agent approval sets business-level fields on the user (`isSubAgent`, `subAgentStatus`, approval stamp fields) and may optionally update `groupId`. It never changes `role`, never grants supervisor permissions, and has no wallet or referral side effects. See `docs/GROUP_REQUESTS_ARCHITECTURE.md`.
+
 ## Provider Architecture
 
 Provider records store `name`, `slug`, `baseUrl`, `apiToken`/`apiKey`, active state, sync interval, and supported features. The adapter factory maps known provider slugs/names to adapter classes and falls back to the mock adapter for unknown providers unless strict mode is requested.
@@ -73,6 +76,8 @@ Permission keys currently used by route guards:
 - `wallet.adjust`
 - `payments.view`
 - `referrals.view`
+- `groupRequests.view`
+- `groupRequests.manage`
 - `suppliers.manage`
 - `products.view`
 - `products.manage`
@@ -118,4 +123,4 @@ Audit logs record actor, action, entity, metadata, IP, and user agent. The audit
 - Some legacy permission aliases remain for provider list compatibility.
 - Local disk uploads are not suitable for multi-instance production without shared storage.
 - Existing provider adapters are legacy/sample until confirmed for the new platform.
-- Real card gateways, payment webhooks, referral reversal, group-based referral rates, and group-change workflows are intentionally not implemented in the current baseline.
+- Real card gateways, payment webhooks, referral reversal, group-based referral rates, frontend compatibility aliases, and advanced sub-agent hierarchy/profile features are intentionally not implemented in the current baseline.
