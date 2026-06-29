@@ -40,6 +40,14 @@ router.get(
 );
 
 router.get(
+    '/me/group-change-requests/options',
+    authenticate,
+    requireActiveUser,
+    authorizeRoles('CUSTOMER'),
+    groupRequestController.getGroupChangeOptions
+);
+
+router.get(
     '/me/group-change-requests/:id',
     authenticate,
     requireActiveUser,

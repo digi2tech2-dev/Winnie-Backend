@@ -1,5 +1,7 @@
 'use strict';
 
+const jwt = require('jsonwebtoken');
+const config = require('../config/config');
 const groupRequestService = require('../modules/groupRequests/groupRequest.service');
 const { GroupChangeRequest } = require('../modules/groupRequests/groupRequest.model');
 const {
@@ -11,6 +13,7 @@ const Group = require('../modules/groups/group.model');
 const { User, ROLES, USER_STATUS, SUB_AGENT_STATUS } = require('../modules/users/user.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { ReferralCommission } = require('../modules/referrals/referral.model');
+const authenticate = require('../shared/middlewares/authenticate');
 const { authorizeRoles, requirePermission, requireAnyPermission } = require('../shared/middlewares/authorize');
 const {
     connectTestDB,
@@ -217,6 +220,100 @@ describe('Customer group/sub-agent request creation', () => {
         await expect(
             groupRequestService.cancelMyRequest(customer._id, reviewed.id)
         ).rejects.toMatchObject({ code: 'GROUP_REQUEST_NOT_PENDING' });
+    });
+});
+
+describe('Customer-safe group-change options', () => {
+    it('active customer gets active group options with current group marked', async () => {
+        const { customer, currentGroup, targetGroup, alternateGroup } = await setupActors();
+
+        const options = await groupRequestService.getGroupChangeOptionsForUser(customer._id);
+
+        expect(options.currentGroup).toEqual({
+            id: currentGroup._id.toString(),
+            name: currentGroup.name,
+            isCurrent: true,
+        });
+        expect(options.groups.map((group) => group.id)).toEqual([
+            alternateGroup._id.toString(),
+            currentGroup._id.toString(),
+            targetGroup._id.toString(),
+        ]);
+        expect(options.groups.find((group) => group.id === currentGroup._id.toString()).isCurrent).toBe(true);
+        expect(options.groups.find((group) => group.id === targetGroup._id.toString()).isCurrent).toBe(false);
+    });
+
+    it('excludes inactive and deleted groups from customer options', async () => {
+        const { customer, currentGroup, targetGroup, alternateGroup } = await setupActors();
+        const inactiveGroup = await Group.create({
+            name: uniqueName('InactiveOption'),
+            percentage: 50,
+            isActive: false,
+        });
+        const deletedGroup = await Group.create({
+            name: uniqueName('DeletedOption'),
+            percentage: 60,
+            isActive: true,
+            deletedAt: new Date(),
+        });
+
+        const options = await groupRequestService.getGroupChangeOptionsForUser(customer._id);
+        const ids = options.groups.map((group) => group.id);
+
+        expect(ids).toEqual([
+            alternateGroup._id.toString(),
+            currentGroup._id.toString(),
+            targetGroup._id.toString(),
+        ]);
+        expect(ids).not.toContain(inactiveGroup._id.toString());
+        expect(ids).not.toContain(deletedGroup._id.toString());
+    });
+
+    it('does not expose unsafe group fields in customer options', async () => {
+        const { customer } = await setupActors();
+
+        const options = await groupRequestService.getGroupChangeOptionsForUser(customer._id);
+
+        expect(options.groups.length).toBeGreaterThan(0);
+        for (const group of options.groups) {
+            expect(Object.keys(group).sort()).toEqual(['id', 'isCurrent', 'name']);
+            expect(group.percentage).toBeUndefined();
+            expect(group.deletedAt).toBeUndefined();
+            expect(group.createdAt).toBeUndefined();
+            expect(group.updatedAt).toBeUndefined();
+        }
+    });
+
+    it('rejects inactive users through the customer options service guard', async () => {
+        const group = await createGroup({ name: uniqueName('RejectedGroup'), percentage: 5 });
+        const rejectedCustomer = await createCustomer({
+            groupId: group._id,
+            status: USER_STATUS.REJECTED,
+        });
+
+        await expect(
+            groupRequestService.getGroupChangeOptionsForUser(rejectedCustomer._id)
+        ).rejects.toMatchObject({ statusCode: 403 });
+    });
+
+    it('rejects unauthenticated and non-active token holders before options route handlers', async () => {
+        await expect(runMiddleware(authenticate, { headers: {} }))
+            .rejects.toMatchObject({ statusCode: 401 });
+
+        const group = await createGroup({ name: uniqueName('PendingGroup'), percentage: 5 });
+        const pendingCustomer = await createCustomer({
+            groupId: group._id,
+            status: USER_STATUS.PENDING,
+        });
+        const token = jwt.sign(
+            { id: pendingCustomer._id, role: pendingCustomer.role },
+            config.jwt.secret,
+            { expiresIn: '1h' }
+        );
+
+        await expect(runMiddleware(authenticate, {
+            headers: { authorization: `Bearer ${token}` },
+        })).rejects.toMatchObject({ statusCode: 401 });
     });
 });
 

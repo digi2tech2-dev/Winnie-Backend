@@ -48,6 +48,11 @@ const cancelMyRequest = catchAsync(async (req, res) => {
     sendSuccess(res, { request }, 'Group request canceled.');
 });
 
+const getGroupChangeOptions = catchAsync(async (req, res) => {
+    const options = await groupRequestService.getGroupChangeOptionsForUser(req.user._id);
+    sendSuccess(res, options, 'Group change options retrieved.');
+});
+
 const adminListRequests = catchAsync(async (req, res) => {
     const result = await groupRequestService.listRequests({
         status: req.query.status,
@@ -102,6 +107,7 @@ module.exports = {
     listMyRequests,
     getMyRequest,
     cancelMyRequest,
+    getGroupChangeOptions,
     adminListRequests,
     adminGetRequest,
     adminApproveRequest,

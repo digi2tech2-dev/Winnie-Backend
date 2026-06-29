@@ -114,6 +114,16 @@ const summarizeGroup = (group, snapshot = null) => {
     };
 };
 
+const summarizeGroupOption = (group, currentGroupId = null) => {
+    if (!group) return null;
+    const id = toIdString(group._id || group.id);
+    return {
+        id,
+        name: group.name || null,
+        isCurrent: Boolean(currentGroupId && id === toIdString(currentGroupId)),
+    };
+};
+
 const summarizeUser = (user, { admin = false } = {}) => {
     if (!user) return null;
     const source = user && typeof user === 'object' && user.name !== undefined ? user : null;
@@ -172,6 +182,26 @@ const getFormattedRequestById = async (id, { admin = false } = {}) => {
     const request = await populateRequestQuery(GroupChangeRequest.findById(id)).lean();
     if (!request) throw new NotFoundError('Group change request');
     return formatRequest(request, { admin });
+};
+
+const getGroupChangeOptionsForUser = async (userId) => {
+    const user = await getCustomerOrThrow(userId);
+    const currentGroupId = user.groupId || null;
+
+    const [currentGroup, groups] = await Promise.all([
+        currentGroupId
+            ? Group.findById(currentGroupId).select('name').lean()
+            : null,
+        Group.find({ isActive: true, deletedAt: null })
+            .select('name')
+            .sort({ name: 1 })
+            .lean(),
+    ]);
+
+    return {
+        currentGroup: currentGroup ? summarizeGroupOption(currentGroup, currentGroupId) : null,
+        groups: groups.map((group) => summarizeGroupOption(group, currentGroupId)),
+    };
 };
 
 const buildDateFilter = ({ from, to } = {}) => {
@@ -824,6 +854,7 @@ module.exports = {
     listMyRequests,
     getMyRequestById,
     cancelMyRequest,
+    getGroupChangeOptionsForUser,
     listRequests,
     getRequestById,
     approveGroupRequest,

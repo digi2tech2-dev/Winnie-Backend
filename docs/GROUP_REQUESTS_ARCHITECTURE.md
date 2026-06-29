@@ -51,10 +51,13 @@ Indexes support user timelines, admin filters, reviewer lookup, and a partial un
 
 Customer:
 
+- `GET /api/me/group-change-requests/options`
 - `POST /api/me/group-change-requests`
 - `GET /api/me/group-change-requests`
 - `GET /api/me/group-change-requests/:id`
 - `POST /api/me/group-change-requests/:id/cancel`
+
+The options endpoint returns customer-safe active group choices for request creation. It includes only `id`, `name`, and `isCurrent`, plus a `currentGroup` summary. It excludes inactive and deleted groups and does not expose pricing percentages or admin metadata.
 
 Admin:
 

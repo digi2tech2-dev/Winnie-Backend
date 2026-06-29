@@ -48,7 +48,7 @@ Purpose: let users request different pricing groups or sub-agent status for admi
 
 Phase 2.4 status: implemented as a safe request workflow with `GroupChangeRequest`, customer request/cancel routes, admin review routes, explicit supervisor permissions, and business-level sub-agent flags on `User`. See `docs/GROUP_REQUESTS_ARCHITECTURE.md`.
 
-Current customer endpoints: `POST /api/me/group-change-requests`, `GET /api/me/group-change-requests`, `GET /api/me/group-change-requests/:id`, `POST /api/me/group-change-requests/:id/cancel`.
+Current customer endpoints: `GET /api/me/group-change-requests/options`, `POST /api/me/group-change-requests`, `GET /api/me/group-change-requests`, `GET /api/me/group-change-requests/:id`, `POST /api/me/group-change-requests/:id/cancel`.
 
 Current admin endpoints: `GET /api/admin/group-change-requests`, `GET /api/admin/group-change-requests/:id`, `PATCH /api/admin/group-change-requests/:id/approve`, `PATCH /api/admin/group-change-requests/:id/reject`.
 
