@@ -13,6 +13,7 @@ const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppErr
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 const { safeCreateAdminActorNotifications } = require('../notifications/notification.service');
+const { hasSecretValue, redactSecretText } = require('../../shared/utils/secretEncryption');
 
 const extractProviderBalanceAmount = (balance) => {
     if (typeof balance === 'number') {
@@ -86,12 +87,13 @@ const updateProvider = async (id, data, adminId) => {
     if (!provider) throw new NotFoundError('Provider');
 
     const before = provider.toObject();
-    const { name, slug, baseUrl, apiToken, isActive, syncInterval, supportedFeatures } = data;
+    const { name, slug, baseUrl, apiToken, apiKey, isActive, syncInterval, supportedFeatures } = data;
 
     if (name !== undefined) provider.name = name;
     if (slug !== undefined) provider.slug = slug;
     if (baseUrl !== undefined) provider.baseUrl = baseUrl;
-    if (apiToken !== undefined) provider.apiToken = apiToken;
+    if (apiToken !== undefined && hasSecretValue(apiToken)) provider.apiToken = apiToken;
+    if (apiKey !== undefined && hasSecretValue(apiKey)) provider.apiKey = apiKey;
     if (isActive !== undefined) provider.isActive = isActive;
     if (syncInterval !== undefined) provider.syncInterval = syncInterval;
     if (supportedFeatures !== undefined) provider.supportedFeatures = supportedFeatures;
@@ -232,7 +234,7 @@ const testProviderConnection = async (id) => {
             success: false,
             provider: provider.name,
             latencyMs: latency,
-            message: err.message || 'Connection failed',
+            message: redactSecretText(err.message || 'Connection failed'),
             testedAt: new Date().toISOString(),
         };
     }
@@ -277,7 +279,7 @@ const getProductPrice = async (providerId, externalProductId) => {
         };
     } catch (err) {
         throw new BusinessRuleError(
-            `Failed to fetch price from provider: ${err.message}`,
+            `Failed to fetch price from provider: ${redactSecretText(err.message)}`,
             'PROVIDER_API_ERROR'
         );
     }
@@ -312,7 +314,7 @@ const checkProviderOrder = async (id, orderId) => {
 
     } catch (err) {
         const httpStatus = err.statusCode ?? err.response?.status;
-        const errMsg = err.message || 'Unknown error';
+        const errMsg = redactSecretText(err.message || 'Unknown error');
 
 
 

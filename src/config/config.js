@@ -64,6 +64,10 @@ const config = {
         mockCheckoutBaseUrl: process.env.MOCK_PAYMENT_CHECKOUT_BASE_URL ||
             `${process.env.FRONTEND_URL || 'http://localhost:5173'}/mock-payment`,
     },
+
+    providerCredentials: {
+        key: process.env.PROVIDER_CREDENTIALS_KEY,
+    },
 };
 
 // Guard: fail fast if critical configs are missing

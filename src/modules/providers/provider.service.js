@@ -8,6 +8,7 @@ const {
     ConflictError,
     BusinessRuleError,
 } = require('../../shared/errors/AppError');
+const { hasSecretValue } = require('../../shared/utils/secretEncryption');
 
 // =============================================================================
 // PROVIDER CRUD
@@ -37,13 +38,18 @@ const updateProvider = async (providerId, updates) => {
         Object.entries(updates).filter(([k]) => allowed.includes(k))
     );
 
-    const p = await Provider.findByIdAndUpdate(
-        providerId,
-        { $set: safe },
-        { new: true, runValidators: true }
-    );
-    if (!p) throw new NotFoundError('Provider');
-    return p;
+    const provider = await Provider.findById(providerId);
+    if (!provider) throw new NotFoundError('Provider');
+
+    for (const [key, value] of Object.entries(safe)) {
+        if ((key === 'apiToken' || key === 'apiKey') && !hasSecretValue(value)) {
+            continue;
+        }
+        provider[key] = value;
+    }
+
+    await provider.save();
+    return provider;
 };
 
 // =============================================================================

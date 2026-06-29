@@ -27,6 +27,7 @@ module.exports = async () => {
     process.env.JWT_EXPIRES_IN = '1h';
     process.env.BCRYPT_ROUNDS = '1'; // fast hashing in tests
     process.env.MONGO_URI = uri;     // config.js reads this
+    process.env.PROVIDER_CREDENTIALS_KEY = Buffer.alloc(32, 7).toString('base64');
 
     // Attach to global so globalTeardown can stop it
     global.__MONGOD__ = replSet;

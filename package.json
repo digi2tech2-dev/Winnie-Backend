@@ -8,6 +8,7 @@
     "dev": "nodemon src/server.js",
     "seed": "node src/scripts/seed.js",
     "seed:clear": "node src/scripts/seed.js --clear",
+    "migrate:provider-credentials": "node scripts/migrate-provider-credentials.js",
     "test": "jest --runInBand --forceExit",
     "lint": "node scripts/check-syntax.js"
   },

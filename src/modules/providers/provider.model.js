@@ -1,6 +1,13 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const {
+    encryptSecret,
+    getProviderCredential,
+    hasSecretValue,
+} = require('../../shared/utils/secretEncryption');
+
+const CREDENTIAL_FIELDS = ['apiToken', 'apiKey'];
 
 /**
  * Provider — an external data source that supplies raw product inventory.
@@ -48,9 +55,7 @@ const providerSchema = new mongoose.Schema(
 
         /**
          * Primary API token / key for this provider.
-         * SECURITY_TODO: currently stored in plain text. Encrypt provider
-         * credentials at rest before production use and never seed real tokens.
-         * Aliased as apiKey for backward compatibility with existing code.
+         * Stored encrypted at rest and never returned by API serializers.
          */
         apiToken: {
             type: String,
@@ -110,7 +115,34 @@ const providerSchema = new mongoose.Schema(
  * Always use this in adapters instead of reading either field directly.
  */
 providerSchema.virtual('effectiveToken').get(function () {
-    return this.apiToken || this.apiKey || null;
+    return getProviderCredential(this.apiToken || this.apiKey || null);
+});
+
+const addCredentialStatus = (doc, ret) => {
+    const hasApiToken = hasSecretValue(doc.apiToken);
+    const hasApiKey = hasSecretValue(doc.apiKey);
+
+    ret.hasApiToken = hasApiToken;
+    ret.hasApiKey = hasApiKey;
+    ret.credentialConfigured = hasApiToken || hasApiKey;
+    ret.credentialsConfigured = ret.credentialConfigured;
+
+    delete ret.apiToken;
+    delete ret.apiKey;
+    delete ret.effectiveToken;
+    return ret;
+};
+
+providerSchema.set('toJSON', {
+    virtuals: false,
+    versionKey: false,
+    transform: addCredentialStatus,
+});
+
+providerSchema.set('toObject', {
+    virtuals: false,
+    versionKey: false,
+    transform: addCredentialStatus,
 });
 
 // ─── Pre-save: auto-generate slug ───────────────────────────────────────────────
@@ -122,6 +154,19 @@ providerSchema.pre('save', function (next) {
             .replace(/[^a-z0-9]+/g, '-')
             .replace(/^-+|-+$/g, '');
     }
+
+    for (const field of CREDENTIAL_FIELDS) {
+        if (!this.isModified(field)) continue;
+
+        const value = this[field];
+        if (!hasSecretValue(value)) {
+            this[field] = null;
+            continue;
+        }
+
+        this[field] = encryptSecret(String(value).trim());
+    }
+
     next();
 });
 

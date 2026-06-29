@@ -94,6 +94,14 @@ Dependencies: frontend contract, pagination conventions, auth/session expectatio
 
 Risks: duplicate routes drifting from canonical services, accidental breaking changes.
 
+## Provider Credentials Encryption
+
+Phase 2.5H.1 status: provider `apiToken` and legacy `apiKey` fields are encrypted at rest with AES-256-GCM using `PROVIDER_CREDENTIALS_KEY`. Provider list/detail responses expose only safe credential booleans, and adapters decrypt credentials internally when backend provider actions run.
+
+Operational requirement: generate a 32-byte key with `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` and set `PROVIDER_CREDENTIALS_KEY` before creating/updating providers or calling provider APIs.
+
+Migration: run `npm run migrate:provider-credentials` to encrypt existing plaintext provider credentials. The script skips already encrypted values and prints counts only.
+
 ## Admin Settings for Referral and Payment Rules
 
 Purpose: let admins configure payment provider behavior, referral rules, commission rates, and operational limits.

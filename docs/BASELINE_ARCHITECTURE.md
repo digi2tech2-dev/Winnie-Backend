@@ -58,9 +58,9 @@ Group-change and sub-agent requests are customer self-service workflows reviewed
 
 ## Provider Architecture
 
-Provider records store `name`, `slug`, `baseUrl`, `apiToken`/`apiKey`, active state, sync interval, and supported features. The adapter factory maps known provider slugs/names to adapter classes and falls back to the mock adapter for unknown providers unless strict mode is requested.
+Provider records store `name`, `slug`, `baseUrl`, encrypted `apiToken`/`apiKey`, active state, sync interval, and supported features. Provider credentials are encrypted at rest with AES-256-GCM using `PROVIDER_CREDENTIALS_KEY` and stored as `enc:v1:<iv>:<tag>:<ciphertext>`. API responses expose safe credential-status booleans only, never raw or encrypted credential values.
 
-No provider is seeded by default. Provider tokens are currently plaintext and must be encrypted before production.
+Provider adapters decrypt credentials internally when making server-side provider calls. Legacy plaintext provider credentials are supported only for backward-compatible internal use while the idempotent `npm run migrate:provider-credentials` script is used to encrypt existing records. No provider is seeded by default, and real provider credentials must never be committed.
 
 ## RBAC and Supervisor Permissions
 
@@ -117,7 +117,7 @@ Audit logs record actor, action, entity, metadata, IP, and user agent. The audit
 
 ## Known Limitations
 
-- Provider and customer API tokens are plaintext.
+- Customer API tokens are plaintext.
 - No refresh-token, logout, or token revocation model exists.
 - Permissions have no central whitelist or data scoping.
 - Some legacy permission aliases remain for provider list compatibility.
