@@ -49,6 +49,18 @@ router.use(authenticate, requireActiveUser);
  */
 router.get('/', me.getProfile);
 
+const updateCurrencyValidation = [
+    body('currency')
+        .exists({ checkFalsy: true }).withMessage('currency is required')
+        .bail()
+        .isString().withMessage('currency must be a string')
+        .trim()
+        .matches(/^[A-Za-z]{3}$/).withMessage('currency must be a 3-letter ISO 4217 code')
+        .toUpperCase(),
+];
+
+router.patch('/currency', updateCurrencyValidation, validate, me.updateCurrency);
+
 // ─── Wallet ───────────────────────────────────────────────────────────────────
 
 router.get('/wallet', me.getWallet);

@@ -242,6 +242,50 @@ const updateMyProfile = async (userId, { name, email, phone, username, password 
 };
 
 /**
+ * Customer: Update own preferred currency.
+ *
+ * This intentionally updates only User.currency. Wallet balances, wallet
+ * ledger entries, orders, deposits, payments, pricing groups, and referrals
+ * are not recalculated here.
+ */
+const updateMyCurrency = async (userId, currency) => {
+    const code = String(currency || '').trim().toUpperCase();
+
+    if (!code) {
+        throw new BusinessRuleError('Currency is required.', 'CURRENCY_REQUIRED');
+    }
+
+    if (!/^[A-Z]{3}$/.test(code)) {
+        throw new BusinessRuleError(
+            'Currency must be a 3-letter ISO 4217 code.',
+            'INVALID_CURRENCY'
+        );
+    }
+
+    const { Currency } = require('../currency/currency.model');
+    const currencyDoc = await Currency.findOne({ code, isActive: true });
+    if (!currencyDoc || currencyDoc.deletedAt) {
+        throw new BusinessRuleError(
+            `Currency '${code}' is not supported or is inactive.`,
+            'INVALID_CURRENCY'
+        );
+    }
+
+    const user = await User.findById(userId);
+    if (!user) throw new NotFoundError('User');
+
+    if (user.currency !== code) {
+        user.currency = code;
+        await user.save();
+    }
+
+    return {
+        user: user.toSafeObject ? user.toSafeObject() : user.toObject(),
+        currency: code,
+    };
+};
+
+/**
  * Customer: Update own avatar (self-service).
  * Accepts a URL string or null/empty to clear.
  */
@@ -276,6 +320,7 @@ module.exports = {
     updateUser,
     getMyProfile,
     updateMyProfile,
+    updateMyCurrency,
     updateMyAvatar,
     regenerateMyApiToken,
 };

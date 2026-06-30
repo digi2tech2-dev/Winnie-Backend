@@ -94,6 +94,14 @@ Dependencies: frontend contract, pagination conventions, auth/session expectatio
 
 Risks: duplicate routes drifting from canonical services, accidental breaking changes.
 
+## Customer Currency Update
+
+Phase 2.5I.1 status: implemented `PATCH /api/me/currency` for authenticated active customers. The endpoint validates `{ currency }` against active platform currencies and updates only `User.currency`; it does not recalculate wallet balances, wallet ledger records, orders, deposits, payments, pricing groups, or referrals.
+
+Current customer endpoints: `GET /api/currencies/active` and `PATCH /api/me/currency`.
+
+Remaining risks: currency changes affect future display/pricing behavior according to existing services only. Historical wallet/order/deposit/payment records keep their stored currency snapshots.
+
 ## Provider Credentials Encryption
 
 Phase 2.5H.1 status: provider `apiToken` and legacy `apiKey` fields are encrypted at rest with AES-256-GCM using `PROVIDER_CREDENTIALS_KEY`. Provider list/detail responses expose only safe credential booleans, and adapters decrypt credentials internally when backend provider actions run.

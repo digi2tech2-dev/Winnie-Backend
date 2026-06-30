@@ -9,6 +9,7 @@
 
 const { User } = require('../users/user.model');
 const { WalletTransaction } = require('../wallet/walletTransaction.model');
+const userService = require('../users/user.service');
 const orderService = require('../orders/order.service');
 const depositService = require('../deposits/deposit.service');
 const productService = require('../products/product.service');
@@ -61,6 +62,14 @@ const getProfile = catchAsync(async (req, res) => {
 /**
  * Wallet summary: balance + last 5 transactions.
  */
+/**
+ * Update the authenticated user's preferred currency.
+ */
+const updateCurrency = catchAsync(async (req, res) => {
+    const result = await userService.updateMyCurrency(req.user._id, req.body.currency);
+    sendSuccess(res, result, 'Currency updated.');
+});
+
 const getWallet = catchAsync(async (req, res) => {
     const user = await User.findById(req.user._id).select('walletBalance currency creditLimit');
     if (!user) throw new NotFoundError('User');
@@ -393,6 +402,7 @@ const getDeposit = catchAsync(async (req, res) => {
 
 module.exports = {
     getProfile,
+    updateCurrency,
     getWallet,
     getTransactions,
     getOrders,

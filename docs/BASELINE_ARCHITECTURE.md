@@ -10,7 +10,7 @@ MongoDB access is through Mongoose models inside each module. Controllers stay t
 
 - `auth`: registration, login, email verification, 2FA, optional Google OAuth.
 - `users`: admin and self-service user profile/account actions.
-- `me`: active-user panel for profile, wallet, products, orders, and deposits.
+- `me`: active-user panel for profile, preferred currency, wallet, products, orders, and deposits.
 - `groups`: pricing group tiers and active/inactive group management.
 - `wallet`: balance mutations and wallet transaction history.
 - `deposits`: deposit request lifecycle and admin review.
@@ -55,6 +55,8 @@ Online payments are prepared for wallet top-ups only. `POST /api/payments/intent
 Referrals are active for invitation tracking and global commission settings. Eligible successful wallet credits (`DEPOSIT_APPROVED` and `CARD_PAYMENT_SUCCESS`) can credit the inviter with `REFERRAL_COMMISSION` when the configured percentage is greater than zero. Admin wallet adjustments, order debits, and order refunds do not trigger referral commission. See `docs/REFERRALS_ARCHITECTURE.md`.
 
 Group-change and sub-agent requests are customer self-service workflows reviewed by admins. Customers can fetch a safe active-group options list for group-change request creation; that list exposes only group id/name/current markers, not pricing percentages or admin metadata. A group-change approval updates `User.groupId`, so pricing changes apply naturally to future orders. A sub-agent approval sets business-level fields on the user (`isSubAgent`, `subAgentStatus`, approval stamp fields) and may optionally update `groupId`. It never changes `role`, never grants supervisor permissions, and has no wallet or referral side effects. See `docs/GROUP_REQUESTS_ARCHITECTURE.md`.
+
+Customers can update their own preferred currency with `PATCH /api/me/currency`. The endpoint accepts `{ "currency": "EGP" }`, requires an authenticated active user, validates the code against active currencies, and updates only `User.currency`. Wallet balances, wallet ledger entries, orders, deposits, payments, pricing groups, and referral data are not recalculated by this self-service endpoint.
 
 ## Provider Architecture
 
