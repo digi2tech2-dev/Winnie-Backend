@@ -58,6 +58,8 @@ Group-change and sub-agent requests are customer self-service workflows reviewed
 
 Customers can update their own preferred currency with `PATCH /api/me/currency`. The endpoint accepts `{ "currency": "EGP" }`, requires an authenticated active user, validates the code against active currencies, and updates only `User.currency`. Wallet balances, wallet ledger entries, orders, deposits, payments, pricing groups, and referral data are not recalculated by this self-service endpoint.
 
+Customers can update their own password with `PATCH /api/me/password`. The endpoint accepts `{ "currentPassword": "...", "newPassword": "..." }`, requires an authenticated active user, verifies the current password against the stored hash, validates the new password against the registration strength rule, and saves only the newly hashed password. The response does not include password data or hashes.
+
 ## Provider Architecture
 
 Provider records store `name`, `slug`, `baseUrl`, encrypted `apiToken`/`apiKey`, active state, sync interval, and supported features. Provider credentials are encrypted at rest with AES-256-GCM using `PROVIDER_CREDENTIALS_KEY` and stored as `enc:v1:<iv>:<tag>:<ciphertext>`. API responses expose safe credential-status booleans only, never raw or encrypted credential values.

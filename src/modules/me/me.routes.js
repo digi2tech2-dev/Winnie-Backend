@@ -10,6 +10,7 @@
  * Route map:
  *
  *  GET  /api/me                        Profile + wallet balance
+ *  PATCH /api/me/password              Secure current-user password change
  *  GET  /api/me/wallet                 Wallet summary + 5 recent txns
  *  GET  /api/me/wallet/transactions    Paginated transaction history
  *
@@ -60,6 +61,24 @@ const updateCurrencyValidation = [
 ];
 
 router.patch('/currency', updateCurrencyValidation, validate, me.updateCurrency);
+
+const updatePasswordValidation = [
+    body('currentPassword')
+        .exists({ checkFalsy: true }).withMessage('currentPassword is required')
+        .bail()
+        .isString().withMessage('currentPassword must be a string'),
+    body('newPassword')
+        .exists({ checkFalsy: true }).withMessage('newPassword is required')
+        .bail()
+        .isString().withMessage('newPassword must be a string')
+        .isLength({ min: 8 }).withMessage('newPassword must be at least 8 characters')
+        .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
+        .withMessage('newPassword must contain at least one uppercase letter, one lowercase letter, and one number')
+        .custom((value, { req }) => value !== req.body.currentPassword)
+        .withMessage('newPassword must be different from currentPassword'),
+];
+
+router.patch('/password', updatePasswordValidation, validate, me.updatePassword);
 
 // ─── Wallet ───────────────────────────────────────────────────────────────────
 

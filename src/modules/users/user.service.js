@@ -3,12 +3,13 @@
 const crypto = require('crypto');
 const { User, ROLES, USER_STATUS } = require('./user.model');
 const Group = require('../groups/group.model');
-const { NotFoundError, ConflictError, BusinessRuleError } = require('../../shared/errors/AppError');
+const { NotFoundError, ConflictError, BusinessRuleError, AuthenticationError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { USER_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 
 /** Shared populate projection for group fields shown in user responses. */
 const GROUP_PROJECTION = 'name percentage isActive';
+const PASSWORD_STRENGTH_PATTERN = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ADMIN: QUERIES
@@ -221,9 +222,10 @@ const getMyProfile = async (userId) => {
 
 /**
  * Customer: Update own profile (self-service).
- * Only allows safe fields: name, email, phone, username, password.
+ * Only allows safe profile fields. Password changes require
+ * updateMyPassword so currentPassword is verified first.
  */
-const updateMyProfile = async (userId, { name, email, phone, username, password }) => {
+const updateMyProfile = async (userId, { name, email, phone, username }) => {
     const user = await User.findById(userId);
     if (!user) throw new NotFoundError('User');
 
@@ -232,13 +234,65 @@ const updateMyProfile = async (userId, { name, email, phone, username, password 
     if (phone !== undefined) user.phone = phone;
     if (username !== undefined) user.username = username;
 
-    if (password) {
-        // The User model's pre-save hook should hash the password
-        user.password = password;
-    }
-
     await user.save();
     return user.toSafeObject ? user.toSafeObject() : user.toObject();
+};
+
+/**
+ * Customer: securely update own password.
+ * Verifies currentPassword before saving the new password through the
+ * User model pre-save hashing hook.
+ */
+const updateMyPassword = async (userId, { currentPassword, newPassword }) => {
+    if (typeof currentPassword !== 'string' || !currentPassword) {
+        throw new BusinessRuleError('currentPassword is required.', 'CURRENT_PASSWORD_REQUIRED');
+    }
+
+    if (typeof newPassword !== 'string' || !newPassword) {
+        throw new BusinessRuleError('newPassword is required.', 'NEW_PASSWORD_REQUIRED');
+    }
+
+    if (newPassword.length < 8 || !PASSWORD_STRENGTH_PATTERN.test(newPassword)) {
+        throw new BusinessRuleError(
+            'newPassword must be at least 8 characters and contain uppercase, lowercase, and number characters.',
+            'WEAK_PASSWORD'
+        );
+    }
+
+    if (newPassword === currentPassword) {
+        throw new BusinessRuleError(
+            'New password must be different from current password.',
+            'PASSWORD_UNCHANGED'
+        );
+    }
+
+    const user = await User.findById(userId).select('+password');
+    if (!user) throw new NotFoundError('User');
+
+    if (!user.password) {
+        throw new BusinessRuleError(
+            'Password change is not available for this account.',
+            'PASSWORD_NOT_AVAILABLE'
+        );
+    }
+
+    const currentMatches = await user.comparePassword(currentPassword);
+    if (!currentMatches) {
+        throw new AuthenticationError('Current password is incorrect.');
+    }
+
+    const unchanged = await user.comparePassword(newPassword);
+    if (unchanged) {
+        throw new BusinessRuleError(
+            'New password must be different from current password.',
+            'PASSWORD_UNCHANGED'
+        );
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    return { updated: true };
 };
 
 /**
@@ -320,6 +374,7 @@ module.exports = {
     updateUser,
     getMyProfile,
     updateMyProfile,
+    updateMyPassword,
     updateMyCurrency,
     updateMyAvatar,
     regenerateMyApiToken,

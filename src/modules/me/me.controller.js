@@ -70,6 +70,18 @@ const updateCurrency = catchAsync(async (req, res) => {
     sendSuccess(res, result, 'Currency updated.');
 });
 
+/**
+ * Securely update the authenticated user's password.
+ */
+const updatePassword = catchAsync(async (req, res) => {
+    await userService.updateMyPassword(req.user._id, {
+        currentPassword: req.body.currentPassword,
+        newPassword: req.body.newPassword,
+    });
+
+    sendSuccess(res, null, 'Password updated successfully.');
+});
+
 const getWallet = catchAsync(async (req, res) => {
     const user = await User.findById(req.user._id).select('walletBalance currency creditLimit');
     if (!user) throw new NotFoundError('User');
@@ -403,6 +415,7 @@ const getDeposit = catchAsync(async (req, res) => {
 module.exports = {
     getProfile,
     updateCurrency,
+    updatePassword,
     getWallet,
     getTransactions,
     getOrders,

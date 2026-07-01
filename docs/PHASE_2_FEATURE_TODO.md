@@ -102,6 +102,14 @@ Current customer endpoints: `GET /api/currencies/active` and `PATCH /api/me/curr
 
 Remaining risks: currency changes affect future display/pricing behavior according to existing services only. Historical wallet/order/deposit/payment records keep their stored currency snapshots.
 
+## Customer Password Change
+
+Phase 2.5M.1 status: implemented `PATCH /api/me/password` for authenticated active customers. The endpoint requires `currentPassword`, validates and verifies it against the stored hash, validates `newPassword` with the existing registration strength rule, and saves only the new hashed password through the User model pre-save hook.
+
+Current customer endpoint: `PATCH /api/me/password`.
+
+Remaining risks: existing JWT sessions are not revoked because the backend has no refresh-token/logout/session-revocation model.
+
 ## Provider Credentials Encryption
 
 Phase 2.5H.1 status: provider `apiToken` and legacy `apiKey` fields are encrypted at rest with AES-256-GCM using `PROVIDER_CREDENTIALS_KEY`. Provider list/detail responses expose only safe credential booleans, and adapters decrypt credentials internally when backend provider actions run.
