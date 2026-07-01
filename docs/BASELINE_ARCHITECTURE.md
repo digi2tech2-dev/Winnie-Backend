@@ -50,7 +50,7 @@ Orders debit wallet balance atomically, create order records, and either fulfill
 
 Wallet transactions keep legacy `type` values (`CREDIT`, `DEBIT`, `REFUND`, `DEBT_ADJUSTMENT`) and now carry Phase 2 ledger fields such as `semanticType`, `direction`, `sourceType`, `sourceId`, `currency`, metadata, actor fields, and optional idempotency keys. See `docs/LEDGER_ARCHITECTURE.md`.
 
-Online payments are prepared for wallet top-ups only. `POST /api/payments/intents` creates a payment intent and never credits the wallet. In development/test, the mock gateway can confirm success and credit the wallet once with `CARD_PAYMENT_SUCCESS`. Real gateways and production webhooks remain future work. See `docs/PAYMENTS_ARCHITECTURE.md`.
+Online payments are prepared for wallet top-ups only. `POST /api/payments/intents` validates admin-configured `paymentRiskLimits` before gateway adapter creation, then creates a payment intent only when the risk check allows it. The intent path never credits the wallet. In development/test, the mock gateway can confirm success and credit the wallet once with `CARD_PAYMENT_SUCCESS`. Real gateways and production webhooks remain future work. See `docs/PAYMENTS_ARCHITECTURE.md`.
 
 Referrals are active for invitation tracking and global commission settings. Eligible successful wallet credits (`DEPOSIT_APPROVED` and `CARD_PAYMENT_SUCCESS`) can credit the inviter with `REFERRAL_COMMISSION` when the configured percentage is greater than zero. Admin wallet adjustments, order debits, and order refunds do not trigger referral commission. See `docs/REFERRALS_ARCHITECTURE.md`.
 
@@ -128,3 +128,4 @@ Audit logs record actor, action, entity, metadata, IP, and user agent. The audit
 - Local disk uploads are not suitable for multi-instance production without shared storage.
 - Existing provider adapters are legacy/sample until confirmed for the new platform.
 - Real card gateways, payment webhooks, referral reversal, group-based referral rates, frontend compatibility aliases, and advanced sub-agent hierarchy/profile features are intentionally not implemented in the current baseline.
+- Payment risk limits use rolling 60-minute and rolling 24-hour windows and USD-equivalent amounts from platform currency rates.

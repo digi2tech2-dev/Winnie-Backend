@@ -62,6 +62,7 @@ const DEPOSIT_ACTIONS = Object.freeze({
 /** Actions on online wallet top-up payments. */
 const PAYMENT_ACTIONS = Object.freeze({
     INTENT_CREATED: 'PAYMENT_INTENT_CREATED',
+    RISK_BLOCKED: 'PAYMENT_RISK_BLOCKED',
     SUCCEEDED: 'PAYMENT_SUCCEEDED',
     FAILED: 'PAYMENT_FAILED',
 });

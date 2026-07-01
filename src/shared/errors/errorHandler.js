@@ -50,6 +50,7 @@ const sendErrorDev = (err, res) => {
         success: false,
         code: err.code,
         message: err.message,
+        details: err.details || undefined,
         errors: err.errors || undefined,
         stack: err.stack,
     });
@@ -65,6 +66,7 @@ const sendErrorProd = (err, res) => {
             success: false,
             code: err.code,
             message: err.message,
+            details: err.details || undefined,
             errors: err.errors || undefined,
         });
     }

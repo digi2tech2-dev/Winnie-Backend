@@ -28,6 +28,8 @@ Out of scope:
 - `payment.model.js`: wallet top-up payment intent model.
 - `payment.validation.js`: request validation.
 - `payment.service.js`: payment state machine, mock confirmation/failure, wallet credit.
+- `paymentRisk.config.js`: default `paymentRiskLimits` setting shape and validation.
+- `paymentRisk.service.js`: rolling-window risk evaluation before gateway intent creation.
 - `payment.controller.js`: customer/admin response handling.
 - `payment.routes.js`: `/api/payments` customer/dev routes.
 - `gateways/`: mock gateway plus real-gateway placeholders.
@@ -108,6 +110,8 @@ After a successful wallet credit commits, Phase 2.3 calls the referral processor
 
 Payment creation accepts an optional `Idempotency-Key` header or `idempotencyKey` body field. If the same user repeats a create request with the same key, the existing payment is returned.
 
+Payment risk limits are evaluated before the idempotency lookup and before gateway adapter creation. A blocked request returns a 4xx operational error and does not return an existing checkout URL.
+
 Mock success confirmation is protected by:
 
 - payment `status`
@@ -117,6 +121,57 @@ Mock success confirmation is protected by:
 - a MongoDB transaction/session around payment update and wallet credit
 
 Calling mock confirm twice returns the already credited payment and does not double-credit the wallet.
+
+## Payment Risk Limits
+
+Phase 2.5N adds admin-configurable online payment risk limits under the `paymentRiskLimits` setting. The backend evaluates these limits inside `POST /api/payments/intents` after request/user/currency validation and before any gateway adapter is created or called.
+
+Setting shape:
+
+```json
+{
+  "enabled": true,
+  "maxSingleAmount": 1000,
+  "hourlyAmountLimit": 1000,
+  "dailyAmountLimit": 1500,
+  "hourlyAttemptLimit": 3,
+  "dailyAttemptLimit": 5,
+  "newAccountHours": 24,
+  "newAccountSingleAmount": 100,
+  "newAccountDailyAmount": 200,
+  "action": "BLOCK_ONLINE_PAYMENT",
+  "customerMessage": "Your online top-up limit has been reached. Please use manual deposit or contact support."
+}
+```
+
+Amount limits are evaluated in USD equivalent using the existing `convertUserCurrencyToUsd` platform-rate helper. New payment records snapshot `metadata.risk.amountBaseCurrency` and `metadata.risk.baseCurrency` so future rolling sums can reuse the evaluated amount. Older payment records without that snapshot are converted with the current platform rate when the risk check runs.
+
+Implemented checks:
+
+- Max single online top-up amount.
+- New-account max single amount when `accountAgeHours < newAccountHours`.
+- Rolling hourly amount limit, where hourly means the last 60 minutes.
+- Rolling daily amount limit, where daily means the last 24 hours.
+- New-account rolling daily amount limit.
+- Rolling hourly attempt limit.
+- Rolling daily attempt limit.
+
+Risk checks count existing `Payment` records for the same user and `WALLET_TOPUP` purpose. Manual deposits are not counted and are not blocked by this setting.
+
+Blocked response contract:
+
+```json
+{
+  "success": false,
+  "code": "PAYMENT_RISK_LIMIT_REACHED",
+  "message": "Your online top-up limit has been reached. Please use manual deposit or contact support.",
+  "details": {
+    "reason": "DAILY_AMOUNT_LIMIT"
+  }
+}
+```
+
+Blocked requests do not create a `Payment` record, do not call a gateway adapter, and do not credit the wallet. The backend writes a safe `PAYMENT_RISK_BLOCKED` audit event with user id, amount, currency, gateway, reason code, matched limit, action, and base-currency amount. Card data and gateway secrets are never logged.
 
 ## Routes
 
@@ -178,6 +233,8 @@ Future gateway credentials are optional placeholders and are not required for st
 - Customer responses omit internal metadata, IP, user agent, and idempotency keys.
 - Browser return URLs are never trusted for wallet credit.
 - Mock success/failure endpoints are blocked when `NODE_ENV=production`.
+- Online payment risk limits are enforced server-side before gateway/payment intent creation.
+- Manual deposit remains available when online payment risk limits block a customer.
 - Real webhooks must be implemented with signature verification and replay protection in a future phase.
 
 ## Future Reserved Work

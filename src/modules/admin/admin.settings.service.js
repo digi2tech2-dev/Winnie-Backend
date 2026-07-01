@@ -8,9 +8,13 @@
  */
 
 const { Setting } = require('./setting.model');
-const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
+const { NotFoundError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+const {
+    PAYMENT_RISK_LIMITS_SETTING_KEY,
+    normalizePaymentRiskLimits,
+} = require('../payments/paymentRisk.config');
 
 // ─── List ──────────────────────────────────────────────────────────────────────
 
@@ -33,18 +37,30 @@ const getSettingValue = async (key, defaultValue = null) => {
     return setting ? setting.value : defaultValue;
 };
 
+const normalizeSettingValueForUpdate = (key, value, currentValue) => {
+    if (key === PAYMENT_RISK_LIMITS_SETTING_KEY) {
+        return normalizePaymentRiskLimits(value, {
+            currentValue,
+            allowMissing: false,
+        });
+    }
+
+    return value;
+};
+
 // ─── Update ───────────────────────────────────────────────────────────────────
 
 const updateSetting = async (key, value, adminId) => {
     let setting = await Setting.findOne({ key });
     const before = setting ? setting.value : undefined;
+    const normalizedValue = normalizeSettingValueForUpdate(key, value, before);
 
     if (setting) {
         // ── CRITICAL: Schema.Types.Mixed fix ─────────────────────────
         // Mongoose does not detect mutations to Mixed-type fields.
         // Without markModified(), `.save()` silently skips the write
         // even though it returns the document — a "200 OK but nothing saved" bug.
-        setting.value = value;
+        setting.value = normalizedValue;
         setting.updatedBy = adminId;
         setting.markModified('value');
         await setting.save();
@@ -52,7 +68,7 @@ const updateSetting = async (key, value, adminId) => {
         // Key does not exist yet — auto-create it (upsert behaviour).
         setting = await Setting.create({
             key,
-            value,
+            value: normalizedValue,
             description: '',
             updatedBy: adminId,
         });
@@ -64,7 +80,7 @@ const updateSetting = async (key, value, adminId) => {
         action: ADMIN_ACTIONS.SETTING_UPDATED,
         entityType: ENTITY_TYPES.SETTING,
         entityId: setting._id,
-        metadata: { key, before, after: value },
+        metadata: { key, before, after: normalizedValue },
     });
 
     return setting;

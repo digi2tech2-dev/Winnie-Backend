@@ -11,6 +11,11 @@ const {
     isAllowedPaymentTransition,
 } = require('./payment.constants');
 const { getPaymentGateway, normalizeGatewayKey } = require('./gateways/gateway.factory');
+const {
+    PaymentRiskLimitError,
+    evaluatePaymentRisk,
+    logPaymentRiskBlock,
+} = require('./paymentRisk.service');
 const { Currency } = require('../currency/currency.model');
 const { User, ROLES } = require('../users/user.model');
 const { creditWalletDirect } = require('../wallet/wallet.service');
@@ -207,9 +212,28 @@ const createPaymentIntent = async ({
     const normalizedCurrency = normalizeCurrency(currency);
     await assertCurrencySupported(normalizedCurrency);
 
-    const user = await User.findById(userId).select('currency status role');
+    const user = await User.findById(userId).select('currency status role createdAt');
     if (!user) throw new NotFoundError('User');
     assertWalletCurrencyMatch(user, normalizedCurrency);
+
+    const riskResult = await evaluatePaymentRisk({
+        user,
+        amount: parsedAmount,
+        currency: normalizedCurrency,
+        gateway: normalizedGateway,
+    });
+
+    if (!riskResult.allowed) {
+        logPaymentRiskBlock({
+            userId,
+            amount: parsedAmount,
+            currency: normalizedCurrency,
+            gateway: normalizedGateway,
+            riskResult,
+            requestMeta,
+        });
+        throw new PaymentRiskLimitError(riskResult.customerMessage, riskResult.reason);
+    }
 
     const normalizedIdempotencyKey = normalizeIdempotencyKey(idempotencyKey);
     if (normalizedIdempotencyKey) {
@@ -262,6 +286,11 @@ const createPaymentIntent = async ({
         idempotencyKey: normalizedIdempotencyKey,
         metadata: {
             mode: normalizedGateway === PAYMENT_GATEWAYS.MOCK ? 'mock' : 'placeholder',
+            risk: {
+                amountBaseCurrency: riskResult.amountBaseCurrency,
+                baseCurrency: riskResult.baseCurrency,
+                evaluatedAt: new Date(),
+            },
             gatewayMetadata: intent.metadata || {},
         },
         createdByIp: requestMeta.ipAddress || null,

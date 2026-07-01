@@ -6,7 +6,7 @@ Phase 2 should build new business features on top of the cleaned baseline. None 
 
 Purpose: let customers fund wallets or pay invoices through an online payment gateway.
 
-Phase 2.2 status: a wallet top-up only payments base module exists with `Payment`, mock gateway support, real gateway placeholders, and one-time wallet credit through `CARD_PAYMENT_SUCCESS`. See `docs/PAYMENTS_ARCHITECTURE.md`.
+Phase 2.2 status: a wallet top-up only payments base module exists with `Payment`, mock gateway support, real gateway placeholders, and one-time wallet credit through `CARD_PAYMENT_SUCCESS`. Phase 2.5N adds admin-configured online payment risk limits before gateway/payment-intent creation. See `docs/PAYMENTS_ARCHITECTURE.md`.
 
 Suggested future models: gateway-specific `PaymentWebhookEvent`, optional `PaymentMethod`, and reconciliation records.
 
@@ -16,7 +16,7 @@ Suggested future endpoints: real gateway checkout/webhook endpoints and admin re
 
 Dependencies: gateway SDK/API choice, webhook signature verification, settlement/fee rules, admin settings.
 
-Risks: double-crediting, chargebacks, currency conversion drift, PCI/security boundaries, replayed webhooks.
+Risks: double-crediting, chargebacks, currency conversion drift, PCI/security boundaries, replayed webhooks. Phase 2.5N reduces gateway-abuse exposure by blocking unusual online top-up amount/attempt patterns before a gateway call is made.
 
 ## Payment Gateway Webhooks
 
@@ -123,6 +123,8 @@ Migration: run `npm run migrate:provider-credentials` to encrypt existing plaint
 Purpose: let admins configure payment provider behavior, referral rules, commission rates, and operational limits.
 
 Phase 2.3 status: referral settings are stored as one `referrals` `Setting` value with `enabled`, `depositCommissionPercentage`, `applyTo`, `minSourceAmount`, and `maxCommissionAmount`.
+
+Phase 2.5N status: online payment risk limits are stored as one `paymentRiskLimits` `Setting` value with `enabled`, amount limits, attempt limits, new-account limits, fixed `action`, and customer message. The payment intent service enforces the setting server-side before gateway adapter creation.
 
 Current referral endpoints: `GET /api/admin/referral-settings` and `PATCH /api/admin/referral-settings`.
 

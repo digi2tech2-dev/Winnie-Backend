@@ -13,6 +13,10 @@
  */
 
 const mongoose = require('mongoose');
+const {
+    getDefaultPaymentRiskLimits,
+    PAYMENT_RISK_LIMITS_SETTING_KEY,
+} = require('../payments/paymentRisk.config');
 
 const settingSchema = new mongoose.Schema(
     {
@@ -59,6 +63,11 @@ const DEFAULT_SETTINGS = [
     { key: 'paymentCountryAccounts', value: [], description: 'Country-specific payment accounts' },
     { key: 'paymentInstructions', value: '', description: 'General payment instructions shown to customers' },
     { key: 'whatsappNumber', value: '', description: 'WhatsApp number for customer support' },
+    {
+        key: PAYMENT_RISK_LIMITS_SETTING_KEY,
+        value: getDefaultPaymentRiskLimits(),
+        description: 'Online payment risk limits evaluated before gateway intent creation',
+    },
     {
         key: 'referrals',
         value: {
