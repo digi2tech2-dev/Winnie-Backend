@@ -116,8 +116,8 @@ describe('Payments base module', () => {
         expect(found._id.toString()).toBe(payment._id.toString());
     });
 
-    it('keeps real gateway adapters as non-operational placeholders', async () => {
-        const adapter = getPaymentGateway(PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL);
+    it('keeps unimplemented real gateway adapters as non-operational placeholders', async () => {
+        const adapter = getPaymentGateway(PAYMENT_GATEWAYS.TAP);
 
         await expect(adapter.createPaymentIntent({}))
             .rejects.toMatchObject({ code: 'PAYMENT_GATEWAY_NOT_IMPLEMENTED' });

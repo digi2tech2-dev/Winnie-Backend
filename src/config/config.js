@@ -63,6 +63,19 @@ const config = {
         maxAmount: parseFloat(process.env.PAYMENT_MAX_AMOUNT || '10000'),
         mockCheckoutBaseUrl: process.env.MOCK_PAYMENT_CHECKOUT_BASE_URL ||
             `${process.env.FRONTEND_URL || 'http://localhost:5173'}/mock-payment`,
+        networkInternational: {
+            enabled: process.env.NETWORK_INTERNATIONAL_ENABLED === 'true',
+            env: (process.env.NETWORK_INTERNATIONAL_ENV || 'sandbox').toLowerCase(),
+            baseUrl: process.env.NETWORK_INTERNATIONAL_BASE_URL,
+            apiKey: process.env.NETWORK_INTERNATIONAL_API_KEY,
+            outletRef: process.env.NETWORK_INTERNATIONAL_OUTLET_REF,
+            currency: (process.env.NETWORK_INTERNATIONAL_CURRENCY || 'AED').toUpperCase(),
+            returnUrl: process.env.NETWORK_INTERNATIONAL_RETURN_URL ||
+                `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/success`,
+            cancelUrl: process.env.NETWORK_INTERNATIONAL_CANCEL_URL ||
+                `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/cancel`,
+            webhookSecret: process.env.NETWORK_INTERNATIONAL_WEBHOOK_SECRET,
+        },
     },
 
     providerCredentials: {

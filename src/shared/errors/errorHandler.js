@@ -42,6 +42,8 @@ const handleJWTError = () =>
 const handleJWTExpiredError = () =>
     new AppError('Your token has expired. Please log in again.', 401, 'TOKEN_EXPIRED');
 
+const getRuntimeEnv = () => process.env.NODE_ENV || config.env || 'development';
+
 /**
  * Send error response in development (full stack trace)
  */
@@ -95,7 +97,7 @@ const globalErrorHandler = (err, req, res, next) => {
     if (err.name === 'JsonWebTokenError') error = handleJWTError();
     if (err.name === 'TokenExpiredError') error = handleJWTExpiredError();
 
-    if (config.env === 'development') {
+    if (getRuntimeEnv() === 'development') {
         sendErrorDev(error, res);
     } else {
         sendErrorProd(error, res);

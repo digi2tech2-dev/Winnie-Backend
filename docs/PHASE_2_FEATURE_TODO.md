@@ -6,17 +6,17 @@ Phase 2 should build new business features on top of the cleaned baseline. None 
 
 Purpose: let customers fund wallets or pay invoices through an online payment gateway.
 
-Phase 2.2 status: a wallet top-up only payments base module exists with `Payment`, mock gateway support, real gateway placeholders, and one-time wallet credit through `CARD_PAYMENT_SUCCESS`. Phase 2.5N adds admin-configured online payment risk limits before gateway/payment-intent creation. See `docs/PAYMENTS_ARCHITECTURE.md`.
+Phase 2.2 status: a wallet top-up only payments base module exists with `Payment`, mock gateway support, real gateway placeholders, and one-time wallet credit through `CARD_PAYMENT_SUCCESS`. Phase 2.5N adds admin-configured online payment risk limits before gateway/payment-intent creation. Phase 2.5P implements Network International / N-Genius Hosted Payment Page order creation and authenticated status sync for wallet top-up only. Phase 2.5P.1 adds backend Network gateway currency conversion so the requested wallet top-up currency can differ from the configured Network outlet currency. See `docs/PAYMENTS_ARCHITECTURE.md`.
 
 Suggested future models: gateway-specific `PaymentWebhookEvent`, optional `PaymentMethod`, and reconciliation records.
 
-Current endpoints: `POST /api/payments/intents`, `GET /api/payments`, `GET /api/payments/:id`, `GET /api/admin/payments`, `GET /api/admin/payments/:id`, plus non-production mock confirmation/failure endpoints.
+Current endpoints: `POST /api/payments/intents`, `GET /api/payments`, `GET /api/payments/:id`, `POST /api/payments/:id/sync-status`, `GET /api/admin/payments`, `GET /api/admin/payments/:id`, plus non-production mock confirmation/failure endpoints.
 
-Suggested future endpoints: real gateway checkout/webhook endpoints and admin reconcile endpoints.
+Suggested future endpoints: verified gateway webhook endpoints and admin reconcile endpoints.
 
 Dependencies: gateway SDK/API choice, webhook signature verification, settlement/fee rules, admin settings.
 
-Risks: double-crediting, chargebacks, currency conversion drift, PCI/security boundaries, replayed webhooks. Phase 2.5N reduces gateway-abuse exposure by blocking unusual online top-up amount/attempt patterns before a gateway call is made.
+Risks: double-crediting, chargebacks, currency conversion drift, PCI/security boundaries, replayed webhooks. Phase 2.5N reduces gateway-abuse exposure by blocking unusual online top-up amount/attempt patterns before a gateway call is made. Phase 2.5P keeps card data on Network hosted pages and never credits the wallet from browser return alone. Phase 2.5P.1 snapshots requested/gateway currency conversion with platform rates and keeps wallet credit based on the intended payment amount/currency.
 
 ## Payment Gateway Webhooks
 
@@ -26,7 +26,7 @@ Suggested models: `PaymentWebhookEvent`, webhook event metadata on `PaymentTrans
 
 Suggested endpoints: `POST /api/webhooks/payments/:provider`.
 
-Dependencies: signature verification, replay protection, payment state machine, gateway-specific event schemas.
+Dependencies: Network portal webhook header/signature settings, replay protection, payment state machine, gateway-specific event schemas. Phase 2.5P intentionally uses authenticated status sync and documents webhook work rather than trusting unsigned payloads.
 
 Risks: replay attacks, out-of-order events, retry storms, partial wallet updates.
 

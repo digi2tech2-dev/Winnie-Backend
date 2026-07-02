@@ -74,6 +74,19 @@ const mockConfirmPayment = catchAsync(async (req, res) => {
     }, 'Mock payment confirmed.');
 });
 
+const syncPaymentStatus = catchAsync(async (req, res) => {
+    const result = await paymentService.syncPaymentStatus(req.params.id, {
+        actor: actorFrom(req),
+        requestMeta: requestMetaFrom(req),
+    });
+
+    sendSuccess(res, {
+        payment: paymentService.serializePayment(result.payment),
+        alreadyProcessed: result.alreadyProcessed,
+        providerStatus: result.providerStatus || null,
+    }, 'Payment status synced.');
+});
+
 const mockFailPayment = catchAsync(async (req, res) => {
     const result = await paymentService.failMockPayment(req.params.id, {
         actor: actorFrom(req),
@@ -119,6 +132,7 @@ module.exports = {
     createPaymentIntent,
     getMyPayment,
     listMyPayments,
+    syncPaymentStatus,
     mockConfirmPayment,
     mockFailPayment,
     adminListPayments,

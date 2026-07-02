@@ -21,6 +21,11 @@ const { User, ROLES } = require('../users/user.model');
 const { creditWalletDirect } = require('../wallet/wallet.service');
 const { processWalletCreditSafely } = require('../referrals/referral.service');
 const {
+    convertUserCurrencyToUsd,
+    convertUsdToUserCurrency,
+    getConversionRate,
+} = require('../../services/currencyConverter.service');
+const {
     LEDGER_TRANSACTION_TYPES,
     TRANSACTION_SOURCE_TYPES,
 } = require('../wallet/walletTransaction.model');
@@ -44,6 +49,11 @@ const safeRound = (value, decimals = 2) => {
     const factor = Math.pow(10, decimals);
     return Math.round(Number(value) * factor) / factor;
 };
+
+const CURRENCY_CONVERSION_UNAVAILABLE_MESSAGE =
+    'Online card payment is temporarily unavailable for this currency. Please try another currency or use manual deposit.';
+
+const NETWORK_GATEWAY_EXCHANGE_SOURCE = 'PLATFORM_CURRENCY_RATES_VIA_USD';
 
 const getRuntimePaymentConfig = () => {
     const allowedGateways = (process.env.PAYMENT_ALLOWED_GATEWAYS || config.payments.allowedGateways.join(','))
@@ -137,6 +147,66 @@ const assertWalletCurrencyMatch = (user, currency) => {
     }
 };
 
+const getNetworkGatewayCurrency = () =>
+    normalizeCurrency(process.env.NETWORK_INTERNATIONAL_CURRENCY || config.payments.networkInternational.currency || 'AED');
+
+const convertToNetworkGatewayCurrency = async ({ requestedAmount, requestedCurrency }) => {
+    const gatewayCurrency = getNetworkGatewayCurrency();
+    if (!gatewayCurrency || gatewayCurrency.length !== 3) {
+        throw new BusinessRuleError(CURRENCY_CONVERSION_UNAVAILABLE_MESSAGE, 'PAYMENT_CURRENCY_CONVERSION_UNAVAILABLE');
+    }
+
+    try {
+        const convertedAt = new Date();
+        const normalizedRequestedCurrency = normalizeCurrency(requestedCurrency);
+        const normalizedGatewayCurrency = normalizeCurrency(gatewayCurrency);
+
+        if (normalizedRequestedCurrency === normalizedGatewayCurrency) {
+            await getConversionRate(normalizedGatewayCurrency);
+            const amount = safeRound(requestedAmount, 2);
+
+            return {
+                requestedAmount: safeRound(requestedAmount, 2),
+                requestedCurrency: normalizedRequestedCurrency,
+                gatewayAmount: amount,
+                gatewayCurrency: normalizedGatewayCurrency,
+                exchangeRate: 1,
+                exchangeRateSource: 'SAME_CURRENCY',
+                requestedAmountUsd: null,
+                requestedCurrencyRate: null,
+                gatewayCurrencyRate: null,
+                convertedAt,
+            };
+        }
+
+        const usdConversion = await convertUserCurrencyToUsd(Number(requestedAmount), normalizedRequestedCurrency);
+        const gatewayConversion = await convertUsdToUserCurrency(usdConversion.usdAmount, normalizedGatewayCurrency);
+        const gatewayAmount = safeRound(gatewayConversion.finalAmount, 2);
+
+        if (!Number.isFinite(gatewayAmount) || gatewayAmount <= 0) {
+            throw new BusinessRuleError(CURRENCY_CONVERSION_UNAVAILABLE_MESSAGE, 'PAYMENT_CURRENCY_CONVERSION_UNAVAILABLE');
+        }
+
+        return {
+            requestedAmount: safeRound(requestedAmount, 2),
+            requestedCurrency: normalizedRequestedCurrency,
+            gatewayAmount,
+            gatewayCurrency: normalizedGatewayCurrency,
+            exchangeRate: safeRound(gatewayAmount / Number(requestedAmount), 8),
+            exchangeRateSource: NETWORK_GATEWAY_EXCHANGE_SOURCE,
+            requestedAmountUsd: usdConversion.usdAmount,
+            requestedCurrencyRate: usdConversion.rate,
+            gatewayCurrencyRate: gatewayConversion.rate,
+            convertedAt,
+        };
+    } catch (err) {
+        if (err instanceof BusinessRuleError && err.code === 'PAYMENT_CURRENCY_CONVERSION_UNAVAILABLE') {
+            throw err;
+        }
+        throw new BusinessRuleError(CURRENCY_CONVERSION_UNAVAILABLE_MESSAGE, 'PAYMENT_CURRENCY_CONVERSION_UNAVAILABLE');
+    }
+};
+
 const assertPaymentOwnerOrAdmin = (payment, actor) => {
     const actorRole = String(actor?.role || actor?.actorRole || '').toUpperCase();
     if (actorRole === ROLES.ADMIN || actorRole === ACTOR_ROLES.ADMIN) return;
@@ -146,10 +216,38 @@ const assertPaymentOwnerOrAdmin = (payment, actor) => {
     }
 };
 
+const getGatewayCurrencyConversion = (paymentOrDoc) => paymentOrDoc?.metadata?.gatewayCurrencyConversion || null;
+
+const safeGatewayChargeFields = (paymentOrDoc) => {
+    const conversion = getGatewayCurrencyConversion(paymentOrDoc);
+    if (!conversion) {
+        return {
+            requestedAmount: paymentOrDoc?.amount,
+            requestedCurrency: paymentOrDoc?.currency,
+        };
+    }
+
+    return {
+        requestedAmount: conversion.requestedAmount,
+        requestedCurrency: conversion.requestedCurrency,
+        gatewayAmount: conversion.gatewayAmount,
+        gatewayCurrency: conversion.gatewayCurrency,
+        exchangeRate: conversion.exchangeRate,
+        exchangeRateSource: conversion.exchangeRateSource,
+    };
+};
+
 const buildCheckoutResponse = (payment) => ({
     url: payment.checkoutUrl,
     mode: payment.gateway === PAYMENT_GATEWAYS.MOCK ? 'mock' : 'gateway',
+    ...safeGatewayChargeFields(payment),
 });
+
+const metadataModeForGateway = (gateway) => {
+    if (gateway === PAYMENT_GATEWAYS.MOCK) return 'mock';
+    if (gateway === PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL) return 'network_international';
+    return 'placeholder';
+};
 
 const serializePayment = (payment, { admin = false } = {}) => {
     const doc = payment?.toObject ? payment.toObject() : payment;
@@ -179,6 +277,7 @@ const serializePayment = (payment, { admin = false } = {}) => {
         walletTransactionId: doc.walletTransactionId?.toString?.() || doc.walletTransactionId,
         createdAt: doc.createdAt,
         updatedAt: doc.updatedAt,
+        ...safeGatewayChargeFields(doc),
     };
 
     if (admin) {
@@ -253,6 +352,12 @@ const createPaymentIntent = async ({
     const paymentId = new mongoose.Types.ObjectId();
     const feeAmount = 0;
     const totalAmount = safeRound(parsedAmount + feeAmount);
+    const gatewayCurrencyConversion = normalizedGateway === PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL
+        ? await convertToNetworkGatewayCurrency({
+            requestedAmount: totalAmount,
+            requestedCurrency: normalizedCurrency,
+        })
+        : null;
 
     const gatewayAdapter = getPaymentGateway(normalizedGateway);
     const intent = await gatewayAdapter.createPaymentIntent({
@@ -262,6 +367,11 @@ const createPaymentIntent = async ({
         feeAmount,
         totalAmount,
         currency: normalizedCurrency,
+        gatewayAmount: gatewayCurrencyConversion?.gatewayAmount,
+        gatewayCurrency: gatewayCurrencyConversion?.gatewayCurrency,
+        requestedAmount: gatewayCurrencyConversion?.requestedAmount || parsedAmount,
+        requestedCurrency: gatewayCurrencyConversion?.requestedCurrency || normalizedCurrency,
+        gatewayCurrencyConversion,
         returnUrl,
         cancelUrl,
     });
@@ -285,13 +395,14 @@ const createPaymentIntent = async ({
         expiresAt: intent.expiresAt || null,
         idempotencyKey: normalizedIdempotencyKey,
         metadata: {
-            mode: normalizedGateway === PAYMENT_GATEWAYS.MOCK ? 'mock' : 'placeholder',
+            mode: metadataModeForGateway(normalizedGateway),
             risk: {
                 amountBaseCurrency: riskResult.amountBaseCurrency,
                 baseCurrency: riskResult.baseCurrency,
                 evaluatedAt: new Date(),
             },
             gatewayMetadata: intent.metadata || {},
+            gatewayCurrencyConversion: intent.gatewayCurrencyConversion || gatewayCurrencyConversion || undefined,
         },
         createdByIp: requestMeta.ipAddress || null,
         userAgent: requestMeta.userAgent || null,
@@ -551,6 +662,245 @@ const confirmMockPayment = async (paymentId, { actor, requestMeta = {} } = {}) =
     return { payment: creditedPayment, transaction, alreadyProcessed: false };
 };
 
+const terminalTimestampFieldForStatus = (status) => ({
+    [PAYMENT_STATUSES.SUCCEEDED]: 'succeededAt',
+    [PAYMENT_STATUSES.FAILED]: 'failedAt',
+    [PAYMENT_STATUSES.CANCELED]: 'canceledAt',
+    [PAYMENT_STATUSES.EXPIRED]: 'failedAt',
+}[status]);
+
+const buildGatewaySyncMetadata = (payment, gatewayStatus, now) => ({
+    ...(payment.metadata || {}),
+    gatewayMetadata: {
+        ...(payment.metadata?.gatewayMetadata || {}),
+        ...(gatewayStatus.metadata || {}),
+        statusSync: {
+            providerStatus: gatewayStatus.providerStatus || null,
+            mappedStatus: gatewayStatus.status || null,
+            syncedAt: now,
+        },
+    },
+});
+
+const creditAuthoritativePayment = async (initialPayment, gatewayStatus, { actor, requestMeta = {} } = {}) => {
+    if (initialPayment.walletTransactionId && initialPayment.creditedAt) {
+        return {
+            payment: initialPayment,
+            alreadyProcessed: true,
+            providerStatus: gatewayStatus.providerStatus || null,
+        };
+    }
+
+    const session = await mongoose.startSession();
+    let creditedPayment;
+    let transaction;
+
+    try {
+        session.startTransaction();
+
+        const now = new Date();
+        const payment = await Payment.findOneAndUpdate(
+            {
+                _id: initialPayment._id,
+                gateway: initialPayment.gateway,
+                status: { $in: [...ACTIVE_PAYMENT_STATUSES, PAYMENT_STATUSES.SUCCEEDED] },
+                creditedAt: null,
+                walletTransactionId: null,
+            },
+            {
+                $set: {
+                    status: PAYMENT_STATUSES.SUCCEEDED,
+                    succeededAt: initialPayment.succeededAt || now,
+                    gatewayPaymentId: gatewayStatus.gatewayPaymentId || initialPayment.gatewayPaymentId || null,
+                    gatewayReference: gatewayStatus.gatewayReference || initialPayment.gatewayReference || null,
+                },
+            },
+            { new: true, session }
+        );
+
+        if (!payment) {
+            const current = await Payment.findById(initialPayment._id).session(session);
+            if (current?.walletTransactionId && current?.creditedAt) {
+                await session.commitTransaction();
+                return {
+                    payment: current,
+                    alreadyProcessed: true,
+                    providerStatus: gatewayStatus.providerStatus || null,
+                };
+            }
+            throw new BusinessRuleError(
+                'Payment is not in a creditable state.',
+                'PAYMENT_NOT_CREDITABLE'
+            );
+        }
+
+        payment.metadata = buildGatewaySyncMetadata(payment, gatewayStatus, now);
+
+        const creditResult = await creditWalletDirect({
+            userId: payment.userId,
+            amount: payment.amount,
+            reference: null,
+            semanticType: LEDGER_TRANSACTION_TYPES.CARD_PAYMENT_SUCCESS,
+            sourceType: TRANSACTION_SOURCE_TYPES.PAYMENT,
+            sourceId: payment._id,
+            currency: payment.currency,
+            description: `Card payment wallet top-up #${payment._id.toString().slice(-6)}`,
+            metadata: {
+                paymentId: payment._id.toString(),
+                gateway: payment.gateway,
+                gatewayPaymentId: payment.gatewayPaymentId,
+                gatewayReference: payment.gatewayReference,
+                providerStatus: gatewayStatus.providerStatus || null,
+                purpose: payment.purpose,
+            },
+            idempotencyKey: `payment:${payment._id.toString()}:wallet-credit`,
+            actorId: actor?.actorId || actor?._id || actor?.userId || payment.userId,
+            actorRole: actor?.actorRole || actor?.role || ACTOR_ROLES.CUSTOMER,
+            session,
+        });
+
+        transaction = creditResult.transaction;
+        payment.walletTransactionId = transaction._id;
+        payment.creditedAt = now;
+        creditedPayment = await payment.save({ session });
+
+        await session.commitTransaction();
+    } catch (err) {
+        if (session.inTransaction()) {
+            await session.abortTransaction();
+        }
+        throw err;
+    } finally {
+        try { session.endSession(); } catch (_) { /* session already ended */ }
+    }
+
+    await processWalletCreditSafely(transaction);
+
+    void createAuditLog({
+        actorId: actor?.actorId || actor?._id || actor?.userId || creditedPayment.userId,
+        actorRole: actor?.actorRole || actor?.role || ACTOR_ROLES.CUSTOMER,
+        action: PAYMENT_ACTIONS.SUCCEEDED,
+        entityType: ENTITY_TYPES.PAYMENT,
+        entityId: creditedPayment._id,
+        metadata: {
+            gateway: creditedPayment.gateway,
+            amount: creditedPayment.amount,
+            currency: creditedPayment.currency,
+            walletTransactionId: creditedPayment.walletTransactionId,
+            providerStatus: gatewayStatus.providerStatus || null,
+            source: 'gateway_status_sync',
+        },
+        ipAddress: requestMeta.ipAddress || null,
+        userAgent: requestMeta.userAgent || null,
+    });
+
+    void createAuditLog({
+        actorId: creditedPayment.userId,
+        actorRole: ACTOR_ROLES.CUSTOMER,
+        action: WALLET_ACTIONS.CREDIT,
+        entityType: ENTITY_TYPES.WALLET,
+        entityId: creditedPayment.userId,
+        metadata: {
+            paymentId: creditedPayment._id,
+            gateway: creditedPayment.gateway,
+            amount: creditedPayment.amount,
+            currency: creditedPayment.currency,
+            walletTransactionId: creditedPayment.walletTransactionId,
+            reason: LEDGER_TRANSACTION_TYPES.CARD_PAYMENT_SUCCESS,
+            source: 'gateway_status_sync',
+        },
+        ipAddress: requestMeta.ipAddress || null,
+        userAgent: requestMeta.userAgent || null,
+    });
+
+    notifyPaymentSucceeded(creditedPayment, { transactionId: transaction?._id });
+
+    return {
+        payment: creditedPayment,
+        transaction,
+        alreadyProcessed: false,
+        providerStatus: gatewayStatus.providerStatus || null,
+    };
+};
+
+const updatePaymentFromGatewayStatus = async (initialPayment, gatewayStatus) => {
+    const targetStatus = gatewayStatus.status || initialPayment.status;
+    const now = new Date();
+
+    if (!isAllowedPaymentTransition(initialPayment.status, targetStatus)) {
+        return {
+            payment: initialPayment,
+            alreadyProcessed: false,
+            providerStatus: gatewayStatus.providerStatus || null,
+        };
+    }
+
+    const update = {
+        status: targetStatus,
+        gatewayPaymentId: gatewayStatus.gatewayPaymentId || initialPayment.gatewayPaymentId || null,
+        gatewayReference: gatewayStatus.gatewayReference || initialPayment.gatewayReference || null,
+        metadata: buildGatewaySyncMetadata(initialPayment, gatewayStatus, now),
+    };
+    const timestampField = terminalTimestampFieldForStatus(targetStatus);
+    if (timestampField && !initialPayment[timestampField]) {
+        update[timestampField] = now;
+    }
+
+    const payment = await Payment.findOneAndUpdate(
+        {
+            _id: initialPayment._id,
+            status: initialPayment.status,
+            creditedAt: null,
+            walletTransactionId: null,
+        },
+        { $set: update },
+        { new: true }
+    );
+
+    return {
+        payment: payment || await Payment.findById(initialPayment._id),
+        alreadyProcessed: false,
+        providerStatus: gatewayStatus.providerStatus || null,
+    };
+};
+
+const syncPaymentStatus = async (paymentId, { actor, requestMeta = {} } = {}) => {
+    assertPaymentsEnabled();
+
+    const initialPayment = await Payment.findById(paymentId);
+    if (!initialPayment) throw new NotFoundError('Payment');
+    assertPaymentOwnerOrAdmin(initialPayment, actor);
+
+    if (
+        initialPayment.status === PAYMENT_STATUSES.SUCCEEDED &&
+        initialPayment.walletTransactionId &&
+        initialPayment.creditedAt
+    ) {
+        return {
+            payment: initialPayment,
+            alreadyProcessed: true,
+            providerStatus: initialPayment.status,
+        };
+    }
+
+    if (initialPayment.gateway === PAYMENT_GATEWAYS.MOCK) {
+        return {
+            payment: initialPayment,
+            alreadyProcessed: Boolean(initialPayment.walletTransactionId && initialPayment.creditedAt),
+            providerStatus: initialPayment.status,
+        };
+    }
+
+    const gatewayAdapter = getPaymentGateway(initialPayment.gateway);
+    const gatewayStatus = await gatewayAdapter.getPaymentStatus(initialPayment);
+
+    if (gatewayStatus.status === PAYMENT_STATUSES.SUCCEEDED) {
+        return creditAuthoritativePayment(initialPayment, gatewayStatus, { actor, requestMeta });
+    }
+
+    return updatePaymentFromGatewayStatus(initialPayment, gatewayStatus);
+};
+
 const failMockPayment = async (paymentId, { actor, requestMeta = {} } = {}) => {
     assertPaymentsEnabled();
     assertNonProductionMockFlow();
@@ -631,6 +981,7 @@ module.exports = {
     createPaymentIntent,
     getPaymentById,
     listPayments,
+    syncPaymentStatus,
     confirmMockPayment,
     failMockPayment,
     serializePayment,

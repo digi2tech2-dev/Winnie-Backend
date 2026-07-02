@@ -34,6 +34,14 @@ router.get(
 );
 
 router.post(
+    '/:id/sync-status',
+    authorizeRoles('CUSTOMER', 'ADMIN'),
+    paymentIdValidation,
+    validate,
+    paymentController.syncPaymentStatus
+);
+
+router.post(
     '/:id/mock-confirm',
     authorizeRoles('CUSTOMER', 'ADMIN'),
     paymentIdValidation,
