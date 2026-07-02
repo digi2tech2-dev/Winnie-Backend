@@ -2,7 +2,7 @@
 
 ## Scope
 
-Phase 2.2 added a safe base module for wallet top-up payments. Phase 2.5P adds Network International / N-Genius Hosted Payment Page order creation for wallet top-ups only. Phase 2.5P.1 adds Network gateway currency conversion so customers can request top-ups in their wallet currency while the hosted payment order is charged in the configured Network outlet currency. The module does not collect card data, trust redirect returns for wallet credit, or change order payment behavior.
+Phase 2.2 added a safe base module for wallet top-up payments. Phase 2.5P adds Network International / N-Genius Hosted Payment Page order creation for wallet top-ups only. Phase 2.5P.1 adds Network gateway currency conversion so customers can request top-ups in their wallet currency while the hosted payment order is charged in the configured Network outlet currency. Phase 2.5Q adds Network webhook intake and admin reconciliation. The module does not collect card data, trust redirect returns for wallet credit, or change order payment behavior.
 
 Current scope:
 
@@ -10,14 +10,15 @@ Current scope:
 - Mock gateway operational for non-production testing.
 - Network International Hosted Payment Page operational for online wallet top-up order creation.
 - Network gateway orders use `NETWORK_INTERNATIONAL_CURRENCY` for provider charge currency while `Payment.amount` and `Payment.currency` preserve the requested wallet top-up amount.
+- Network webhook events are accepted at `POST /api/webhooks/payments/network`, persisted with safe summaries, deduplicated, and processed only after re-fetching authoritative Network status.
 - Ziina and Tap Payments adapters are placeholders.
-- Wallet credit only happens after a controlled mock success confirmation in non-production environments or after authenticated Network status sync verifies an authoritative successful provider state.
+- Wallet credit only happens after a controlled mock success confirmation in non-production environments, authenticated/admin Network status sync, or Network webhook processing that re-fetches and verifies an authoritative successful provider state.
 
 Out of scope:
 
 - Direct order payment.
 - Direct card entry in this frontend/backend.
-- Production webhook processing until the Network portal webhook/header contract is finalized.
+- Network signature verification beyond shared-header secret mode until the Network portal webhook/signature contract is finalized.
 - Card number, CVV, or sensitive card data collection/storage.
 - Referral commission policy/calculation inside the payments module.
 - Group-change or sub-agent workflows.
@@ -35,6 +36,9 @@ Out of scope:
 - `paymentRisk.service.js`: rolling-window risk evaluation before gateway intent creation.
 - `payment.controller.js`: customer/admin response handling.
 - `payment.routes.js`: `/api/payments` customer/dev routes.
+- `payment.webhook.routes.js`: unauthenticated Network webhook route.
+- `payment.webhook.service.js`: shared-header verification, event persistence, dedupe, payment resolution, provider re-fetch, and webhook audit.
+- `paymentWebhookEvent.model.js`: safe webhook event persistence.
 - `gateways/`: mock gateway, Network International Hosted Payment Page adapter, and remaining real-gateway placeholders.
 
 ## Payment Model
@@ -174,6 +178,56 @@ If the requested or gateway currency rate is missing/inactive, the backend retur
 
 The frontend displays the backend-returned requested amount and gateway charge before redirect. It does not calculate exchange rates locally.
 
+## Network Webhooks And Reconciliation
+
+Phase 2.5Q adds Network webhook intake:
+
+- `POST /api/webhooks/payments/network`
+
+The route is intentionally unauthenticated because provider webhooks do not carry user JWTs. If `NETWORK_INTERNATIONAL_WEBHOOK_SECRET` is configured, the route requires a matching shared secret header. The header name is `NETWORK_INTERNATIONAL_WEBHOOK_SECRET_HEADER` or `x-network-webhook-secret` by default. Comparison uses timing-safe equality. If the secret is not configured, the route accepts events in documented unverified mode but still never trusts the payload for wallet credit.
+
+Webhook events are stored in `PaymentWebhookEvent` with:
+
+- `provider`
+- `eventId`
+- `dedupeKey`
+- `paymentId`
+- `gatewayPaymentId`
+- `gatewayReference`
+- `orderReference`
+- `eventType`
+- `providerStatus`
+- `status`
+- `processingStatus`
+- safe `httpHeaders`
+- `payloadHash`
+- safe `payloadSummary`
+- `attempts`
+- `receivedAt`
+- `lastReceivedAt`
+- `processedAt`
+- safe `errorCode` / `errorMessage`
+
+The full raw payload is not stored. The summary intentionally keeps only extracted identifiers/status/amount fields and payload key names after sensitive-key redaction. Authorization headers, webhook secret headers, card/PAN/CVV/expiry fields, access tokens, API keys, and raw provider headers are not stored.
+
+Dedupe key order:
+
+1. Network event id when present.
+2. Order/reference + event type + status + timestamp when present.
+3. Payload hash fallback.
+
+Duplicate events increment `attempts`, update `lastReceivedAt`, write a safe audit event, and do not re-run wallet credit.
+
+Payment resolution uses internal merchant order reference/payment id, `gatewayPaymentId`, `gatewayReference`, and stored Network order metadata. If no payment is matched, the event is stored as `UNMATCHED` and no gateway fetch or wallet credit occurs.
+
+For matched payments, webhook processing calls the same authoritative Network status sync path used by `POST /api/payments/:id/sync-status`. The webhook payload can trigger verification but cannot mark success by itself. Successful provider states credit the wallet once through the existing payment credit path; failed/canceled/expired states update the payment without credit.
+
+Admin reconciliation route:
+
+- `POST /api/admin/payments/:id/sync-status`
+
+Admins and supervisors with `payments.view` can trigger the same authoritative status sync. Customers can still sync only their own payment through `POST /api/payments/:id/sync-status`.
+
 ## Payment Risk Limits
 
 Phase 2.5N adds admin-configurable online payment risk limits under the `paymentRiskLimits` setting. The backend evaluates these limits inside `POST /api/payments/intents` after request/user/currency validation and before any gateway adapter is created or called.
@@ -239,6 +293,14 @@ Status sync route:
 
 This route is authenticated and owner/admin restricted. It re-fetches the provider status through the gateway adapter before applying terminal status changes. For Network, wallet credit is only attempted when the provider state maps to `SUCCEEDED` (`PURCHASED`, `CAPTURED`, `SUCCESS`, or `SUCCESSFUL`). The credit path is idempotent through `creditedAt`, `walletTransactionId`, and the wallet ledger idempotency key.
 
+Webhook route:
+
+- `POST /api/webhooks/payments/network`
+
+Admin reconciliation route:
+
+- `POST /api/admin/payments/:id/sync-status`
+
 Development/test-only mock routes:
 
 - `POST /api/payments/:id/mock-confirm`
@@ -293,6 +355,7 @@ NETWORK_INTERNATIONAL_CURRENCY=AED
 NETWORK_INTERNATIONAL_RETURN_URL=http://localhost:5173/payment/success
 NETWORK_INTERNATIONAL_CANCEL_URL=http://localhost:5173/payment/cancel
 NETWORK_INTERNATIONAL_WEBHOOK_SECRET=
+NETWORK_INTERNATIONAL_WEBHOOK_SECRET_HEADER=x-network-webhook-secret
 ZIINA_API_KEY=
 TAP_SECRET_KEY=
 ```
@@ -310,13 +373,13 @@ Network env is validated only when `NETWORK_INTERNATIONAL` is selected/enabled. 
 - A blocked risk check prevents Network token/order HTTP calls.
 - Manual deposit remains available when online payment risk limits block a customer.
 - Network currency conversion happens on the backend with platform rates; the frontend only displays returned safe charge fields.
+- Network webhook payloads never credit the wallet directly; they only trigger backend provider re-fetch.
 - Network API key, access token, outlet reference, and raw provider error bodies are not exposed to customer responses.
-- Network webhooks must be implemented with signature/custom-header verification and replay protection after the merchant portal contract is finalized.
+- Production should configure `NETWORK_INTERNATIONAL_WEBHOOK_SECRET` and confirm the Network portal header/signature contract before relying on webhook delivery.
 
 ## Future Reserved Work
 
-- Verified Network webhook processing.
-- Gateway-specific event persistence.
+- Gateway-specific webhook signature verification if Network provides a signed payload contract.
 - Payment reconciliation tooling.
 - Gateway fees, FX markup, and settlement reconciliation rules.
 - Admin payment operations beyond read-only inspection.

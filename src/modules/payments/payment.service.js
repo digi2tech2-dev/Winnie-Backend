@@ -209,7 +209,13 @@ const convertToNetworkGatewayCurrency = async ({ requestedAmount, requestedCurre
 
 const assertPaymentOwnerOrAdmin = (payment, actor) => {
     const actorRole = String(actor?.role || actor?.actorRole || '').toUpperCase();
-    if (actorRole === ROLES.ADMIN || actorRole === ACTOR_ROLES.ADMIN) return;
+    if ([
+        ROLES.ADMIN,
+        ROLES.SUPERVISOR,
+        ACTOR_ROLES.ADMIN,
+        ACTOR_ROLES.SUPERVISOR,
+        ACTOR_ROLES.SYSTEM,
+    ].includes(actorRole)) return;
 
     if (String(payment.userId) !== String(actor?.userId || actor?._id || actor?.actorId)) {
         throw new AuthorizationError('You do not have access to this payment.');
@@ -682,6 +688,39 @@ const buildGatewaySyncMetadata = (payment, gatewayStatus, now) => ({
     },
 });
 
+const auditPaymentReconciliation = ({
+    payment,
+    actor,
+    action,
+    providerStatus = null,
+    source = 'manual',
+    errorCode = null,
+    errorMessage = null,
+    requestMeta = {},
+}) => {
+    if (!payment?._id) return;
+
+    void createAuditLog({
+        actorId: actor?.actorId || actor?._id || actor?.userId || payment.userId,
+        actorRole: actor?.actorRole || actor?.role || ACTOR_ROLES.CUSTOMER,
+        action,
+        entityType: ENTITY_TYPES.PAYMENT,
+        entityId: payment._id,
+        metadata: {
+            gateway: payment.gateway,
+            amount: payment.amount,
+            currency: payment.currency,
+            status: payment.status,
+            providerStatus,
+            source,
+            errorCode,
+            errorMessage,
+        },
+        ipAddress: requestMeta.ipAddress || null,
+        userAgent: requestMeta.userAgent || null,
+    });
+};
+
 const creditAuthoritativePayment = async (initialPayment, gatewayStatus, { actor, requestMeta = {} } = {}) => {
     if (initialPayment.walletTransactionId && initialPayment.creditedAt) {
         return {
@@ -864,41 +903,82 @@ const updatePaymentFromGatewayStatus = async (initialPayment, gatewayStatus) => 
     };
 };
 
-const syncPaymentStatus = async (paymentId, { actor, requestMeta = {} } = {}) => {
+const syncPaymentStatus = async (paymentId, { actor, requestMeta = {}, source = 'manual' } = {}) => {
     assertPaymentsEnabled();
 
-    const initialPayment = await Payment.findById(paymentId);
-    if (!initialPayment) throw new NotFoundError('Payment');
-    assertPaymentOwnerOrAdmin(initialPayment, actor);
+    let initialPayment = null;
 
-    if (
-        initialPayment.status === PAYMENT_STATUSES.SUCCEEDED &&
-        initialPayment.walletTransactionId &&
-        initialPayment.creditedAt
-    ) {
-        return {
+    try {
+        initialPayment = await Payment.findById(paymentId);
+        if (!initialPayment) throw new NotFoundError('Payment');
+        assertPaymentOwnerOrAdmin(initialPayment, actor);
+
+        if (
+            initialPayment.status === PAYMENT_STATUSES.SUCCEEDED &&
+            initialPayment.walletTransactionId &&
+            initialPayment.creditedAt
+        ) {
+            const result = {
+                payment: initialPayment,
+                alreadyProcessed: true,
+                providerStatus: initialPayment.status,
+            };
+            auditPaymentReconciliation({
+                payment: result.payment,
+                actor,
+                action: PAYMENT_ACTIONS.RECONCILIATION_SYNCED,
+                providerStatus: result.providerStatus,
+                source,
+                requestMeta,
+            });
+            return result;
+        }
+
+        if (initialPayment.gateway === PAYMENT_GATEWAYS.MOCK) {
+            const result = {
+                payment: initialPayment,
+                alreadyProcessed: Boolean(initialPayment.walletTransactionId && initialPayment.creditedAt),
+                providerStatus: initialPayment.status,
+            };
+            auditPaymentReconciliation({
+                payment: result.payment,
+                actor,
+                action: PAYMENT_ACTIONS.RECONCILIATION_SYNCED,
+                providerStatus: result.providerStatus,
+                source,
+                requestMeta,
+            });
+            return result;
+        }
+
+        const gatewayAdapter = getPaymentGateway(initialPayment.gateway);
+        const gatewayStatus = await gatewayAdapter.getPaymentStatus(initialPayment);
+
+        const result = gatewayStatus.status === PAYMENT_STATUSES.SUCCEEDED
+            ? await creditAuthoritativePayment(initialPayment, gatewayStatus, { actor, requestMeta })
+            : await updatePaymentFromGatewayStatus(initialPayment, gatewayStatus);
+
+        auditPaymentReconciliation({
+            payment: result.payment,
+            actor,
+            action: PAYMENT_ACTIONS.RECONCILIATION_SYNCED,
+            providerStatus: result.providerStatus,
+            source,
+            requestMeta,
+        });
+        return result;
+    } catch (err) {
+        auditPaymentReconciliation({
             payment: initialPayment,
-            alreadyProcessed: true,
-            providerStatus: initialPayment.status,
-        };
+            actor,
+            action: PAYMENT_ACTIONS.RECONCILIATION_FAILED,
+            source,
+            errorCode: err.code || 'PAYMENT_RECONCILIATION_FAILED',
+            errorMessage: err.message || 'Payment status could not be verified.',
+            requestMeta,
+        });
+        throw err;
     }
-
-    if (initialPayment.gateway === PAYMENT_GATEWAYS.MOCK) {
-        return {
-            payment: initialPayment,
-            alreadyProcessed: Boolean(initialPayment.walletTransactionId && initialPayment.creditedAt),
-            providerStatus: initialPayment.status,
-        };
-    }
-
-    const gatewayAdapter = getPaymentGateway(initialPayment.gateway);
-    const gatewayStatus = await gatewayAdapter.getPaymentStatus(initialPayment);
-
-    if (gatewayStatus.status === PAYMENT_STATUSES.SUCCEEDED) {
-        return creditAuthoritativePayment(initialPayment, gatewayStatus, { actor, requestMeta });
-    }
-
-    return updatePaymentFromGatewayStatus(initialPayment, gatewayStatus);
 };
 
 const failMockPayment = async (paymentId, { actor, requestMeta = {} } = {}) => {

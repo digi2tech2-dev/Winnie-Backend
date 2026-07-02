@@ -75,6 +75,8 @@ const config = {
             cancelUrl: process.env.NETWORK_INTERNATIONAL_CANCEL_URL ||
                 `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/cancel`,
             webhookSecret: process.env.NETWORK_INTERNATIONAL_WEBHOOK_SECRET,
+            webhookSecretHeader: process.env.NETWORK_INTERNATIONAL_WEBHOOK_SECRET_HEADER ||
+                'x-network-webhook-secret',
         },
     },
 

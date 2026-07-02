@@ -375,24 +375,25 @@ describe('Network International hosted payment gateway', () => {
 
         expect(warnSpy).toHaveBeenCalledWith(
             '[payments.networkInternational.createOrder.failed]',
-            expect.objectContaining({
-                endpointPath: '/transactions/outlets/[REDACTED]/orders',
-                httpStatus: 422,
-                networkErrorCode: 'INVALID_REQUEST',
-                networkErrorMessage: 'Invalid order for [REDACTED]',
-                responseBody: expect.objectContaining({
-                    code: 'INVALID_REQUEST',
-                    message: 'Invalid order for [REDACTED]',
-                    access_token: '[REDACTED]',
-                    debug: {
-                        outletRef: '[REDACTED]',
-                        apiKey: '[REDACTED]',
-                    },
-                }),
-            })
+            expect.any(String)
         );
-
-        const loggedPayload = JSON.stringify(warnSpy.mock.calls[0][1]);
+        const loggedPayload = warnSpy.mock.calls[0][1];
+        const parsedPayload = JSON.parse(loggedPayload);
+        expect(parsedPayload).toMatchObject({
+            endpointPath: '/transactions/outlets/[REDACTED]/orders',
+            httpStatus: 422,
+            networkErrorCode: 'INVALID_REQUEST',
+            networkErrorMessage: 'Invalid order for [REDACTED]',
+            responseBody: {
+                code: 'INVALID_REQUEST',
+                message: 'Invalid order for [REDACTED]',
+                access_token: '[REDACTED]',
+                debug: {
+                    outletRef: '[REDACTED]',
+                    apiKey: '[REDACTED]',
+                },
+            },
+        });
         expect(loggedPayload).not.toContain('test-service-account-key');
         expect(loggedPayload).not.toContain('test-access-token');
         expect(loggedPayload).not.toContain('outlet-123');

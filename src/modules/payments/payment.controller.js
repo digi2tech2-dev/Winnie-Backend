@@ -78,6 +78,7 @@ const syncPaymentStatus = catchAsync(async (req, res) => {
     const result = await paymentService.syncPaymentStatus(req.params.id, {
         actor: actorFrom(req),
         requestMeta: requestMetaFrom(req),
+        source: 'customer_return_page',
     });
 
     sendSuccess(res, {
@@ -85,6 +86,20 @@ const syncPaymentStatus = catchAsync(async (req, res) => {
         alreadyProcessed: result.alreadyProcessed,
         providerStatus: result.providerStatus || null,
     }, 'Payment status synced.');
+});
+
+const adminSyncPaymentStatus = catchAsync(async (req, res) => {
+    const result = await paymentService.syncPaymentStatus(req.params.id, {
+        actor: actorFrom(req),
+        requestMeta: requestMetaFrom(req),
+        source: 'admin_reconciliation',
+    });
+
+    sendSuccess(res, {
+        payment: paymentService.serializePayment(result.payment, { admin: true }),
+        alreadyProcessed: result.alreadyProcessed,
+        providerStatus: result.providerStatus || null,
+    }, 'Payment status reconciled.');
 });
 
 const mockFailPayment = catchAsync(async (req, res) => {
@@ -137,4 +152,5 @@ module.exports = {
     mockFailPayment,
     adminListPayments,
     adminGetPayment,
+    adminSyncPaymentStatus,
 };
