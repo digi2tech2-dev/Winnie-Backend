@@ -243,26 +243,8 @@ router.patch('/currencies/:code', authorizeRoles('ADMIN'), validateBody(schemas.
 }));
 
 router.post('/currencies', authorizeRoles('ADMIN'), validateBody(schemas.createCurrency), catchAsync(async (req, res) => {
-    const { code, name, symbol, platformRate, marketRate, markupPercentage, isActive } = req.body;
-
-    // Check for duplicate code
-    const existing = await Currency.findOne({ code: code.toUpperCase() });
-    if (existing) {
-        const { ConflictError } = require('../../shared/errors/AppError');
-        throw new ConflictError(`Currency with code '${code.toUpperCase()}' already exists.`);
-    }
-
-    const currency = await Currency.create({
-        code: code.toUpperCase(),
-        name,
-        symbol,
-        platformRate,
-        marketRate: marketRate ?? null,
-        markupPercentage: markupPercentage ?? 0,
-        isActive: isActive !== false,
-        lastUpdatedAt: new Date(),
-    });
-
+    const currencyService = require('../currency/currency.service');
+    const currency = await currencyService.createCurrency(req.body);
     res.status(201).json({ success: true, message: 'Currency created', data: { currency } });
 }));
 

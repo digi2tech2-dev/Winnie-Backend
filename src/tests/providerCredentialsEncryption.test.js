@@ -68,6 +68,24 @@ describe('provider credential encryption utility', () => {
 });
 
 describe('provider create/update credential behavior', () => {
+    it('creates a quick provider without credentials and stores safe auth metadata', async () => {
+        const provider = await adminProviderService.createProvider({
+            name: 'quick provider',
+            code: 'quick-provider',
+            baseUrl: 'https://provider.example.com',
+            integrationType: 'API',
+            authType: 'NONE',
+            isActive: true,
+        }, adminId);
+
+        const stored = await Provider.findById(provider._id).lean();
+        expect(stored.slug).toBe('quick-provider');
+        expect(stored.integrationType).toBe('API');
+        expect(stored.authType).toBe('NONE');
+        expect(stored.apiToken).toBeNull();
+        expect(stored.apiKey).toBeNull();
+    });
+
     it('stores provider credentials encrypted and serializes only safe credential booleans', async () => {
         const provider = await adminProviderService.createProvider({
             name: 'mock',

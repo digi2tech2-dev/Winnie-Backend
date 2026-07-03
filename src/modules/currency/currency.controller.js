@@ -37,12 +37,12 @@ const listCurrenciesHandler = catchAsync(async (req, res) => {
 /**
  * Admin creates a currency manually (not from exchange feed).
  *
- * Body: { code, name, symbol, platformRate, marketRate?, markupPercentage? }
+ * Body: { code, name, symbol, platformRate, marketRate, markupPercentage?, isActive? }
  */
 const createCurrencyHandler = catchAsync(async (req, res) => {
-    const { code, name, symbol, platformRate, marketRate, markupPercentage } = req.body;
+    const { code, name, symbol, platformRate, marketRate, markupPercentage, isActive } = req.body;
     const currency = await currencyService.createCurrency({
-        code, name, symbol, platformRate, marketRate, markupPercentage,
+        code, name, symbol, platformRate, marketRate, markupPercentage, isActive,
     });
     sendCreated(res, currency, `Currency '${currency.code}' created.`);
 });

@@ -7,7 +7,7 @@
  * Wraps the provider model with business rules + audit.
  */
 
-const { Provider } = require('../providers/provider.model');
+const { Provider, PROVIDER_AUTH_TYPES, PROVIDER_INTEGRATION_TYPES } = require('../providers/provider.model');
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
@@ -47,6 +47,33 @@ const extractProviderBalanceAmount = (balance) => {
     return NaN;
 };
 
+const normalizeProviderPayload = (data = {}, { applyDefaults = false } = {}) => {
+    const hasCredential = hasSecretValue(data.apiToken) || hasSecretValue(data.apiKey);
+    const inferredAuthType = hasCredential ? PROVIDER_AUTH_TYPES.API_KEY : PROVIDER_AUTH_TYPES.NONE;
+    const authType = data.authType !== undefined || applyDefaults
+        ? String(data.authType || inferredAuthType).toUpperCase()
+        : undefined;
+    const integrationType = data.integrationType !== undefined || data.providerType !== undefined || applyDefaults
+        ? String(data.integrationType || data.providerType || PROVIDER_INTEGRATION_TYPES.API).toUpperCase()
+        : undefined;
+    const normalized = {
+        ...data,
+        slug: data.slug || data.code,
+        integrationType,
+        authType,
+    };
+
+    delete normalized.code;
+    delete normalized.providerType;
+
+    if (data.authType !== undefined && authType === PROVIDER_AUTH_TYPES.NONE) {
+        delete normalized.apiToken;
+        delete normalized.apiKey;
+    }
+
+    return normalized;
+};
+
 // ─── List ──────────────────────────────────────────────────────────────────────
 
 const listProviders = async ({ includeInactive = true } = {}) => {
@@ -66,7 +93,7 @@ const getProviderById = async (id) => {
 // ─── Create ───────────────────────────────────────────────────────────────────
 
 const createProvider = async (data, adminId) => {
-    const provider = await Provider.create(data);
+    const provider = await Provider.create(normalizeProviderPayload(data, { applyDefaults: true }));
 
     createAuditLog({
         actorId: adminId,
@@ -87,11 +114,24 @@ const updateProvider = async (id, data, adminId) => {
     if (!provider) throw new NotFoundError('Provider');
 
     const before = provider.toObject();
-    const { name, slug, baseUrl, apiToken, apiKey, isActive, syncInterval, supportedFeatures } = data;
+    const {
+        name,
+        slug,
+        baseUrl,
+        apiToken,
+        apiKey,
+        isActive,
+        syncInterval,
+        supportedFeatures,
+        integrationType,
+        authType,
+    } = normalizeProviderPayload(data);
 
     if (name !== undefined) provider.name = name;
     if (slug !== undefined) provider.slug = slug;
     if (baseUrl !== undefined) provider.baseUrl = baseUrl;
+    if (integrationType !== undefined) provider.integrationType = integrationType;
+    if (authType !== undefined) provider.authType = authType;
     if (apiToken !== undefined && hasSecretValue(apiToken)) provider.apiToken = apiToken;
     if (apiKey !== undefined && hasSecretValue(apiKey)) provider.apiKey = apiKey;
     if (isActive !== undefined) provider.isActive = isActive;

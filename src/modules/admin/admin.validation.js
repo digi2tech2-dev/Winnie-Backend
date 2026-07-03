@@ -147,10 +147,14 @@ const updateSupervisorPermissionsSchema = Joi.object({
 
 const createProviderSchema = Joi.object({
     name: Joi.string().trim().min(2).max(64).required(),
+    code: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
     slug: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
     baseUrl: Joi.string().uri().required(),
-    apiToken: Joi.string().trim().max(4096),
-    apiKey: Joi.string().trim().max(4096),
+    integrationType: Joi.string().trim().uppercase().valid('API').default('API'),
+    providerType: Joi.string().trim().uppercase().valid('API'),
+    authType: Joi.string().trim().uppercase().valid('NONE', 'API_KEY', 'BEARER_TOKEN', 'USERNAME_PASSWORD').default('NONE'),
+    apiToken: Joi.string().trim().max(4096).allow('', null),
+    apiKey: Joi.string().trim().max(4096).allow('', null),
     isActive: Joi.boolean().default(true),
     syncInterval: Joi.number().integer().min(0).default(60),
     supportedFeatures: Joi.array().items(Joi.string()).default([]),
@@ -158,8 +162,12 @@ const createProviderSchema = Joi.object({
 
 const updateProviderSchema = Joi.object({
     name: Joi.string().trim().min(2).max(64),
+    code: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
     slug: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
     baseUrl: Joi.string().uri(),
+    integrationType: Joi.string().trim().uppercase().valid('API'),
+    providerType: Joi.string().trim().uppercase().valid('API'),
+    authType: Joi.string().trim().uppercase().valid('NONE', 'API_KEY', 'BEARER_TOKEN', 'USERNAME_PASSWORD'),
     apiToken: Joi.string().trim().max(4096).allow('', null),
     apiKey: Joi.string().trim().max(4096).allow('', null),
     isActive: Joi.boolean(),
@@ -260,8 +268,10 @@ const createCurrencySchema = Joi.object({
     platformRate: Joi.number().positive().required().messages({
         'any.required': 'platformRate is required',
     }),
-    marketRate: Joi.number().positive().allow(null),
-    markupPercentage: Joi.number().min(0).max(100).default(0),
+    marketRate: Joi.number().positive().required().messages({
+        'any.required': 'marketRate is required',
+    }),
+    markupPercentage: Joi.number().min(0).default(0),
     isActive: Joi.boolean().default(true),
 });
 

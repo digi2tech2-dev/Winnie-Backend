@@ -250,6 +250,7 @@ describe('[5] currency.service admin operations', () => {
 
     it('createCurrency creates a new currency', async () => {
         const c = await currencyService.createCurrency({
+            marketRate: 3.67,
             code: 'AED', name: 'UAE Dirham', symbol: 'د.إ', platformRate: 3.67,
         });
         expect(c.code).toBe('AED');
@@ -257,10 +258,33 @@ describe('[5] currency.service admin operations', () => {
         expect(c.isActive).toBe(true);
     });
 
+    it('createCurrency respects the requested active flag', async () => {
+        const c = await currencyService.createCurrency({
+            code: 'AED',
+            name: 'UAE Dirham',
+            symbol: 'AED',
+            marketRate: 3.67,
+            platformRate: 3.68,
+            isActive: false,
+        });
+
+        expect(c.isActive).toBe(false);
+        expect(c.marketRate).toBeCloseTo(3.67, 4);
+    });
+
+    it('createCurrency rejects missing marketRate', async () => {
+        await expect(
+            currencyService.createCurrency({
+                code: 'AED', name: 'UAE Dirham', symbol: 'AED', platformRate: 3.67,
+            })
+        ).rejects.toMatchObject({ code: 'INVALID_MARKET_RATE' });
+    });
+
     it('createCurrency refuses duplicate codes', async () => {
         await makeCurrency({ code: 'SAR' });
         await expect(
             currencyService.createCurrency({
+                marketRate: 1,
                 code: 'SAR', name: 'X', symbol: 'X', platformRate: 1,
             })
         ).rejects.toThrow('already exists');

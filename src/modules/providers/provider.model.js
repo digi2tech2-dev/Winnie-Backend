@@ -8,6 +8,15 @@ const {
 } = require('../../shared/utils/secretEncryption');
 
 const CREDENTIAL_FIELDS = ['apiToken', 'apiKey'];
+const PROVIDER_INTEGRATION_TYPES = Object.freeze({
+    API: 'API',
+});
+const PROVIDER_AUTH_TYPES = Object.freeze({
+    NONE: 'NONE',
+    API_KEY: 'API_KEY',
+    BEARER_TOKEN: 'BEARER_TOKEN',
+    USERNAME_PASSWORD: 'USERNAME_PASSWORD',
+});
 
 /**
  * Provider — an external data source that supplies raw product inventory.
@@ -50,6 +59,30 @@ const providerSchema = new mongoose.Schema(
         baseUrl: {
             type: String,
             required: [true, 'baseUrl is required'],
+            trim: true,
+        },
+
+        /**
+         * High-level integration shape. Kept intentionally narrow until
+         * provider-specific adapters require more modes.
+         */
+        integrationType: {
+            type: String,
+            enum: Object.values(PROVIDER_INTEGRATION_TYPES),
+            default: PROVIDER_INTEGRATION_TYPES.API,
+            uppercase: true,
+            trim: true,
+        },
+
+        /**
+         * Credential strategy selected by admin quick-create/edit screens.
+         * Secrets themselves remain in apiToken/apiKey and are encrypted.
+         */
+        authType: {
+            type: String,
+            enum: Object.values(PROVIDER_AUTH_TYPES),
+            default: PROVIDER_AUTH_TYPES.NONE,
+            uppercase: true,
             trim: true,
         },
 
@@ -176,4 +209,4 @@ providerSchema.index({ isActive: 1 });
 
 const Provider = mongoose.model('Provider', providerSchema);
 
-module.exports = { Provider };
+module.exports = { Provider, PROVIDER_AUTH_TYPES, PROVIDER_INTEGRATION_TYPES };

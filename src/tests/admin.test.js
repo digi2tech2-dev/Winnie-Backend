@@ -413,6 +413,18 @@ describe('[4] Joi Validation Schemas', () => {
         expect(err).not.toBeNull();
     });
 
+    it('createProvider: accepts simplified quick-create auth metadata', () => {
+        const err = runBodyValidation(schemas.createProvider, {
+            name: 'My Provider',
+            code: 'my-provider',
+            baseUrl: 'https://provider.example.com/api',
+            integrationType: 'API',
+            authType: 'NONE',
+            isActive: true,
+        });
+        expect(err).toBeNull();
+    });
+
     it('updateSetting: requires value', () => {
         const err = runBodyValidation(schemas.updateSetting, {});
         expect(err).not.toBeNull();
