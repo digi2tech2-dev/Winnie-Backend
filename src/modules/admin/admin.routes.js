@@ -80,8 +80,13 @@ const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendPaginated } = require('../../shared/utils/apiResponse');
 const { createUpload } = require('../../shared/middlewares/upload');
 const { walletLimiter } = require('../../shared/middlewares/rateLimiter');
+const validate = require('../../shared/middlewares/validate');
 
 const { validateBody, validateQuery, schemas } = require('./admin.validation');
+const {
+    paymentIdValidation,
+    listPaymentsValidation,
+} = require('../payments/payment.validation');
 
 const avatarUpload = createUpload('avatars');
 
@@ -92,6 +97,7 @@ const ordersCtrl = require('./admin.orders.controller');
 const walletCtrl = require('./admin.wallet.controller');
 const settingsCtrl = require('./admin.settings.controller');
 const statsCtrl = require('./admin.stats.controller');
+const paymentsCtrl = require('../payments/payment.controller');
 const categoriesCtrl = require('../categories/category.controller');
 const categoryValidation = require('../categories/category.validation');
 
@@ -141,6 +147,7 @@ router.patch('/users/:id/restore', requirePermission('users.status'), usersCtrl.
 router.patch('/users/:id/role', authorizeRoles('ADMIN'), validateBody(schemas.updateUserRole), usersCtrl.updateUserRole);
 router.patch('/users/:id/currency', authorizeRoles('ADMIN'), validateBody(schemas.updateUserCurrency), usersCtrl.updateUserCurrency);
 router.patch('/users/:id/credit-limit', authorizeRoles('ADMIN'), validateBody(schemas.updateCreditLimit), usersCtrl.updateUserCreditLimit);
+router.patch('/users/:id/group', authorizeRoles('ADMIN'), validateBody(schemas.updateUserGroup), usersCtrl.updateUserGroup);
 router.post('/users/:id/reset-password', authorizeRoles('ADMIN'), validateBody(schemas.resetUserPassword), usersCtrl.resetUserPassword);
 router.patch('/users/:id/avatar', authorizeRoles('ADMIN'), avatarUpload.single('avatar'), usersCtrl.updateUserAvatar);
 
@@ -172,6 +179,11 @@ router.post('/orders/:id/sync-status', requirePermission('orders.update'), order
 router.post('/orders/:id/complete', requirePermission('orders.update'), ordersCtrl.completeOrder);
 router.patch('/orders/:id/status', requirePermission('orders.update'), validateBody(schemas.updateOrderStatus), ordersCtrl.updateStatus);
 router.get('/orders/:id', requirePermission('orders.view'), ordersCtrl.getOrderById);
+
+// PAYMENTS
+router.get('/payments', requirePermission('payments.view'), listPaymentsValidation, validate, paymentsCtrl.adminListPayments);
+router.post('/payments/:id/sync-status', requirePermission('payments.view'), paymentIdValidation, validate, paymentsCtrl.adminSyncPaymentStatus);
+router.get('/payments/:id', requirePermission('payments.view'), paymentIdValidation, validate, paymentsCtrl.adminGetPayment);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // WALLETS
@@ -232,26 +244,8 @@ router.patch('/currencies/:code', authorizeRoles('ADMIN'), validateBody(schemas.
 }));
 
 router.post('/currencies', authorizeRoles('ADMIN'), validateBody(schemas.createCurrency), catchAsync(async (req, res) => {
-    const { code, name, symbol, platformRate, marketRate, markupPercentage, isActive } = req.body;
-
-    // Check for duplicate code
-    const existing = await Currency.findOne({ code: code.toUpperCase() });
-    if (existing) {
-        const { ConflictError } = require('../../shared/errors/AppError');
-        throw new ConflictError(`Currency with code '${code.toUpperCase()}' already exists.`);
-    }
-
-    const currency = await Currency.create({
-        code: code.toUpperCase(),
-        name,
-        symbol,
-        platformRate,
-        marketRate: marketRate ?? null,
-        markupPercentage: markupPercentage ?? 0,
-        isActive: isActive !== false,
-        lastUpdatedAt: new Date(),
-    });
-
+    const currencyService = require('../currency/currency.service');
+    const currency = await currencyService.createCurrency(req.body);
     res.status(201).json({ success: true, message: 'Currency created', data: { currency } });
 }));
 

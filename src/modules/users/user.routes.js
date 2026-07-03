@@ -26,7 +26,7 @@ router.get('/me', userController.getMyProfile);
 
 /**
  * @route  PATCH /api/users/me
- * @desc   Update own profile (name, email, phone, username, password)
+ * @desc   Update own profile (name, email, phone, username)
  * @access Any authenticated user
  */
 router.patch('/me', userController.updateMyProfile);

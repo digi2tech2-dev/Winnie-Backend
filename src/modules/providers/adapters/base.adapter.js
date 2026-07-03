@@ -181,10 +181,31 @@ class BaseProviderAdapter {
      * @returns {string|null}
      */
     _resolveToken() {
-        return this.provider.apiToken
+        const { getProviderCredential } = require('../../../shared/utils/secretEncryption');
+        return getProviderCredential(
+            this.provider.apiToken
             || this.provider.apiKey
             || this.provider.effectiveToken
-            || null;
+            || null
+        );
+    }
+
+    _resolveUsername() {
+        const { getProviderCredential } = require('../../../shared/utils/secretEncryption');
+        return getProviderCredential(
+            this.provider.username
+            || this.provider.effectiveUsername
+            || null
+        );
+    }
+
+    _resolvePassword() {
+        const { getProviderCredential } = require('../../../shared/utils/secretEncryption');
+        return getProviderCredential(
+            this.provider.password
+            || this.provider.effectivePassword
+            || null
+        );
     }
 
     /**

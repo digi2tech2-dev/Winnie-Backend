@@ -135,8 +135,26 @@ const updateUserAvatar = catchAsync(async (req, res) => {
 
 // PATCH /admin/users/:id/credit-limit
 const updateUserCreditLimit = catchAsync(async (req, res) => {
-    const user = await svc.updateUserCreditLimit(req.params.id, req.body.creditLimit, req.user._id);
+    const user = await svc.updateUserCreditLimit(
+        req.params.id,
+        req.body.creditLimit,
+        req.user._id,
+        req.body.reason
+    );
     sendSuccess(res, { user }, 'User credit limit updated');
+});
+
+// PATCH /admin/users/:id/group
+const updateUserGroup = catchAsync(async (req, res) => {
+    const user = await svc.updateUserGroup(
+        req.params.id,
+        {
+            groupId: req.body.groupId,
+            reason: req.body.reason,
+        },
+        req.user._id
+    );
+    sendSuccess(res, { user }, 'User group updated');
 });
 
 module.exports = {
@@ -153,6 +171,7 @@ module.exports = {
     updateSupervisorPermissions,
     updateUserCurrency,
     updateUserCreditLimit,
+    updateUserGroup,
     resetUserPassword,
     updateUserAvatar,
 };

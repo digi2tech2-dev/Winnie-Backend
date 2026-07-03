@@ -51,6 +51,38 @@ const config = {
     cors: {
         allowedOrigins: process.env.ALLOWED_ORIGINS || 'http://localhost:5173',
     },
+
+    payments: {
+        enabled: process.env.PAYMENTS_ENABLED !== 'false',
+        defaultGateway: (process.env.PAYMENT_DEFAULT_GATEWAY || 'MOCK').toUpperCase(),
+        allowedGateways: (process.env.PAYMENT_ALLOWED_GATEWAYS || 'MOCK')
+            .split(',')
+            .map((gateway) => gateway.trim().toUpperCase())
+            .filter(Boolean),
+        minAmount: parseFloat(process.env.PAYMENT_MIN_AMOUNT || '1'),
+        maxAmount: parseFloat(process.env.PAYMENT_MAX_AMOUNT || '10000'),
+        mockCheckoutBaseUrl: process.env.MOCK_PAYMENT_CHECKOUT_BASE_URL ||
+            `${process.env.FRONTEND_URL || 'http://localhost:5173'}/mock-payment`,
+        networkInternational: {
+            enabled: process.env.NETWORK_INTERNATIONAL_ENABLED === 'true',
+            env: (process.env.NETWORK_INTERNATIONAL_ENV || 'sandbox').toLowerCase(),
+            baseUrl: process.env.NETWORK_INTERNATIONAL_BASE_URL,
+            apiKey: process.env.NETWORK_INTERNATIONAL_API_KEY,
+            outletRef: process.env.NETWORK_INTERNATIONAL_OUTLET_REF,
+            currency: (process.env.NETWORK_INTERNATIONAL_CURRENCY || 'AED').toUpperCase(),
+            returnUrl: process.env.NETWORK_INTERNATIONAL_RETURN_URL ||
+                `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/success`,
+            cancelUrl: process.env.NETWORK_INTERNATIONAL_CANCEL_URL ||
+                `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/cancel`,
+            webhookSecret: process.env.NETWORK_INTERNATIONAL_WEBHOOK_SECRET,
+            webhookSecretHeader: process.env.NETWORK_INTERNATIONAL_WEBHOOK_SECRET_HEADER ||
+                'x-network-webhook-secret',
+        },
+    },
+
+    providerCredentials: {
+        key: process.env.PROVIDER_CREDENTIALS_KEY,
+    },
 };
 
 // Guard: fail fast if critical configs are missing

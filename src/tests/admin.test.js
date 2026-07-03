@@ -200,6 +200,62 @@ describe('[1] Admin Users Service', () => {
         const result = await adminUsersService.rejectUser(customer._id, admin._id);
         expect(result.status).toBe(USER_STATUS.REJECTED);
     });
+
+    it('updateUserCreditLimit updates limit without creating a wallet transaction', async () => {
+        const { customer, admin } = await setup();
+
+        const updated = await adminUsersService.updateUserCreditLimit(
+            customer._id,
+            500,
+            admin._id,
+            'Trusted reseller'
+        );
+
+        expect(updated.creditLimit).toBe(500);
+        expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(0);
+    });
+
+    it('updateUserCreditLimit rejects negative limits', async () => {
+        const { customer, admin } = await setup();
+
+        await expect(adminUsersService.updateUserCreditLimit(
+            customer._id,
+            -1,
+            admin._id,
+            'Invalid limit'
+        )).rejects.toMatchObject({ code: 'INVALID_CREDIT_LIMIT' });
+    });
+
+    it('updateUserGroup assigns an active group without changing user role', async () => {
+        const { customer, admin } = await setup();
+        const newGroup = await createGroup({ name: 'Resellers', percentage: 6 });
+        const previousRole = customer.role;
+
+        const updated = await adminUsersService.updateUserGroup(
+            customer._id,
+            { groupId: newGroup._id, reason: 'Moved to reseller group' },
+            admin._id
+        );
+
+        expect(updated.groupId._id.toString()).toBe(newGroup._id.toString());
+        expect(updated.groupId.name).toBe('Resellers');
+        expect(updated.role).toBe(previousRole);
+    });
+
+    it('updateUserGroup rejects inactive groups', async () => {
+        const { customer, admin } = await setup();
+        const inactiveGroup = await createGroup({
+            name: 'Inactive Tier',
+            percentage: 3,
+            isActive: false,
+        });
+
+        await expect(adminUsersService.updateUserGroup(
+            customer._id,
+            { groupId: inactiveGroup._id, reason: 'Should fail' },
+            admin._id
+        )).rejects.toMatchObject({ code: 'GROUP_INACTIVE' });
+    });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -267,6 +323,28 @@ describe('[2] Admin Wallet Service', () => {
         // Wallet must be unchanged
         const after = await User.findById(customer._id);
         expect(after.walletBalance).toBe(customer.walletBalance);
+    });
+
+    it('deductFunds extends existing debt without double-counting credit used', async () => {
+        const { customer, admin } = await setup();
+        await User.findByIdAndUpdate(customer._id, {
+            $set: {
+                walletBalance: -20,
+                creditLimit: 100,
+                creditUsed: 20,
+            },
+        });
+
+        await adminWalletService.deductFunds(customer._id, 10, 'Debt extension', admin._id);
+
+        const updated = await User.findById(customer._id);
+        expect(updated.walletBalance).toBe(-30);
+        expect(updated.creditUsed).toBe(30);
+
+        const txn = await WalletTransaction.findOne({ userId: customer._id, type: 'DEBIT' });
+        expect(txn.metadata.creditDrawn).toBe(10);
+        expect(txn.metadata.creditUsedBefore).toBe(20);
+        expect(txn.metadata.creditUsedAfter).toBe(30);
     });
 
     it('getWallet returns user with balance fields', async () => {
@@ -403,6 +481,18 @@ describe('[4] Joi Validation Schemas', () => {
         expect(err).toBeNull();
     });
 
+    it('updateCreditLimit: requires a non-negative limit and reason', () => {
+        expect(runBodyValidation(schemas.updateCreditLimit, { creditLimit: 100 })).not.toBeNull();
+        expect(runBodyValidation(schemas.updateCreditLimit, { creditLimit: -1, reason: 'Bad limit' })).not.toBeNull();
+        expect(runBodyValidation(schemas.updateCreditLimit, { creditLimit: 100, reason: 'Trusted reseller' })).toBeNull();
+    });
+
+    it('updateUserGroup: requires groupId and reason', () => {
+        const groupId = new mongoose.Types.ObjectId().toString();
+        expect(runBodyValidation(schemas.updateUserGroup, { groupId })).not.toBeNull();
+        expect(runBodyValidation(schemas.updateUserGroup, { groupId, reason: 'Move to reseller tier' })).toBeNull();
+    });
+
     it('createProvider: requires name and baseUrl', () => {
         const err = runBodyValidation(schemas.createProvider, { name: 'X' });
         expect(err).not.toBeNull();
@@ -411,6 +501,48 @@ describe('[4] Joi Validation Schemas', () => {
     it('createProvider: rejects invalid baseUrl', () => {
         const err = runBodyValidation(schemas.createProvider, { name: 'My Provider', baseUrl: 'not-a-url' });
         expect(err).not.toBeNull();
+    });
+
+    it('createProvider: accepts simplified quick-create auth metadata', () => {
+        const err = runBodyValidation(schemas.createProvider, {
+            name: 'My Provider',
+            code: 'my-provider',
+            baseUrl: 'https://provider.example.com/api',
+            integrationType: 'API',
+            authType: 'NONE',
+            isActive: true,
+        });
+        expect(err).toBeNull();
+    });
+
+    it('createProvider: accepts conditional quick-create credential fields', () => {
+        expect(runBodyValidation(schemas.createProvider, {
+            name: 'API Key Provider',
+            code: 'api-key-provider',
+            baseUrl: 'https://provider.example.com/api',
+            integrationType: 'API',
+            authType: 'API_KEY',
+            apiKey: 'secret-api-key',
+        })).toBeNull();
+
+        expect(runBodyValidation(schemas.createProvider, {
+            name: 'Bearer Provider',
+            code: 'bearer-provider',
+            baseUrl: 'https://provider.example.com/api',
+            integrationType: 'API',
+            authType: 'BEARER_TOKEN',
+            bearerToken: 'secret-bearer-token',
+        })).toBeNull();
+
+        expect(runBodyValidation(schemas.createProvider, {
+            name: 'Username Provider',
+            code: 'username-provider',
+            baseUrl: 'https://provider.example.com/api',
+            integrationType: 'API',
+            authType: 'USERNAME_PASSWORD',
+            username: 'provider-user',
+            password: 'provider-password',
+        })).toBeNull();
     });
 
     it('updateSetting: requires value', () => {

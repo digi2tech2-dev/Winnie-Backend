@@ -23,8 +23,18 @@ const config = require('../../config/config');
  * POST /api/auth/register
  */
 const register = catchAsync(async (req, res) => {
-    const { name, email, password, currency, country, phone, username } = req.body;
-    const result = await authService.register({ name, email, password, currency, country, phone, username });
+    const { name, email, password, currency, country, phone, username, inviteCode, referralCode } = req.body;
+    const result = await authService.register({
+        name,
+        email,
+        password,
+        currency,
+        country,
+        phone,
+        username,
+        inviteCode,
+        referralCode,
+    });
     sendCreated(res, result, result.message);
 });
 

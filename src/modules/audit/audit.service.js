@@ -8,8 +8,9 @@ const { ALL_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('./audit.constants');
 /** Keys whose values must NEVER appear in an audit log metadata payload. */
 const REDACTED_KEYS = new Set([
     'password', 'passwordhash', 'hashedpassword',
-    'token', 'accesstoken', 'refreshtoken', 'jwt',
-    'secret', 'apikey', 'privatekey', 'creditcard',
+    'token', 'apitoken', 'authtoken', 'accesstoken', 'refreshtoken', 'jwt',
+    'secret', 'clientsecret', 'apikey', 'api_key', 'privatekey', 'credential', 'credentials',
+    'authorization', 'authheader', 'creditcard',
     'cvv', 'ssn',
 ]);
 

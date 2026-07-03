@@ -7,12 +7,13 @@
  * Wraps the provider model with business rules + audit.
  */
 
-const { Provider } = require('../providers/provider.model');
+const { Provider, PROVIDER_AUTH_TYPES, PROVIDER_INTEGRATION_TYPES } = require('../providers/provider.model');
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 const { safeCreateAdminActorNotifications } = require('../notifications/notification.service');
+const { hasSecretValue, redactSecretText } = require('../../shared/utils/secretEncryption');
 
 const extractProviderBalanceAmount = (balance) => {
     if (typeof balance === 'number') {
@@ -46,6 +47,48 @@ const extractProviderBalanceAmount = (balance) => {
     return NaN;
 };
 
+const normalizeProviderPayload = (data = {}, { applyDefaults = false } = {}) => {
+    const hasTokenCredential = hasSecretValue(data.apiToken) || hasSecretValue(data.bearerToken);
+    const hasApiKeyCredential = hasSecretValue(data.apiKey);
+    const hasUsernamePasswordCredential = hasSecretValue(data.username) || hasSecretValue(data.password);
+    const inferredAuthType = hasUsernamePasswordCredential
+        ? PROVIDER_AUTH_TYPES.USERNAME_PASSWORD
+        : hasTokenCredential
+            ? PROVIDER_AUTH_TYPES.BEARER_TOKEN
+            : hasApiKeyCredential
+                ? PROVIDER_AUTH_TYPES.API_KEY
+                : PROVIDER_AUTH_TYPES.NONE;
+    const authType = data.authType !== undefined || applyDefaults
+        ? String(data.authType || inferredAuthType).toUpperCase()
+        : undefined;
+    const integrationType = data.integrationType !== undefined || data.providerType !== undefined || applyDefaults
+        ? String(data.integrationType || data.providerType || PROVIDER_INTEGRATION_TYPES.API).toUpperCase()
+        : undefined;
+    const normalized = {
+        ...data,
+        slug: data.slug || data.code,
+        integrationType,
+        authType,
+    };
+
+    if (data.bearerToken !== undefined && data.apiToken === undefined) {
+        normalized.apiToken = data.bearerToken;
+    }
+
+    delete normalized.code;
+    delete normalized.providerType;
+    delete normalized.bearerToken;
+
+    if (data.authType !== undefined && authType === PROVIDER_AUTH_TYPES.NONE) {
+        delete normalized.apiToken;
+        delete normalized.apiKey;
+        delete normalized.username;
+        delete normalized.password;
+    }
+
+    return normalized;
+};
+
 // ─── List ──────────────────────────────────────────────────────────────────────
 
 const listProviders = async ({ includeInactive = true } = {}) => {
@@ -65,7 +108,7 @@ const getProviderById = async (id) => {
 // ─── Create ───────────────────────────────────────────────────────────────────
 
 const createProvider = async (data, adminId) => {
-    const provider = await Provider.create(data);
+    const provider = await Provider.create(normalizeProviderPayload(data, { applyDefaults: true }));
 
     createAuditLog({
         actorId: adminId,
@@ -86,12 +129,30 @@ const updateProvider = async (id, data, adminId) => {
     if (!provider) throw new NotFoundError('Provider');
 
     const before = provider.toObject();
-    const { name, slug, baseUrl, apiToken, isActive, syncInterval, supportedFeatures } = data;
+    const {
+        name,
+        slug,
+        baseUrl,
+        apiToken,
+        apiKey,
+        isActive,
+        syncInterval,
+        supportedFeatures,
+        integrationType,
+        authType,
+        username,
+        password,
+    } = normalizeProviderPayload(data);
 
     if (name !== undefined) provider.name = name;
     if (slug !== undefined) provider.slug = slug;
     if (baseUrl !== undefined) provider.baseUrl = baseUrl;
-    if (apiToken !== undefined) provider.apiToken = apiToken;
+    if (integrationType !== undefined) provider.integrationType = integrationType;
+    if (authType !== undefined) provider.authType = authType;
+    if (apiToken !== undefined && hasSecretValue(apiToken)) provider.apiToken = apiToken;
+    if (apiKey !== undefined && hasSecretValue(apiKey)) provider.apiKey = apiKey;
+    if (username !== undefined && hasSecretValue(username)) provider.username = username;
+    if (password !== undefined && hasSecretValue(password)) provider.password = password;
     if (isActive !== undefined) provider.isActive = isActive;
     if (syncInterval !== undefined) provider.syncInterval = syncInterval;
     if (supportedFeatures !== undefined) provider.supportedFeatures = supportedFeatures;
@@ -232,7 +293,7 @@ const testProviderConnection = async (id) => {
             success: false,
             provider: provider.name,
             latencyMs: latency,
-            message: err.message || 'Connection failed',
+            message: redactSecretText(err.message || 'Connection failed'),
             testedAt: new Date().toISOString(),
         };
     }
@@ -277,7 +338,7 @@ const getProductPrice = async (providerId, externalProductId) => {
         };
     } catch (err) {
         throw new BusinessRuleError(
-            `Failed to fetch price from provider: ${err.message}`,
+            `Failed to fetch price from provider: ${redactSecretText(err.message)}`,
             'PROVIDER_API_ERROR'
         );
     }
@@ -312,7 +373,7 @@ const checkProviderOrder = async (id, orderId) => {
 
     } catch (err) {
         const httpStatus = err.statusCode ?? err.response?.status;
-        const errMsg = err.message || 'Unknown error';
+        const errMsg = redactSecretText(err.message || 'Unknown error');
 
 
 

@@ -10,10 +10,13 @@ MongoDB access is through Mongoose models inside each module. Controllers stay t
 
 - `auth`: registration, login, email verification, 2FA, optional Google OAuth.
 - `users`: admin and self-service user profile/account actions.
-- `me`: active-user panel for profile, wallet, products, orders, and deposits.
+- `me`: active-user panel for profile, preferred currency, wallet, products, orders, and deposits.
 - `groups`: pricing group tiers and active/inactive group management.
 - `wallet`: balance mutations and wallet transaction history.
 - `deposits`: deposit request lifecycle and admin review.
+- `payments`: wallet top-up payment intents with mock-only confirmation in non-production.
+- `referrals`: referral codes, inviter relationships, global referral settings, and idempotent commission credits.
+- `groupRequests`: customer group-change and sub-agent requests with admin/supervisor review.
 - `products` and `categories`: platform catalog.
 - `providers`: provider records, adapter factory, live adapter calls, catalog sync.
 - `orders`: order pricing, wallet debit/refund, provider fulfillment, status polling.
@@ -25,7 +28,7 @@ MongoDB access is through Mongoose models inside each module. Controllers stay t
 
 ## Auth Flow
 
-Registration validates `name`, `email`, `password`, and optional profile fields. A customer is created as `PENDING`, `verified=false`, assigned to the highest-percentage active group, and sent an email verification link.
+Registration validates `name`, `email`, `password`, optional profile fields, and optional `inviteCode`/`referralCode`. A valid invite code links the new user to the inviter; an invalid or self-referral code rejects registration. A customer is created as `PENDING`, `verified=false`, assigned to the highest-percentage active group, and sent an email verification link.
 
 Login requires a verified email and `status=ACTIVE`. JWTs contain `id` and `role`. 2FA-enabled accounts receive a temporary 2FA token until OTP verification succeeds. Google OAuth is initialized only when Google credentials exist.
 
@@ -47,11 +50,23 @@ Orders debit wallet balance atomically, create order records, and either fulfill
 
 Wallet transactions keep legacy `type` values (`CREDIT`, `DEBIT`, `REFUND`, `DEBT_ADJUSTMENT`) and now carry Phase 2 ledger fields such as `semanticType`, `direction`, `sourceType`, `sourceId`, `currency`, metadata, actor fields, and optional idempotency keys. See `docs/LEDGER_ARCHITECTURE.md`.
 
+Admin wallet controls are available from the admin user wallet page. Admin add/deduct operations use the wallet adjustment service and always create ledger and audit records. Credit/debt limit updates change the account allowance only and do not create money transactions. Admin direct group assignment updates `User.groupId` for future order pricing only and does not change role or supervisor permissions.
+
+Online payments are prepared for wallet top-ups only. `POST /api/payments/intents` validates admin-configured `paymentRiskLimits` before gateway adapter creation, then creates a payment intent only when the risk check allows it. The intent path never credits the wallet. In development/test, the mock gateway can confirm success and credit the wallet once with `CARD_PAYMENT_SUCCESS`. Real gateways and production webhooks remain future work. See `docs/PAYMENTS_ARCHITECTURE.md`.
+
+Referrals are active for invitation tracking and global commission settings. Eligible successful wallet credits (`DEPOSIT_APPROVED` and `CARD_PAYMENT_SUCCESS`) can credit the inviter with `REFERRAL_COMMISSION` when the configured percentage is greater than zero. Admin wallet adjustments, order debits, and order refunds do not trigger referral commission. See `docs/REFERRALS_ARCHITECTURE.md`.
+
+Group-change and sub-agent requests are customer self-service workflows reviewed by admins. Customers can fetch a safe active-group options list for group-change request creation; that list exposes only group id/name/current markers, not pricing percentages or admin metadata. A group-change approval updates `User.groupId`, so pricing changes apply naturally to future orders. A sub-agent approval sets business-level fields on the user (`isSubAgent`, `subAgentStatus`, approval stamp fields) and may optionally update `groupId`. It never changes `role`, never grants supervisor permissions, and has no wallet or referral side effects. See `docs/GROUP_REQUESTS_ARCHITECTURE.md`.
+
+Customers can update their own preferred currency with `PATCH /api/me/currency`. The endpoint accepts `{ "currency": "EGP" }`, requires an authenticated active user, validates the code against active currencies, and updates only `User.currency`. Wallet balances, wallet ledger entries, orders, deposits, payments, pricing groups, and referral data are not recalculated by this self-service endpoint.
+
+Customers can update their own password with `PATCH /api/me/password`. The endpoint accepts `{ "currentPassword": "...", "newPassword": "..." }`, requires an authenticated active user, verifies the current password against the stored hash, validates the new password against the registration strength rule, and saves only the newly hashed password. The response does not include password data or hashes.
+
 ## Provider Architecture
 
-Provider records store `name`, `slug`, `baseUrl`, `apiToken`/`apiKey`, active state, sync interval, and supported features. The adapter factory maps known provider slugs/names to adapter classes and falls back to the mock adapter for unknown providers unless strict mode is requested.
+Provider records store `name`, `slug`, `baseUrl`, encrypted `apiToken`/`apiKey`, active state, sync interval, and supported features. Provider credentials are encrypted at rest with AES-256-GCM using `PROVIDER_CREDENTIALS_KEY` and stored as `enc:v1:<iv>:<tag>:<ciphertext>`. API responses expose safe credential-status booleans only, never raw or encrypted credential values.
 
-No provider is seeded by default. Provider tokens are currently plaintext and must be encrypted before production.
+Provider adapters decrypt credentials internally when making server-side provider calls. Legacy plaintext provider credentials are supported only for backward-compatible internal use while the idempotent `npm run migrate:provider-credentials` script is used to encrypt existing records. No provider is seeded by default, and real provider credentials must never be committed.
 
 ## RBAC and Supervisor Permissions
 
@@ -65,6 +80,10 @@ Permission keys currently used by route guards:
 - `users.status`
 - `wallet.view`
 - `wallet.adjust`
+- `payments.view`
+- `referrals.view`
+- `groupRequests.view`
+- `groupRequests.manage`
 - `suppliers.manage`
 - `products.view`
 - `products.manage`
@@ -104,10 +123,11 @@ Audit logs record actor, action, entity, metadata, IP, and user agent. The audit
 
 ## Known Limitations
 
-- Provider and customer API tokens are plaintext.
+- Customer API tokens are plaintext.
 - No refresh-token, logout, or token revocation model exists.
 - Permissions have no central whitelist or data scoping.
 - Some legacy permission aliases remain for provider list compatibility.
 - Local disk uploads are not suitable for multi-instance production without shared storage.
 - Existing provider adapters are legacy/sample until confirmed for the new platform.
-- Card payments, payment webhooks, referral commissions, and group-change workflows are intentionally not implemented in Phase 1.
+- Real card gateways, payment webhooks, referral reversal, group-based referral rates, frontend compatibility aliases, and advanced sub-agent hierarchy/profile features are intentionally not implemented in the current baseline.
+- Payment risk limits use rolling 60-minute and rolling 24-hour windows and USD-equivalent amounts from platform currency rates.

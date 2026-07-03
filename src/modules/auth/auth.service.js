@@ -18,10 +18,12 @@
  */
 
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
 const { User, ROLES, USER_STATUS } = require('../users/user.model');
 const { getHighestPercentageGroup } = require('../groups/group.service');
+const referralService = require('../referrals/referral.service');
 const { sendVerificationEmail, sendTwoFactorOtpEmail } = require('../../services/email.service');
 const {
     AuthenticationError,
@@ -193,9 +195,15 @@ const verifyTwoFactorChallenge = (user, { otp, tempToken }) => {
  *  4. verified = false — user must click email link before login is allowed.
  *  5. A verification email is dispatched (fire-and-forget safe).
  */
-const register = async ({ name, email, password, currency, country, phone, username }) => {
+const register = async ({ name, email, password, currency, country, phone, username, inviteCode, referralCode }) => {
+    const normalizedEmail = email.toLowerCase();
+    const submittedInviteCode = inviteCode || referralCode || null;
+    const inviter = submittedInviteCode
+        ? await referralService.resolveInviteCodeOrThrow(submittedInviteCode, { email: normalizedEmail })
+        : null;
+
     // ── 1. Prevent duplicate accounts ─────────────────────────────────────────
-    const existing = await User.findOne({ email: email.toLowerCase() });
+    const existing = await User.findOne({ email: normalizedEmail });
     if (existing) {
         throw new ConflictError('email already exists');
     }
@@ -215,7 +223,7 @@ const register = async ({ name, email, password, currency, country, phone, usern
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);  // +24 h
 
     // ── 4. Create user ────────────────────────────────────────────────────────
-    const user = await User.create({
+    const userPayload = {
         name,
         email,
         password,
@@ -229,7 +237,45 @@ const register = async ({ name, email, password, currency, country, phone, usern
         ...(country ? { country } : {}),
         ...(phone ? { phone } : {}),
         ...(username ? { username } : {}),
-    });
+    };
+
+    let user;
+    let referralRelationship = null;
+
+    if (inviter) {
+        const session = await mongoose.startSession();
+        try {
+            session.startTransaction();
+            const [createdUser] = await User.create([userPayload], { session });
+            const relationshipResult = await referralService.createReferralRelationship({
+                inviterUserId: inviter._id,
+                invitedUserId: createdUser._id,
+                referralCode: inviter.referralCode,
+                metadata: {
+                    registrationEmail: createdUser.email,
+                    source: 'auth-register',
+                },
+                session,
+            });
+            user = createdUser;
+            referralRelationship = relationshipResult.relationship;
+            await session.commitTransaction();
+        } catch (err) {
+            if (session.inTransaction()) await session.abortTransaction();
+            throw err;
+        } finally {
+            try { session.endSession(); } catch (_) { /* noop */ }
+        }
+    } else {
+        user = await User.create(userPayload);
+    }
+
+    if (referralRelationship) {
+        referralService.auditRelationshipCreated(referralRelationship, {
+            actorId: user._id,
+            actorRole: ACTOR_ROLES.CUSTOMER,
+        });
+    }
 
     // ── 5. Audit (fire-and-forget) ────────────────────────────────────────────
     createAuditLog({

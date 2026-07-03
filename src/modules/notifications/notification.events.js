@@ -22,6 +22,7 @@ const ORDER_REFUND_WALLET_PERMISSIONS = [
 ];
 const WALLET_PERMISSIONS = ['wallet.view', 'wallet.adjust'];
 const TOPUP_PERMISSIONS = ['topups.review'];
+const PAYMENT_PERMISSIONS = ['payments.view', 'wallet.view'];
 
 const toId = (value) => {
     if (!value) return null;
@@ -369,6 +370,50 @@ const notifyDepositRejected = (deposit) => {
     });
 };
 
+const notifyPaymentSucceeded = (payment, { transactionId } = {}) => {
+    const label = amountLabel(payment?.amount, payment?.currency || 'USD');
+    const paymentId = toIdString(payment?._id || payment?.id);
+
+    void userWalletNotification(payment?.userId, `payment:${paymentId}:succeeded`, {
+        title: 'Wallet top-up completed',
+        message: label
+            ? `Your wallet was credited with ${label}.`
+            : 'Your wallet top-up was completed.',
+        entityType: 'payment',
+        entityId: toId(payment?._id || payment?.id),
+        transactionId,
+        metadata: {
+            paymentId,
+            transactionId: toIdString(transactionId),
+            amount: payment?.amount,
+            currency: payment?.currency,
+            gateway: payment?.gateway,
+        },
+    });
+
+    void safeCreateAdminActorNotifications({
+        roles: ADMIN_SUPERVISOR_ROLES,
+        permissions: PAYMENT_PERMISSIONS,
+        permissionMode: 'any',
+        title: 'Wallet top-up succeeded',
+        message: `A wallet top-up${label ? ` for ${label}` : ''} was completed.`,
+        type: NOTIFICATION_TYPES.WALLET,
+        priority: NOTIFICATION_PRIORITIES.NORMAL,
+        route: `/admin/payments?paymentId=${paymentId}`,
+        entityType: 'payment',
+        entityId: toId(payment?._id || payment?.id),
+        metadata: {
+            eventKey: `payment:${paymentId}:succeeded`,
+            eventType: 'payment_succeeded',
+            paymentId,
+            userId: userIdOf(payment),
+            amount: payment?.amount,
+            currency: payment?.currency,
+            gateway: payment?.gateway,
+        },
+    });
+};
+
 module.exports = {
     notifyOrderCreated,
     notifyOrderCompleted,
@@ -378,4 +423,5 @@ module.exports = {
     notifyManualWalletAdjustment,
     notifyDepositApproved,
     notifyDepositRejected,
+    notifyPaymentSucceeded,
 };

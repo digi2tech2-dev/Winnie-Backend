@@ -17,7 +17,7 @@ Active ledger entries now support:
 
 - `type`: legacy compatible transaction bucket.
 - `semanticType`: explicit business event taxonomy.
-- `sourceType`: source domain, such as `ORDER`, `DEPOSIT`, or `ADMIN_ADJUSTMENT`.
+- `sourceType`: source domain, such as `ORDER`, `DEPOSIT`, `PAYMENT`, or `ADMIN_ADJUSTMENT`.
 - `sourceId`: source document id when available.
 - `direction`: balance direction.
 - `amount`: transaction amount in the recorded currency.
@@ -41,12 +41,12 @@ Active ledger entries now support:
 | `ORDER_DEBIT` | `DEBIT` | `DEBIT` | Active |
 | `ORDER_REFUND` | `REFUND` | `CREDIT` | Active |
 | `ADMIN_ADJUSTMENT` | `CREDIT` or `DEBIT` | `CREDIT` or `DEBIT` | Active |
-| `CARD_PAYMENT_SUCCESS` | `CREDIT` | `CREDIT` | Reserved |
+| `CARD_PAYMENT_SUCCESS` | `CREDIT` | `CREDIT` | Active for mock wallet top-ups |
 | `CARD_PAYMENT_FAILED` | `CREDIT`, `DEBIT`, or `REFUND` | `NEUTRAL` by expected use | Reserved |
-| `REFERRAL_COMMISSION` | `CREDIT` | `CREDIT` | Reserved |
+| `REFERRAL_COMMISSION` | `CREDIT` | `CREDIT` | Active |
 | `REFERRAL_REVERSAL` | `DEBIT` or `REFUND` | `DEBIT` by expected use | Reserved |
 
-Reserved means the enum accepts the value, but no Phase 2.1 business flow writes it yet.
+Reserved means the enum accepts the value, but no current business flow writes it yet. Real gateway card payments and referral reversal remain future work.
 
 ## Active Write Flows
 
@@ -55,11 +55,14 @@ Reserved means the enum accepts the value, but no Phase 2.1 business flow writes
 - Manual failed-order refund writes `type: REFUND`, `semanticType: ORDER_REFUND`, `sourceType: ORDER`.
 - Provider failure and cancellation refunds write `type: REFUND`, `semanticType: ORDER_REFUND`, `sourceType: ORDER`.
 - Admin add, deduct, and set-balance operations write `semanticType: ADMIN_ADJUSTMENT`.
+- Phase 2.5T admin user wallet controls expose add/deduct only from the user wallet page; each action still writes a real `ADMIN_ADJUSTMENT` ledger record and audit metadata.
 - Bulk debt inflation and deflation keep `type: DEBT_ADJUSTMENT` and write `semanticType: DEBT_ADJUSTMENT`.
+- Non-production mock wallet top-up confirmation writes `type: CREDIT`, `semanticType: CARD_PAYMENT_SUCCESS`, `sourceType: PAYMENT`.
+- Referral commission writes `type: CREDIT`, `semanticType: REFERRAL_COMMISSION`, `sourceType: REFERRAL`.
 
 ## Idempotency
 
-Phase 2.1 does not implement payment idempotency or webhook handling.
+Phase 2.2 adds mock wallet top-up credit idempotency. Production gateway/webhook idempotency remains future work.
 
 The ledger now supports an optional unique `idempotencyKey`. Current flows use natural keys where safe:
 
@@ -70,6 +73,8 @@ The ledger now supports an optional unique `idempotencyKey`. Current flows use n
 - `order:<orderId>:refund:full`
 - `order:<orderId>:refund:partial:<remains>`
 - `order:<orderId>:forced-complete-rededuction`
+- `payment:<paymentId>:wallet-credit`
+- `referral:<sourceWalletTransactionId>`
 
 Manual admin add/deduct/set entries do not currently have a natural idempotency key.
 
@@ -96,5 +101,6 @@ Do not infer deposit/order/admin semantics blindly for old `CREDIT` or `DEBIT` r
 
 - Money is still stored as `Number` in `WalletTransaction`; Decimal/string monetary normalization remains outside Phase 2.1.
 - `reference` is retained as a legacy populated field and may point at non-order ids in older flows.
-- Card payment, webhook, referral commission, and referral reversal logic is not implemented.
+- Real card gateway, webhook, and referral reversal logic is not implemented.
 - Wallet stats still aggregate by legacy `type` to preserve existing behavior.
+- Credit/debt limit changes are account settings, not money movement, so they do not create wallet transaction rows.

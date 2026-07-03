@@ -1,6 +1,22 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const {
+    encryptSecret,
+    getProviderCredential,
+    hasSecretValue,
+} = require('../../shared/utils/secretEncryption');
+
+const CREDENTIAL_FIELDS = ['apiToken', 'apiKey', 'username', 'password'];
+const PROVIDER_INTEGRATION_TYPES = Object.freeze({
+    API: 'API',
+});
+const PROVIDER_AUTH_TYPES = Object.freeze({
+    NONE: 'NONE',
+    API_KEY: 'API_KEY',
+    BEARER_TOKEN: 'BEARER_TOKEN',
+    USERNAME_PASSWORD: 'USERNAME_PASSWORD',
+});
 
 /**
  * Provider — an external data source that supplies raw product inventory.
@@ -47,10 +63,32 @@ const providerSchema = new mongoose.Schema(
         },
 
         /**
+         * High-level integration shape. Kept intentionally narrow until
+         * provider-specific adapters require more modes.
+         */
+        integrationType: {
+            type: String,
+            enum: Object.values(PROVIDER_INTEGRATION_TYPES),
+            default: PROVIDER_INTEGRATION_TYPES.API,
+            uppercase: true,
+            trim: true,
+        },
+
+        /**
+         * Credential strategy selected by admin quick-create/edit screens.
+         * Secrets themselves remain in credential fields and are encrypted.
+         */
+        authType: {
+            type: String,
+            enum: Object.values(PROVIDER_AUTH_TYPES),
+            default: PROVIDER_AUTH_TYPES.NONE,
+            uppercase: true,
+            trim: true,
+        },
+
+        /**
          * Primary API token / key for this provider.
-         * SECURITY_TODO: currently stored in plain text. Encrypt provider
-         * credentials at rest before production use and never seed real tokens.
-         * Aliased as apiKey for backward compatibility with existing code.
+         * Stored encrypted at rest and never returned by API serializers.
          */
         apiToken: {
             type: String,
@@ -62,6 +100,26 @@ const providerSchema = new mongoose.Schema(
          * @deprecated — kept for backward compatibility, maps to apiToken.
          */
         apiKey: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        /**
+         * Optional username for USERNAME_PASSWORD providers.
+         * Stored encrypted at rest and never returned by API serializers.
+         */
+        username: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        /**
+         * Optional password for USERNAME_PASSWORD providers.
+         * Stored encrypted at rest and never returned by API serializers.
+         */
+        password: {
             type: String,
             trim: true,
             default: null,
@@ -110,7 +168,50 @@ const providerSchema = new mongoose.Schema(
  * Always use this in adapters instead of reading either field directly.
  */
 providerSchema.virtual('effectiveToken').get(function () {
-    return this.apiToken || this.apiKey || null;
+    return getProviderCredential(this.apiToken || this.apiKey || null);
+});
+
+providerSchema.virtual('effectiveUsername').get(function () {
+    return getProviderCredential(this.username || null);
+});
+
+providerSchema.virtual('effectivePassword').get(function () {
+    return getProviderCredential(this.password || null);
+});
+
+const addCredentialStatus = (doc, ret) => {
+    const hasApiToken = hasSecretValue(doc.apiToken);
+    const hasApiKey = hasSecretValue(doc.apiKey);
+    const hasUsername = hasSecretValue(doc.username);
+    const hasPassword = hasSecretValue(doc.password);
+
+    ret.hasApiToken = hasApiToken;
+    ret.hasApiKey = hasApiKey;
+    ret.hasUsername = hasUsername;
+    ret.hasPassword = hasPassword;
+    ret.credentialConfigured = hasApiToken || hasApiKey || hasUsername || hasPassword;
+    ret.credentialsConfigured = ret.credentialConfigured;
+
+    delete ret.apiToken;
+    delete ret.apiKey;
+    delete ret.username;
+    delete ret.password;
+    delete ret.effectiveToken;
+    delete ret.effectiveUsername;
+    delete ret.effectivePassword;
+    return ret;
+};
+
+providerSchema.set('toJSON', {
+    virtuals: false,
+    versionKey: false,
+    transform: addCredentialStatus,
+});
+
+providerSchema.set('toObject', {
+    virtuals: false,
+    versionKey: false,
+    transform: addCredentialStatus,
 });
 
 // ─── Pre-save: auto-generate slug ───────────────────────────────────────────────
@@ -122,6 +223,19 @@ providerSchema.pre('save', function (next) {
             .replace(/[^a-z0-9]+/g, '-')
             .replace(/^-+|-+$/g, '');
     }
+
+    for (const field of CREDENTIAL_FIELDS) {
+        if (!this.isModified(field)) continue;
+
+        const value = this[field];
+        if (!hasSecretValue(value)) {
+            this[field] = null;
+            continue;
+        }
+
+        this[field] = encryptSecret(String(value).trim());
+    }
+
     next();
 });
 
@@ -131,4 +245,4 @@ providerSchema.index({ isActive: 1 });
 
 const Provider = mongoose.model('Provider', providerSchema);
 
-module.exports = { Provider };
+module.exports = { Provider, PROVIDER_AUTH_TYPES, PROVIDER_INTEGRATION_TYPES };

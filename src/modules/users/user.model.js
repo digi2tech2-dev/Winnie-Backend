@@ -2,6 +2,7 @@
 
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const config = require('../../config/config');
 
 /**
@@ -31,6 +32,24 @@ const USER_STATUS = Object.freeze({
     ACTIVE: 'ACTIVE',
     REJECTED: 'REJECTED',
 });
+
+const SUB_AGENT_STATUS = Object.freeze({
+    NONE: 'NONE',
+    PENDING: 'PENDING',
+    ACTIVE: 'ACTIVE',
+    REJECTED: 'REJECTED',
+});
+
+const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const REFERRAL_CODE_LENGTH = 8;
+
+const generateReferralCodeCandidate = () => {
+    let code = 'K';
+    for (let i = 0; i < REFERRAL_CODE_LENGTH - 1; i += 1) {
+        code += REFERRAL_CODE_ALPHABET[crypto.randomInt(0, REFERRAL_CODE_ALPHABET.length)];
+    }
+    return code;
+};
 
 const userSchema = new mongoose.Schema(
     {
@@ -235,6 +254,30 @@ const userSchema = new mongoose.Schema(
             default: null,
         },
 
+        isSubAgent: {
+            type: Boolean,
+            default: false,
+            index: true,
+        },
+
+        subAgentStatus: {
+            type: String,
+            enum: Object.values(SUB_AGENT_STATUS),
+            default: SUB_AGENT_STATUS.NONE,
+            index: true,
+        },
+
+        subAgentApprovedAt: {
+            type: Date,
+            default: null,
+        },
+
+        subAgentApprovedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+        },
+
         // ── Wallet ───────────────────────────────────────────────────────────
         /**
          * User's wallet balance in their local currency.
@@ -371,6 +414,27 @@ userSchema.virtual('availableCredit').get(function () {
 });
 
 // ─── Pre-save Hook: Hash Password ────────────────────────────────────────────
+userSchema.pre('validate', async function assignReferralCode(next) {
+    if (this.referralCode) {
+        this.referralCode = String(this.referralCode).trim().toUpperCase();
+        return next();
+    }
+
+    try {
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+            const referralCode = generateReferralCodeCandidate();
+            const exists = await this.constructor.exists({ referralCode });
+            if (!exists) {
+                this.referralCode = referralCode;
+                return next();
+            }
+        }
+        return next(new Error('Unable to generate a unique referral code.'));
+    } catch (err) {
+        return next(err);
+    }
+});
+
 userSchema.pre('save', async function (next) {
     // Skip if no password set (OAuth users) or password not modified
     if (!this.password || !this.isModified('password')) return next();
@@ -401,5 +465,5 @@ userSchema.methods.toSafeObject = function () {
 
 const User = mongoose.model('User', userSchema);
 
-module.exports = { User, ROLES, USER_STATUS };
+module.exports = { User, ROLES, USER_STATUS, SUB_AGENT_STATUS };
 module.exports.User = User; // CommonJS default export convenience

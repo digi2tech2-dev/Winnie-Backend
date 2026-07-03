@@ -40,7 +40,7 @@
 const mongoose = require('mongoose');
 const { Provider } = require('../modules/providers/provider.model');
 const { ProviderProduct } = require('../modules/providers/providerProduct.model');
-const { Product, PRICING_MODES } = require('../modules/products/product.model');
+const { Product, PRICING_MODES, EXECUTION_TYPES } = require('../modules/products/product.model');
 const { Order, ORDER_STATUS } = require('../modules/orders/order.model');
 
 const catalogService = require('../modules/providers/providerCatalog.service');
@@ -78,6 +78,26 @@ const SAMPLE_PRODUCTS = [
 ];
 
 // ── [1] syncProviderProducts ──────────────────────────────────────────────────
+
+describe('[0] provider link option safety', () => {
+    it('provider serialization exposes credential status without credential secrets', async () => {
+        const provider = await makeProvider({
+            name: 'mock-safe-provider',
+            apiToken: 'secret-token',
+            apiKey: 'legacy-key',
+            username: 'secret-user',
+            password: 'secret-password',
+        });
+        const plain = provider.toObject();
+
+        expect(plain.credentialConfigured).toBe(true);
+        expect(plain.credentialsConfigured).toBe(true);
+        expect(plain.apiToken).toBeUndefined();
+        expect(plain.apiKey).toBeUndefined();
+        expect(plain.username).toBeUndefined();
+        expect(plain.password).toBeUndefined();
+    });
+});
 
 describe('[1] providerCatalog.service — syncProviderProducts()', () => {
     let provider;
@@ -368,6 +388,153 @@ describe('[3] product.service — createProductFromProvider()', () => {
 });
 
 // ── [4] Provider adapter resolution via product chain ────────────────────────
+
+describe('[3.5] product.service — provider link / unlink updates', () => {
+    let provider;
+    let providerProduct;
+
+    beforeEach(async () => {
+        provider = await makeProvider({ name: 'mock' });
+        await catalogService.syncProviderProducts(provider._id, {
+            products: [{
+                externalProductId: 'LINK-001',
+                rawName: 'Link Target',
+                rawPrice: 7.50,
+                minQty: 3,
+                maxQty: 700,
+                isActive: true,
+            }],
+        });
+        providerProduct = await ProviderProduct.findOne({
+            provider: provider._id,
+            externalProductId: 'LINK-001',
+        });
+    });
+
+    it('keeps a product manual when automatic execution is requested without a provider link', async () => {
+        const product = await Product.create({
+            name: 'Manual Guard Target',
+            basePrice: 10.00,
+            finalPrice: 10.00,
+            minQty: 1,
+            maxQty: 10,
+            executionType: EXECUTION_TYPES.MANUAL,
+        });
+
+        const updated = await productService.updateProduct(product._id, {
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+        });
+
+        expect(updated.providerProduct).toBeNull();
+        expect(updated.executionType).toBe(EXECUTION_TYPES.MANUAL);
+    });
+
+    it('links a manual product for automatic fulfillment without overwriting manual price', async () => {
+        const product = await Product.create({
+            name: 'Manual Link Target',
+            basePrice: 12.34,
+            finalPrice: 12.34,
+            minQty: 1,
+            maxQty: 10,
+            orderFields: [{
+                id: 'player_id',
+                key: 'player_id',
+                label: 'Player ID',
+                type: 'text',
+                required: true,
+            }],
+            dynamicFields: [{
+                name: 'player_id',
+                label: 'Player ID',
+                type: 'text',
+                required: true,
+            }],
+        });
+
+        const updated = await productService.updateProduct(product._id, {
+            provider: provider._id,
+            providerProduct: providerProduct._id,
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+            pricingMode: PRICING_MODES.MANUAL,
+            syncPriceWithProvider: false,
+        });
+
+        expect(updated.provider._id.toString()).toBe(provider._id.toString());
+        expect(updated.providerProduct._id.toString()).toBe(providerProduct._id.toString());
+        expect(updated.executionType).toBe(EXECUTION_TYPES.AUTOMATIC);
+        expect(updated.pricingMode).toBe(PRICING_MODES.MANUAL);
+        expect(updated.syncPriceWithProvider).toBe(false);
+        expectDecimalString(updated.providerPrice, '7.5');
+        expectDecimalString(updated.basePrice, '12.34');
+        expect(updated.orderFields).toHaveLength(1);
+        expect(updated.dynamicFields).toHaveLength(1);
+    });
+
+    it('links a product with sync pricing when requested', async () => {
+        const product = await Product.create({
+            name: 'Sync Link Target',
+            basePrice: 99.99,
+            finalPrice: 99.99,
+            minQty: 1,
+            maxQty: 10,
+        });
+
+        const updated = await productService.updateProduct(product._id, {
+            provider: provider._id,
+            providerProduct: providerProduct._id,
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+            pricingMode: PRICING_MODES.SYNC,
+            syncPriceWithProvider: true,
+        });
+
+        expect(updated.executionType).toBe(EXECUTION_TYPES.AUTOMATIC);
+        expect(updated.pricingMode).toBe(PRICING_MODES.SYNC);
+        expect(updated.syncPriceWithProvider).toBe(true);
+        expectDecimalString(updated.providerPrice, '7.5');
+        expectDecimalString(updated.basePrice, '7.5');
+    });
+
+    it('manual unlink clears provider refs and preserves customer fields', async () => {
+        const product = await Product.create({
+            name: 'Unlink Target',
+            basePrice: 44.00,
+            finalPrice: 44.00,
+            minQty: 1,
+            maxQty: 10,
+            provider: provider._id,
+            providerProduct: providerProduct._id,
+            providerPrice: 7.50,
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+            pricingMode: PRICING_MODES.SYNC,
+            syncPriceWithProvider: true,
+            orderFields: [{
+                id: 'account_id',
+                key: 'account_id',
+                label: 'Account ID',
+                type: 'text',
+                required: true,
+            }],
+            dynamicFields: [{
+                name: 'account_id',
+                label: 'Account ID',
+                type: 'text',
+                required: true,
+            }],
+        });
+
+        const updated = await productService.unlinkProductProvider(product._id);
+
+        expect(updated.provider).toBeNull();
+        expect(updated.providerProduct).toBeNull();
+        expect(updated.providerPrice).toBeNull();
+        expect(updated.executionType).toBe(EXECUTION_TYPES.MANUAL);
+        expect(updated.pricingMode).toBe(PRICING_MODES.MANUAL);
+        expect(updated.syncPriceWithProvider).toBe(false);
+        expectDecimalString(updated.basePrice, '44');
+        expect(updated.orderFields).toHaveLength(1);
+        expect(updated.dynamicFields).toHaveLength(1);
+    });
+});
 
 describe('[4] Order provider resolution via Product → ProviderProduct chain', () => {
     let customer;

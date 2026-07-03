@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const { DepositRequest, DEPOSIT_STATUS } = require('./deposit.model');
 const { User } = require('../users/user.model');
 const { creditWalletDirect } = require('../wallet/wallet.service');
+const { processWalletCreditSafely } = require('../referrals/referral.service');
 const {
     safeCreateNotification,
     safeCreateAdminActorNotifications,
@@ -273,7 +274,7 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     const userAgent = auditContext?.userAgent ?? null;
 
     // Credit the wallet
-    await creditWalletDirect({
+    const creditResult = await creditWalletDirect({
         userId: updated.userId,
         amount: walletCreditAmount,
         reference: updated._id,
@@ -294,6 +295,8 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     });
 
     // ── Audit: fire-and-forget ────────────────────────────────────────────
+    await processWalletCreditSafely(creditResult.transaction);
+
     createAuditLog({
         actorId, actorRole, ipAddress, userAgent,
         action: DEPOSIT_ACTIONS.APPROVED,

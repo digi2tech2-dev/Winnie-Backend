@@ -45,14 +45,14 @@ const getTransactionHistory = catchAsync(async (req, res) => {
 const addFunds = catchAsync(async (req, res) => {
     const { amount, reason, description } = req.body;
     const result = await svc.addFunds(req.params.userId, amount, reason || description, getActorContext(req));
-    sendCreated(res, { transaction: result.transaction }, 'Funds added to wallet');
+    sendCreated(res, { transaction: result.transaction, user: result.user }, 'Funds added to wallet');
 });
 
 // POST /admin/wallets/:userId/deduct
 const deductFunds = catchAsync(async (req, res) => {
     const { amount, reason, description } = req.body;
     const result = await svc.deductFunds(req.params.userId, amount, reason || description, getActorContext(req));
-    sendSuccess(res, { transaction: result.transaction }, 'Funds deducted from wallet');
+    sendSuccess(res, { transaction: result.transaction, user: result.user }, 'Funds deducted from wallet');
 });
 
 // PUT /admin/wallets/:userId/set

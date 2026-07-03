@@ -117,7 +117,8 @@ const listWallets = async ({ page = 1, limit = 20 } = {}) => {
 
 const getWallet = async (userId) => {
     const user = await User.findById(userId)
-        .select('name email walletBalance creditLimit creditUsed currency status');
+        .select('name email walletBalance creditLimit creditUsed currency status role groupId')
+        .populate('groupId', 'name percentage isActive');
     if (!user) throw new NotFoundError('User');
 
     // Fetch recent transactions WITH populated references so the frontend
@@ -181,17 +182,18 @@ const addFunds = async (userId, amount, reason, actorContext) => {
 
     const userCurrency = user.currency || 'USD';
     const balanceBefore = safeRound(user.walletBalance || 0);
+    const creditLimit = safeRound(Math.abs(Number(user.creditLimit || 0)));
     const creditUsedBefore = safeRound(user.creditUsed || 0);
 
     // If user has drawn credit (creditUsed > 0), adding funds repays credit first.
     // Example: balance=-50, creditUsed=50, add 80 → creditUsed=0, balance=30
     let creditRepaid = 0;
-    if (creditUsedBefore > 0 && balanceBefore < 0) {
-        creditRepaid = safeRound(Math.min(parsedAmount, creditUsedBefore));
-    }
 
     const balanceAfter = safeRound(balanceBefore + parsedAmount);
-    const creditUsedAfter = safeRound(creditUsedBefore - creditRepaid);
+    const creditUsedAfter = balanceAfter < 0
+        ? safeRound(Math.min(Math.abs(balanceAfter), creditLimit))
+        : 0;
+    creditRepaid = safeRound(Math.max(0, creditUsedBefore - creditUsedAfter));
 
     // Atomic update
     await User.findByIdAndUpdate(userId, {
@@ -259,7 +261,10 @@ const addFunds = async (userId, amount, reason, actorContext) => {
         actorRole: actor.actorRole,
     });
 
-    return { transaction };
+    const updatedUser = await User.findById(userId)
+        .select('name email walletBalance creditLimit creditUsed currency status role');
+
+    return { transaction, user: updatedUser };
 };
 
 /**
@@ -307,13 +312,10 @@ const deductFunds = async (userId, amount, reason, actorContext) => {
     // Calculate new balance and credit usage
     const balanceAfter = safeRound(balanceBefore - parsedAmount);
 
-    // If balance goes negative, the deficit is drawn from credit
-    let creditDrawn = 0;
-    if (balanceAfter < 0) {
-        // How much of the credit line is now being used
-        creditDrawn = safeRound(Math.min(Math.abs(balanceAfter), availableCredit));
-    }
-    const creditUsedAfter = safeRound(creditUsedBefore + creditDrawn);
+    const creditUsedAfter = balanceAfter < 0
+        ? safeRound(Math.min(Math.abs(balanceAfter), creditLimit))
+        : 0;
+    const creditDrawn = safeRound(Math.max(0, creditUsedAfter - creditUsedBefore));
 
     // Atomic update
     await User.findByIdAndUpdate(userId, {
@@ -383,7 +385,10 @@ const deductFunds = async (userId, amount, reason, actorContext) => {
         actorRole: actor.actorRole,
     });
 
-    return { transaction };
+    const updatedUser = await User.findById(userId)
+        .select('name email walletBalance creditLimit creditUsed currency status role');
+
+    return { transaction, user: updatedUser };
 };
 
 // ─── Admin Force Set Balance ──────────────────────────────────────────────────

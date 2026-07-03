@@ -122,6 +122,20 @@ const updateCreditLimitSchema = Joi.object({
         'number.min': 'Credit limit cannot be negative',
         'any.required': 'creditLimit is required',
     }),
+    reason: Joi.string().trim().min(3).max(255).required().messages({
+        'any.required': 'Reason is required',
+        'string.min': 'Reason must be at least 3 characters',
+    }),
+});
+
+const updateUserGroupSchema = Joi.object({
+    groupId: objectId().required().messages({
+        'any.required': 'groupId is required',
+    }),
+    reason: Joi.string().trim().min(3).max(255).required().messages({
+        'any.required': 'Reason is required',
+        'string.min': 'Reason must be at least 3 characters',
+    }),
 });
 
 const resetUserPasswordSchema = Joi.object({
@@ -147,9 +161,17 @@ const updateSupervisorPermissionsSchema = Joi.object({
 
 const createProviderSchema = Joi.object({
     name: Joi.string().trim().min(2).max(64).required(),
+    code: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
     slug: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
     baseUrl: Joi.string().uri().required(),
-    apiToken: Joi.string().trim().max(4096),
+    integrationType: Joi.string().trim().uppercase().valid('API').default('API'),
+    providerType: Joi.string().trim().uppercase().valid('API'),
+    authType: Joi.string().trim().uppercase().valid('NONE', 'API_KEY', 'BEARER_TOKEN', 'USERNAME_PASSWORD').default('NONE'),
+    apiToken: Joi.string().trim().max(4096).allow('', null),
+    apiKey: Joi.string().trim().max(4096).allow('', null),
+    bearerToken: Joi.string().trim().max(4096).allow('', null),
+    username: Joi.string().trim().max(4096).allow('', null),
+    password: Joi.string().trim().max(4096).allow('', null),
     isActive: Joi.boolean().default(true),
     syncInterval: Joi.number().integer().min(0).default(60),
     supportedFeatures: Joi.array().items(Joi.string()).default([]),
@@ -157,9 +179,17 @@ const createProviderSchema = Joi.object({
 
 const updateProviderSchema = Joi.object({
     name: Joi.string().trim().min(2).max(64),
+    code: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
     slug: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
     baseUrl: Joi.string().uri(),
+    integrationType: Joi.string().trim().uppercase().valid('API'),
+    providerType: Joi.string().trim().uppercase().valid('API'),
+    authType: Joi.string().trim().uppercase().valid('NONE', 'API_KEY', 'BEARER_TOKEN', 'USERNAME_PASSWORD'),
     apiToken: Joi.string().trim().max(4096).allow('', null),
+    apiKey: Joi.string().trim().max(4096).allow('', null),
+    bearerToken: Joi.string().trim().max(4096).allow('', null),
+    username: Joi.string().trim().max(4096).allow('', null),
+    password: Joi.string().trim().max(4096).allow('', null),
     isActive: Joi.boolean(),
     syncInterval: Joi.number().integer().min(0),
     supportedFeatures: Joi.array().items(Joi.string()),
@@ -258,8 +288,10 @@ const createCurrencySchema = Joi.object({
     platformRate: Joi.number().positive().required().messages({
         'any.required': 'platformRate is required',
     }),
-    marketRate: Joi.number().positive().allow(null),
-    markupPercentage: Joi.number().min(0).max(100).default(0),
+    marketRate: Joi.number().positive().required().messages({
+        'any.required': 'marketRate is required',
+    }),
+    markupPercentage: Joi.number().min(0).default(0),
     isActive: Joi.boolean().default(true),
 });
 
@@ -327,6 +359,7 @@ module.exports = {
         updateSupervisorPermissions: updateSupervisorPermissionsSchema,
         updateUserCurrency: updateUserCurrencySchema,
         updateCreditLimit: updateCreditLimitSchema,
+        updateUserGroup: updateUserGroupSchema,
         resetUserPassword: resetUserPasswordSchema,
         updateUserAvatar: updateUserAvatarSchema,
         // Providers

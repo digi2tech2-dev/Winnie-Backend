@@ -8,6 +8,8 @@
     "dev": "nodemon src/server.js",
     "seed": "node src/scripts/seed.js",
     "seed:clear": "node src/scripts/seed.js --clear",
+    "seed:smoke": "node scripts/seed-smoke-data.js",
+    "migrate:provider-credentials": "node scripts/migrate-provider-credentials.js",
     "test": "jest --runInBand --forceExit",
     "lint": "node scripts/check-syntax.js"
   },

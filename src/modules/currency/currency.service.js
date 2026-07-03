@@ -235,12 +235,53 @@ const setCurrencyStatus = async (code, isActive) => {
  * @param {Object} data
  * @returns {Promise<Currency>}
  */
-const createCurrency = async ({ code, name, symbol, platformRate, marketRate, markupPercentage }) => {
+const createCurrency = async ({
+    code,
+    name,
+    symbol,
+    platformRate,
+    marketRate,
+    markupPercentage = 0,
+    isActive = true,
+}) => {
     const upper = (code ?? '').toUpperCase().trim();
     if (!/^[A-Z]{3}$/.test(upper)) {
         throw new BusinessRuleError(
             'Currency code must be a 3-letter ISO 4217 code.',
             'INVALID_CURRENCY_CODE'
+        );
+    }
+
+    const trimmedName = String(name || '').trim();
+    const trimmedSymbol = String(symbol || '').trim();
+    if (!trimmedName) {
+        throw new BusinessRuleError('Currency name is required.', 'INVALID_CURRENCY_NAME');
+    }
+    if (!trimmedSymbol) {
+        throw new BusinessRuleError('Currency symbol is required.', 'INVALID_CURRENCY_SYMBOL');
+    }
+
+    const parsedPlatformRate = Number(platformRate);
+    if (!Number.isFinite(parsedPlatformRate) || parsedPlatformRate <= 0) {
+        throw new BusinessRuleError(
+            'platformRate must be a positive number.',
+            'INVALID_PLATFORM_RATE'
+        );
+    }
+
+    const parsedMarketRate = Number(marketRate);
+    if (!Number.isFinite(parsedMarketRate) || parsedMarketRate <= 0) {
+        throw new BusinessRuleError(
+            'marketRate must be a positive number.',
+            'INVALID_MARKET_RATE'
+        );
+    }
+
+    const parsedMarkupPercentage = Number(markupPercentage);
+    if (!Number.isFinite(parsedMarkupPercentage) || parsedMarkupPercentage < 0) {
+        throw new BusinessRuleError(
+            'markupPercentage must be a non-negative number.',
+            'INVALID_MARKUP'
         );
     }
 
@@ -251,14 +292,16 @@ const createCurrency = async ({ code, name, symbol, platformRate, marketRate, ma
 
     const doc = await Currency.create({
         code: upper,
-        name,
-        symbol,
-        marketRate: marketRate ?? null,
-        platformRate: parseFloat((platformRate || 1).toFixed(6)),
-        markupPercentage: markupPercentage ?? 0,
-        isActive: true,
+        name: trimmedName,
+        symbol: trimmedSymbol,
+        marketRate: parseFloat(parsedMarketRate.toFixed(6)),
+        platformRate: parseFloat(parsedPlatformRate.toFixed(6)),
+        markupPercentage: parsedMarkupPercentage,
+        isActive: Boolean(isActive),
         lastUpdatedAt: new Date(),
     });
+
+    invalidateCurrencyCache(upper);
 
     return doc;
 };
