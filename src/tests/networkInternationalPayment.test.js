@@ -274,6 +274,46 @@ describe('Network International hosted payment gateway', () => {
         expect(body).not.toContain('outlet-123');
     });
 
+    it('returns safe admin payment list fields without raw provider metadata', async () => {
+        enableNetworkGateway();
+        const customer = await createNetworkCustomer();
+        const client = makeHttpClient();
+        mockCreateOrder(client);
+
+        await createNetworkIntent(customer);
+
+        const result = await paymentService.listPayments({
+            userId: customer._id,
+            gateway: PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL,
+            purpose: 'WALLET_TOPUP',
+            credited: false,
+            page: 1,
+            limit: 10,
+        });
+        const serialized = paymentService.serializePayment(result.payments[0], { admin: true });
+        const body = JSON.stringify(serialized);
+
+        expect(serialized.user).toMatchObject({
+            id: customer._id.toString(),
+            name: customer.name,
+            email: customer.email,
+        });
+        expect(serialized.metadata).toMatchObject({
+            mode: 'network_international',
+            gatewayCurrencyConversion: {
+                requestedAmount: 123.45,
+                requestedCurrency: 'AED',
+                gatewayAmount: 123.45,
+                gatewayCurrency: 'AED',
+            },
+        });
+        expect(serialized.metadata.gatewayMetadata).toBeUndefined();
+        expect(serialized.metadata.gatewayStatusSync).toBeUndefined();
+        expect(body).not.toContain('test-service-account-key');
+        expect(body).not.toContain('test-access-token');
+        expect(body).not.toContain('outlet-123');
+    });
+
     it('creates an AED Network order for an EGP requested wallet top-up', async () => {
         enableNetworkGateway();
         const customer = await createNetworkCustomer({ walletBalance: 500, currency: 'EGP' });

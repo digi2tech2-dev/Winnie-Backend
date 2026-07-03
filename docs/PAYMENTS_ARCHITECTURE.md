@@ -2,7 +2,7 @@
 
 ## Scope
 
-Phase 2.2 added a safe base module for wallet top-up payments. Phase 2.5P adds Network International / N-Genius Hosted Payment Page order creation for wallet top-ups only. Phase 2.5P.1 adds Network gateway currency conversion so customers can request top-ups in their wallet currency while the hosted payment order is charged in the configured Network outlet currency. Phase 2.5Q adds Network webhook intake and admin reconciliation. The module does not collect card data, trust redirect returns for wallet credit, or change order payment behavior.
+Phase 2.2 added a safe base module for wallet top-up payments. Phase 2.5P adds Network International / N-Genius Hosted Payment Page order creation for wallet top-ups only. Phase 2.5P.1 adds Network gateway currency conversion so customers can request top-ups in their wallet currency while the hosted payment order is charged in the configured Network outlet currency. Phase 2.5Q adds Network webhook intake and admin reconciliation. Phase 2.5S connects the admin list/detail/reconciliation backend routes to a safe Admin Payments UI. The module does not collect card data, trust redirect returns for wallet credit, or change order payment behavior.
 
 Current scope:
 
@@ -11,6 +11,7 @@ Current scope:
 - Network International Hosted Payment Page operational for online wallet top-up order creation.
 - Network gateway orders use `NETWORK_INTERNATIONAL_CURRENCY` for provider charge currency while `Payment.amount` and `Payment.currency` preserve the requested wallet top-up amount.
 - Network webhook events are accepted at `POST /api/webhooks/payments/network`, persisted with safe summaries, deduplicated, and processed only after re-fetching authoritative Network status.
+- Admins/supervisors with `payments.view` can list payments, inspect safe payment details, and trigger reconciliation through `/api/admin/payments`.
 - Ziina and Tap Payments adapters are placeholders.
 - Wallet credit only happens after a controlled mock success confirmation in non-production environments, authenticated/admin Network status sync, or Network webhook processing that re-fetches and verifies an authoritative successful provider state.
 
@@ -22,7 +23,7 @@ Out of scope:
 - Card number, CVV, or sensitive card data collection/storage.
 - Referral commission policy/calculation inside the payments module.
 - Group-change or sub-agent workflows.
-- Gateway FX markup, settlement accounting, or reconciliation dashboards.
+- Gateway FX markup, settlement accounting, or settlement analytics dashboards.
 
 ## Module Layout
 

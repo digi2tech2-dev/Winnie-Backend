@@ -3,6 +3,7 @@
 const { body, query, param } = require('express-validator');
 const {
     PAYMENT_GATEWAYS,
+    PAYMENT_PURPOSES,
     PAYMENT_STATUSES,
 } = require('./payment.constants');
 
@@ -45,6 +46,19 @@ const paymentIdValidation = [
 ];
 
 const listPaymentsValidation = [
+    query('userId')
+        .optional()
+        .isMongoId()
+        .withMessage('userId must be a valid user ID'),
+
+    query('purpose')
+        .optional()
+        .isString().withMessage('purpose must be a string')
+        .trim()
+        .toUpperCase()
+        .isIn(Object.values(PAYMENT_PURPOSES))
+        .withMessage(`purpose must be one of: ${Object.values(PAYMENT_PURPOSES).join(', ')}`),
+
     query('status')
         .optional()
         .isString().withMessage('status must be a string')
@@ -60,6 +74,12 @@ const listPaymentsValidation = [
         .toUpperCase()
         .isIn(Object.values(PAYMENT_GATEWAYS))
         .withMessage(`gateway must be one of: ${Object.values(PAYMENT_GATEWAYS).join(', ')}`),
+
+    query('credited')
+        .optional()
+        .isBoolean()
+        .withMessage('credited must be true or false')
+        .toBoolean(),
 
     query('from')
         .optional()

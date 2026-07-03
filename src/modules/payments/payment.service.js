@@ -2,6 +2,7 @@
 
 const mongoose = require('mongoose');
 const { Payment } = require('./payment.model');
+const { PaymentWebhookEvent } = require('./paymentWebhookEvent.model');
 const {
     PAYMENT_PURPOSES,
     PAYMENT_GATEWAYS,
@@ -224,6 +225,69 @@ const assertPaymentOwnerOrAdmin = (payment, actor) => {
 
 const getGatewayCurrencyConversion = (paymentOrDoc) => paymentOrDoc?.metadata?.gatewayCurrencyConversion || null;
 
+const normalizeDocumentId = (value) => {
+    if (!value) return value;
+    if (value._id) return value._id?.toString?.() || String(value._id);
+    return value.toString?.() || String(value);
+};
+
+const safeUserSummary = (user) => {
+    if (!user || typeof user !== 'object' || !user._id) return null;
+
+    return {
+        id: normalizeDocumentId(user),
+        name: user.name || user.username || 'User',
+        email: user.email || '',
+        phone: user.phone || '',
+    };
+};
+
+const pickDefined = (source = {}, keys = []) => keys.reduce((acc, key) => {
+    if (source[key] !== undefined && source[key] !== null) acc[key] = source[key];
+    return acc;
+}, {});
+
+const safePaymentMetadata = (metadata = {}) => {
+    const response = {};
+
+    if (metadata.mode) response.mode = metadata.mode;
+
+    if (metadata.risk && typeof metadata.risk === 'object') {
+        response.risk = pickDefined(metadata.risk, [
+            'amountBaseCurrency',
+            'baseCurrency',
+            'evaluatedAt',
+        ]);
+    }
+
+    const conversion = metadata.gatewayCurrencyConversion;
+    if (conversion && typeof conversion === 'object') {
+        response.gatewayCurrencyConversion = pickDefined(conversion, [
+            'requestedAmount',
+            'requestedCurrency',
+            'gatewayAmount',
+            'gatewayCurrency',
+            'exchangeRate',
+            'exchangeRateSource',
+            'requestedAmountUsd',
+            'requestedCurrencyRate',
+            'gatewayCurrencyRate',
+            'convertedAt',
+        ]);
+    }
+
+    const statusSync = metadata.gatewayMetadata?.statusSync;
+    if (statusSync && typeof statusSync === 'object') {
+        response.gatewayStatusSync = pickDefined(statusSync, [
+            'providerStatus',
+            'mappedStatus',
+            'syncedAt',
+        ]);
+    }
+
+    return response;
+};
+
 const safeGatewayChargeFields = (paymentOrDoc) => {
     const conversion = getGatewayCurrencyConversion(paymentOrDoc);
     if (!conversion) {
@@ -255,13 +319,15 @@ const metadataModeForGateway = (gateway) => {
     return 'placeholder';
 };
 
-const serializePayment = (payment, { admin = false } = {}) => {
+const serializePayment = (payment, { admin = false, webhookEvents = [] } = {}) => {
     const doc = payment?.toObject ? payment.toObject() : payment;
     if (!doc) return null;
+    const user = safeUserSummary(doc.userId || doc.user);
 
     const response = {
         id: doc._id?.toString?.() || doc.id,
-        userId: doc.userId?.toString?.() || doc.userId,
+        userId: user?.id || normalizeDocumentId(doc.userId),
+        user,
         purpose: doc.purpose,
         gateway: doc.gateway,
         method: doc.method,
@@ -287,10 +353,11 @@ const serializePayment = (payment, { admin = false } = {}) => {
     };
 
     if (admin) {
-        response.metadata = doc.metadata || {};
+        response.metadata = safePaymentMetadata(doc.metadata || {});
         response.createdByIp = doc.createdByIp || null;
         response.userAgent = doc.userAgent || null;
         response.idempotencyKey = doc.idempotencyKey || null;
+        response.webhookEvents = webhookEvents;
     }
 
     return response;
@@ -457,7 +524,10 @@ const createPaymentIntent = async ({
 };
 
 const getPaymentById = async (paymentId, { actor, admin = false } = {}) => {
-    const payment = await Payment.findById(paymentId);
+    const query = Payment.findById(paymentId);
+    if (admin) query.populate('userId', 'name email phone username');
+
+    const payment = await query;
     if (!payment) throw new NotFoundError('Payment');
 
     if (!admin) {
@@ -467,11 +537,14 @@ const getPaymentById = async (paymentId, { actor, admin = false } = {}) => {
     return payment;
 };
 
-const buildListFilter = ({ userId, status, gateway, from, to } = {}) => {
+const buildListFilter = ({ userId, status, gateway, purpose, credited, from, to } = {}) => {
     const filter = {};
     if (userId) filter.userId = userId;
     if (status) filter.status = String(status).trim().toUpperCase();
     if (gateway) filter.gateway = normalizeGatewayKey(gateway);
+    if (purpose) filter.purpose = String(purpose).trim().toUpperCase();
+    if (credited === true || credited === 'true') filter.creditedAt = { $ne: null };
+    if (credited === false || credited === 'false') filter.creditedAt = null;
     if (from || to) {
         filter.createdAt = {};
         if (from) filter.createdAt.$gte = new Date(from);
@@ -484,6 +557,8 @@ const listPayments = async ({
     userId = null,
     status,
     gateway,
+    purpose,
+    credited,
     from,
     to,
     page = 1,
@@ -492,10 +567,11 @@ const listPayments = async ({
     const normalizedLimit = Math.min(parseInt(limit, 10) || 20, 100);
     const normalizedPage = Math.max(parseInt(page, 10) || 1, 1);
     const skip = (normalizedPage - 1) * normalizedLimit;
-    const filter = buildListFilter({ userId, status, gateway, from, to });
+    const filter = buildListFilter({ userId, status, gateway, purpose, credited, from, to });
 
     const [payments, total] = await Promise.all([
         Payment.find(filter)
+            .populate('userId', 'name email phone username')
             .sort({ createdAt: -1 })
             .skip(skip)
             .limit(normalizedLimit),
@@ -511,6 +587,26 @@ const listPayments = async ({
             pages: Math.ceil(total / normalizedLimit),
         },
     };
+};
+
+const listPaymentWebhookSummaries = async (paymentId, { limit = 5 } = {}) => {
+    const events = await PaymentWebhookEvent.find({ paymentId })
+        .sort({ receivedAt: -1 })
+        .limit(Math.min(parseInt(limit, 10) || 5, 10))
+        .lean();
+
+    return events.map((event) => ({
+        id: event._id?.toString?.() || event.id,
+        eventId: event.eventId || null,
+        dedupeKey: event.dedupeKey || null,
+        status: event.status || null,
+        processingStatus: event.processingStatus || null,
+        providerStatus: event.providerStatus || null,
+        receivedAt: event.receivedAt || null,
+        processedAt: event.processedAt || null,
+        errorCode: event.errorCode || null,
+        errorMessage: event.errorMessage || null,
+    }));
 };
 
 const assertMockPaymentCanBeChanged = (payment) => {
@@ -1065,4 +1161,5 @@ module.exports = {
     confirmMockPayment,
     failMockPayment,
     serializePayment,
+    listPaymentWebhookSummaries,
 };

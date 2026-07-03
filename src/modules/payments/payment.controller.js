@@ -116,8 +116,11 @@ const mockFailPayment = catchAsync(async (req, res) => {
 
 const adminListPayments = catchAsync(async (req, res) => {
     const result = await paymentService.listPayments({
+        userId: req.query.userId,
         status: req.query.status,
         gateway: req.query.gateway,
+        purpose: req.query.purpose,
+        credited: req.query.credited,
         from: req.query.from,
         to: req.query.to,
         page: req.query.page,
@@ -137,9 +140,10 @@ const adminGetPayment = catchAsync(async (req, res) => {
         actor: actorFrom(req),
         admin: true,
     });
+    const webhookEvents = await paymentService.listPaymentWebhookSummaries(payment._id);
 
     sendSuccess(res, {
-        payment: paymentService.serializePayment(payment, { admin: true }),
+        payment: paymentService.serializePayment(payment, { admin: true, webhookEvents }),
     }, 'Payment retrieved.');
 });
 
