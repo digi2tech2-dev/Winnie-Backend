@@ -48,8 +48,16 @@ const extractProviderBalanceAmount = (balance) => {
 };
 
 const normalizeProviderPayload = (data = {}, { applyDefaults = false } = {}) => {
-    const hasCredential = hasSecretValue(data.apiToken) || hasSecretValue(data.apiKey);
-    const inferredAuthType = hasCredential ? PROVIDER_AUTH_TYPES.API_KEY : PROVIDER_AUTH_TYPES.NONE;
+    const hasTokenCredential = hasSecretValue(data.apiToken) || hasSecretValue(data.bearerToken);
+    const hasApiKeyCredential = hasSecretValue(data.apiKey);
+    const hasUsernamePasswordCredential = hasSecretValue(data.username) || hasSecretValue(data.password);
+    const inferredAuthType = hasUsernamePasswordCredential
+        ? PROVIDER_AUTH_TYPES.USERNAME_PASSWORD
+        : hasTokenCredential
+            ? PROVIDER_AUTH_TYPES.BEARER_TOKEN
+            : hasApiKeyCredential
+                ? PROVIDER_AUTH_TYPES.API_KEY
+                : PROVIDER_AUTH_TYPES.NONE;
     const authType = data.authType !== undefined || applyDefaults
         ? String(data.authType || inferredAuthType).toUpperCase()
         : undefined;
@@ -63,12 +71,19 @@ const normalizeProviderPayload = (data = {}, { applyDefaults = false } = {}) => 
         authType,
     };
 
+    if (data.bearerToken !== undefined && data.apiToken === undefined) {
+        normalized.apiToken = data.bearerToken;
+    }
+
     delete normalized.code;
     delete normalized.providerType;
+    delete normalized.bearerToken;
 
     if (data.authType !== undefined && authType === PROVIDER_AUTH_TYPES.NONE) {
         delete normalized.apiToken;
         delete normalized.apiKey;
+        delete normalized.username;
+        delete normalized.password;
     }
 
     return normalized;
@@ -125,6 +140,8 @@ const updateProvider = async (id, data, adminId) => {
         supportedFeatures,
         integrationType,
         authType,
+        username,
+        password,
     } = normalizeProviderPayload(data);
 
     if (name !== undefined) provider.name = name;
@@ -134,6 +151,8 @@ const updateProvider = async (id, data, adminId) => {
     if (authType !== undefined) provider.authType = authType;
     if (apiToken !== undefined && hasSecretValue(apiToken)) provider.apiToken = apiToken;
     if (apiKey !== undefined && hasSecretValue(apiKey)) provider.apiKey = apiKey;
+    if (username !== undefined && hasSecretValue(username)) provider.username = username;
+    if (password !== undefined && hasSecretValue(password)) provider.password = password;
     if (isActive !== undefined) provider.isActive = isActive;
     if (syncInterval !== undefined) provider.syncInterval = syncInterval;
     if (supportedFeatures !== undefined) provider.supportedFeatures = supportedFeatures;

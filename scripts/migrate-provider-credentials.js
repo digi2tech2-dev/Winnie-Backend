@@ -10,7 +10,7 @@ const {
     isEncryptedSecret,
 } = require('../src/shared/utils/secretEncryption');
 
-const CREDENTIAL_FIELDS = ['apiToken', 'apiKey'];
+const CREDENTIAL_FIELDS = ['apiToken', 'apiKey', 'username', 'password'];
 
 const migrateProviderCredentials = async () => {
     const providers = await Provider.find({});

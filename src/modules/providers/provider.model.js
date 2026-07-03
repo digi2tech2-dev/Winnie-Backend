@@ -7,7 +7,7 @@ const {
     hasSecretValue,
 } = require('../../shared/utils/secretEncryption');
 
-const CREDENTIAL_FIELDS = ['apiToken', 'apiKey'];
+const CREDENTIAL_FIELDS = ['apiToken', 'apiKey', 'username', 'password'];
 const PROVIDER_INTEGRATION_TYPES = Object.freeze({
     API: 'API',
 });
@@ -76,7 +76,7 @@ const providerSchema = new mongoose.Schema(
 
         /**
          * Credential strategy selected by admin quick-create/edit screens.
-         * Secrets themselves remain in apiToken/apiKey and are encrypted.
+         * Secrets themselves remain in credential fields and are encrypted.
          */
         authType: {
             type: String,
@@ -100,6 +100,26 @@ const providerSchema = new mongoose.Schema(
          * @deprecated — kept for backward compatibility, maps to apiToken.
          */
         apiKey: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        /**
+         * Optional username for USERNAME_PASSWORD providers.
+         * Stored encrypted at rest and never returned by API serializers.
+         */
+        username: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        /**
+         * Optional password for USERNAME_PASSWORD providers.
+         * Stored encrypted at rest and never returned by API serializers.
+         */
+        password: {
             type: String,
             trim: true,
             default: null,
@@ -151,18 +171,34 @@ providerSchema.virtual('effectiveToken').get(function () {
     return getProviderCredential(this.apiToken || this.apiKey || null);
 });
 
+providerSchema.virtual('effectiveUsername').get(function () {
+    return getProviderCredential(this.username || null);
+});
+
+providerSchema.virtual('effectivePassword').get(function () {
+    return getProviderCredential(this.password || null);
+});
+
 const addCredentialStatus = (doc, ret) => {
     const hasApiToken = hasSecretValue(doc.apiToken);
     const hasApiKey = hasSecretValue(doc.apiKey);
+    const hasUsername = hasSecretValue(doc.username);
+    const hasPassword = hasSecretValue(doc.password);
 
     ret.hasApiToken = hasApiToken;
     ret.hasApiKey = hasApiKey;
-    ret.credentialConfigured = hasApiToken || hasApiKey;
+    ret.hasUsername = hasUsername;
+    ret.hasPassword = hasPassword;
+    ret.credentialConfigured = hasApiToken || hasApiKey || hasUsername || hasPassword;
     ret.credentialsConfigured = ret.credentialConfigured;
 
     delete ret.apiToken;
     delete ret.apiKey;
+    delete ret.username;
+    delete ret.password;
     delete ret.effectiveToken;
+    delete ret.effectiveUsername;
+    delete ret.effectivePassword;
     return ret;
 };
 

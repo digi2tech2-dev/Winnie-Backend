@@ -190,6 +190,24 @@ class BaseProviderAdapter {
         );
     }
 
+    _resolveUsername() {
+        const { getProviderCredential } = require('../../../shared/utils/secretEncryption');
+        return getProviderCredential(
+            this.provider.username
+            || this.provider.effectiveUsername
+            || null
+        );
+    }
+
+    _resolvePassword() {
+        const { getProviderCredential } = require('../../../shared/utils/secretEncryption');
+        return getProviderCredential(
+            this.provider.password
+            || this.provider.effectivePassword
+            || null
+        );
+    }
+
     /**
      * Convert a provider-specific status string to the unified platform status.
      *

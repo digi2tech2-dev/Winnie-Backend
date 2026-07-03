@@ -92,25 +92,55 @@ describe('provider create/update credential behavior', () => {
             baseUrl: 'https://provider.example.com',
             apiToken: 'plain-token',
             apiKey: 'legacy-key',
+            username: 'provider-user',
+            password: 'provider-password',
         }, adminId);
 
         const stored = await Provider.findById(provider._id).lean();
         expect(stored.apiToken).toMatch(/^enc:v1:/);
         expect(stored.apiKey).toMatch(/^enc:v1:/);
+        expect(stored.username).toMatch(/^enc:v1:/);
+        expect(stored.password).toMatch(/^enc:v1:/);
         expect(stored.apiToken).not.toContain('plain-token');
         expect(stored.apiKey).not.toContain('legacy-key');
+        expect(stored.username).not.toContain('provider-user');
+        expect(stored.password).not.toContain('provider-password');
         expect(decryptSecret(stored.apiToken)).toBe('plain-token');
         expect(decryptSecret(stored.apiKey)).toBe('legacy-key');
+        expect(decryptSecret(stored.username)).toBe('provider-user');
+        expect(decryptSecret(stored.password)).toBe('provider-password');
 
         const response = provider.toJSON();
         expect(response.apiToken).toBeUndefined();
         expect(response.apiKey).toBeUndefined();
+        expect(response.username).toBeUndefined();
+        expect(response.password).toBeUndefined();
         expect(response.hasApiToken).toBe(true);
         expect(response.hasApiKey).toBe(true);
+        expect(response.hasUsername).toBe(true);
+        expect(response.hasPassword).toBe(true);
         expect(response.credentialConfigured).toBe(true);
         expect(response.credentialsConfigured).toBe(true);
         expect(JSON.stringify(response)).not.toContain('plain-token');
+        expect(JSON.stringify(response)).not.toContain('provider-user');
+        expect(JSON.stringify(response)).not.toContain('provider-password');
         expect(JSON.stringify(response)).not.toContain('enc:v1:');
+    });
+
+    it('maps bearerToken quick-create payloads into encrypted apiToken storage', async () => {
+        const provider = await adminProviderService.createProvider({
+            name: 'bearer-alias',
+            baseUrl: 'https://provider.example.com',
+            authType: 'BEARER_TOKEN',
+            bearerToken: 'bearer-secret',
+        }, adminId);
+
+        const stored = await Provider.findById(provider._id).lean();
+
+        expect(stored.authType).toBe('BEARER_TOKEN');
+        expect(stored.apiToken).toMatch(/^enc:v1:/);
+        expect(decryptSecret(stored.apiToken)).toBe('bearer-secret');
+        expect(stored.apiKey).toBeNull();
     });
 
     it('keeps an existing credential when update sends a blank credential value', async () => {
@@ -143,6 +173,25 @@ describe('provider create/update credential behavior', () => {
         expect(decryptSecret(after.apiToken)).toBe('new-token');
     });
 
+    it('keeps username/password credentials when update sends blank credential values', async () => {
+        const provider = await adminProviderService.createProvider({
+            name: 'blank-user-pass',
+            baseUrl: 'https://provider.example.com',
+            authType: 'USERNAME_PASSWORD',
+            username: 'old-user',
+            password: 'old-password',
+        }, adminId);
+        const before = await Provider.findById(provider._id).lean();
+
+        await adminProviderService.updateProvider(provider._id, { username: '', password: '' }, adminId);
+        const after = await Provider.findById(provider._id).lean();
+
+        expect(after.username).toBe(before.username);
+        expect(after.password).toBe(before.password);
+        expect(decryptSecret(after.username)).toBe('old-user');
+        expect(decryptSecret(after.password)).toBe('old-password');
+    });
+
     it('provider list/detail serialization does not expose plaintext or encrypted credentials', async () => {
         const provider = await adminProviderService.createProvider({
             name: 'safe-list',
@@ -169,13 +218,19 @@ describe('provider internal credential use', () => {
             name: 'adapter-token',
             baseUrl: 'https://provider.example.com',
             apiToken: 'adapter-secret',
+            username: 'adapter-user',
+            password: 'adapter-password',
         });
         const stored = await Provider.findById(provider._id);
 
         const adapter = new TokenProbeAdapter(stored);
 
         expect(stored.apiToken).toMatch(/^enc:v1:/);
+        expect(stored.username).toMatch(/^enc:v1:/);
+        expect(stored.password).toMatch(/^enc:v1:/);
         expect(adapter._resolveToken()).toBe('adapter-secret');
+        expect(adapter._resolveUsername()).toBe('adapter-user');
+        expect(adapter._resolvePassword()).toBe('adapter-password');
     });
 
     it('test connection responses do not include raw or encrypted credentials', async () => {
@@ -208,6 +263,8 @@ describe('provider credential migration', () => {
                 baseUrl: 'https://legacy.example.com',
                 apiToken: 'legacy-token',
                 apiKey: 'legacy-key',
+                username: 'legacy-user',
+                password: 'legacy-password',
                 isActive: true,
                 syncInterval: 60,
                 supportedFeatures: [],
@@ -234,17 +291,21 @@ describe('provider credential migration', () => {
         const firstRun = await migrateProviderCredentials();
         const migrated = await Provider.findById(legacyId).lean();
 
-        expect(firstRun.encryptedFields).toBe(2);
+        expect(firstRun.encryptedFields).toBe(4);
         expect(firstRun.updatedProviders).toBe(1);
         expect(isEncryptedSecret(migrated.apiToken)).toBe(true);
         expect(isEncryptedSecret(migrated.apiKey)).toBe(true);
+        expect(isEncryptedSecret(migrated.username)).toBe(true);
+        expect(isEncryptedSecret(migrated.password)).toBe(true);
         expect(decryptSecret(migrated.apiToken)).toBe('legacy-token');
         expect(decryptSecret(migrated.apiKey)).toBe('legacy-key');
+        expect(decryptSecret(migrated.username)).toBe('legacy-user');
+        expect(decryptSecret(migrated.password)).toBe('legacy-password');
 
         const secondRun = await migrateProviderCredentials();
 
         expect(secondRun.encryptedFields).toBe(0);
         expect(secondRun.updatedProviders).toBe(0);
-        expect(secondRun.skippedEncryptedFields).toBeGreaterThanOrEqual(3);
+        expect(secondRun.skippedEncryptedFields).toBeGreaterThanOrEqual(5);
     });
 });

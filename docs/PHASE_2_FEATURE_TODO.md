@@ -46,7 +46,7 @@ Remaining risks: reversal behavior on refunds is intentionally reserved; advance
 
 Purpose: let users request different pricing groups or sub-agent status for admin review.
 
-Phase 2.4 status: implemented as a safe request workflow with `GroupChangeRequest`, customer request/cancel routes, admin review routes, explicit supervisor permissions, and business-level sub-agent flags on `User`. See `docs/GROUP_REQUESTS_ARCHITECTURE.md`.
+Phase 2.4 status: implemented as a safe request workflow with `GroupChangeRequest`, customer request/cancel routes, admin review routes, explicit supervisor permissions, and business-level sub-agent flags on `User`. Phase 2.5T adds an admin-only direct group assignment route for operational corrections; it updates `User.groupId` only, leaves roles untouched, and affects future order pricing only. See `docs/GROUP_REQUESTS_ARCHITECTURE.md`.
 
 Current customer endpoints: `GET /api/me/group-change-requests/options`, `POST /api/me/group-change-requests`, `GET /api/me/group-change-requests`, `GET /api/me/group-change-requests/:id`, `POST /api/me/group-change-requests/:id/cancel`.
 
@@ -55,6 +55,14 @@ Current admin endpoints: `GET /api/admin/group-change-requests`, `GET /api/admin
 Future dependencies: richer group eligibility policy, optional sub-agent profile fields, frontend compatibility aliases, and any hierarchy/reporting model.
 
 Remaining risks: pricing changes naturally apply to future orders only after user group update; sub-agent is intentionally not a privileged role and does not grant permissions.
+
+## Admin User Wallet Controls
+
+Phase 2.5T status: implemented admin user wallet controls on top of existing wallet routes. Admins can add balance, deduct balance, update credit/debt limit with a reason, and directly assign an active pricing group. Add/deduct actions create real `ADMIN_ADJUSTMENT` wallet transactions and audit logs. Credit-limit updates are account settings and do not create wallet movement rows. Group assignment is admin-only, validates active/non-deleted groups, and does not change user roles or historical orders.
+
+Current endpoints: `GET /api/admin/wallets/:userId`, `GET /api/admin/wallets/:userId/transactions`, `POST /api/admin/wallets/:userId/add`, `POST /api/admin/wallets/:userId/deduct`, `PATCH /api/admin/users/:id/credit-limit`, `PATCH /api/admin/users/:id/group`.
+
+Remaining risks: manual add/deduct entries do not have natural idempotency keys; frontend group selection depends on access to the admin groups endpoint.
 
 ## Updated Wallet Ledger Types
 

@@ -50,6 +50,8 @@ Orders debit wallet balance atomically, create order records, and either fulfill
 
 Wallet transactions keep legacy `type` values (`CREDIT`, `DEBIT`, `REFUND`, `DEBT_ADJUSTMENT`) and now carry Phase 2 ledger fields such as `semanticType`, `direction`, `sourceType`, `sourceId`, `currency`, metadata, actor fields, and optional idempotency keys. See `docs/LEDGER_ARCHITECTURE.md`.
 
+Admin wallet controls are available from the admin user wallet page. Admin add/deduct operations use the wallet adjustment service and always create ledger and audit records. Credit/debt limit updates change the account allowance only and do not create money transactions. Admin direct group assignment updates `User.groupId` for future order pricing only and does not change role or supervisor permissions.
+
 Online payments are prepared for wallet top-ups only. `POST /api/payments/intents` validates admin-configured `paymentRiskLimits` before gateway adapter creation, then creates a payment intent only when the risk check allows it. The intent path never credits the wallet. In development/test, the mock gateway can confirm success and credit the wallet once with `CARD_PAYMENT_SUCCESS`. Real gateways and production webhooks remain future work. See `docs/PAYMENTS_ARCHITECTURE.md`.
 
 Referrals are active for invitation tracking and global commission settings. Eligible successful wallet credits (`DEPOSIT_APPROVED` and `CARD_PAYMENT_SUCCESS`) can credit the inviter with `REFERRAL_COMMISSION` when the configured percentage is greater than zero. Admin wallet adjustments, order debits, and order refunds do not trigger referral commission. See `docs/REFERRALS_ARCHITECTURE.md`.

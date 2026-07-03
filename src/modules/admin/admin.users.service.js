@@ -12,6 +12,7 @@
 
 const crypto = require('crypto');
 const { User, USER_STATUS, ROLES } = require('../users/user.model');
+const Group = require('../groups/group.model');
 const { NotFoundError, ConflictError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const {
@@ -50,6 +51,21 @@ const _sanitizeUserSnapshot = (snapshot) => {
     delete sanitized.emailVerificationExpires;
     delete sanitized.apiToken;
     return sanitized;
+};
+
+const _resolveAssignableGroup = async (groupId) => {
+    if (groupId === null) return null;
+
+    const group = await Group.findOne({ _id: groupId, deletedAt: null });
+    if (!group) throw new NotFoundError('Group');
+    if (!group.isActive) {
+        throw new BusinessRuleError(
+            `Group '${group.name}' is currently inactive and cannot be assigned to users.`,
+            'GROUP_INACTIVE'
+        );
+    }
+
+    return group;
 };
 
 // ─── List ──────────────────────────────────────────────────────────────────────
@@ -166,7 +182,10 @@ const updateUser = async (id, data, adminId) => {
         }
     }
     if (verified !== undefined) user.verified = verified;
-    if (groupId !== undefined) user.groupId = groupId;
+    if (groupId !== undefined) {
+        const group = await _resolveAssignableGroup(groupId);
+        user.groupId = group?._id || null;
+    }
     if (permissions !== undefined) {
         if (user.role !== ROLES.SUPERVISOR) {
             throw new BusinessRuleError('Only supervisors can be assigned permissions.', 'INVALID_PERMISSION_TARGET');
@@ -503,11 +522,16 @@ const updateUserAvatar = async (id, avatarUrl, adminId) => {
 /**
  * Admin update of a user's credit limit (overdraft allowance).
  */
-const updateUserCreditLimit = async (id, creditLimit, adminId) => {
+const updateUserCreditLimit = async (id, creditLimit, adminId, reason = null) => {
     const user = await _findOrFail(id);
+    const parsedCreditLimit = Number(creditLimit);
+
+    if (!Number.isFinite(parsedCreditLimit) || parsedCreditLimit < 0) {
+        throw new BusinessRuleError('Credit limit cannot be negative.', 'INVALID_CREDIT_LIMIT');
+    }
 
     const previousCreditLimit = user.creditLimit || 0;
-    user.creditLimit = Math.max(0, Number(creditLimit) || 0);
+    user.creditLimit = parsedCreditLimit;
     await user.save();
 
     createAuditLog({
@@ -516,7 +540,38 @@ const updateUserCreditLimit = async (id, creditLimit, adminId) => {
         action: ADMIN_ACTIONS.USER_UPDATED,
         entityType: ENTITY_TYPES.USER,
         entityId: user._id,
-        metadata: { field: 'creditLimit', previousCreditLimit, newCreditLimit: user.creditLimit },
+        metadata: { field: 'creditLimit', previousCreditLimit, newCreditLimit: user.creditLimit, reason },
+    });
+
+    return user;
+};
+
+const updateUserGroup = async (id, { groupId, reason } = {}, adminId) => {
+    const user = await _findOrFail(id);
+    const group = await _resolveAssignableGroup(groupId);
+
+    const previousGroupId = user.groupId?._id || user.groupId || null;
+    const previousGroupName = user.groupId?.name || null;
+    const previousRole = user.role;
+
+    user.groupId = group._id;
+    await user.save();
+    await user.populate('groupId', 'name percentage isActive');
+
+    createAuditLog({
+        actorId: adminId,
+        actorRole: ACTOR_ROLES.ADMIN,
+        action: USER_ACTIONS.GROUP_CHANGED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: {
+            previousGroupId,
+            previousGroupName,
+            newGroupId: group._id,
+            newGroupName: group.name,
+            reason,
+            roleUnchanged: user.role === previousRole,
+        },
     });
 
     return user;
@@ -536,6 +591,7 @@ module.exports = {
     updateSupervisorPermissions,
     updateUserCurrency,
     updateUserCreditLimit,
+    updateUserGroup,
     resetUserPassword,
     updateUserAvatar,
 };

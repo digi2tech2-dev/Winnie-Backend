@@ -122,6 +122,20 @@ const updateCreditLimitSchema = Joi.object({
         'number.min': 'Credit limit cannot be negative',
         'any.required': 'creditLimit is required',
     }),
+    reason: Joi.string().trim().min(3).max(255).required().messages({
+        'any.required': 'Reason is required',
+        'string.min': 'Reason must be at least 3 characters',
+    }),
+});
+
+const updateUserGroupSchema = Joi.object({
+    groupId: objectId().required().messages({
+        'any.required': 'groupId is required',
+    }),
+    reason: Joi.string().trim().min(3).max(255).required().messages({
+        'any.required': 'Reason is required',
+        'string.min': 'Reason must be at least 3 characters',
+    }),
 });
 
 const resetUserPasswordSchema = Joi.object({
@@ -155,6 +169,9 @@ const createProviderSchema = Joi.object({
     authType: Joi.string().trim().uppercase().valid('NONE', 'API_KEY', 'BEARER_TOKEN', 'USERNAME_PASSWORD').default('NONE'),
     apiToken: Joi.string().trim().max(4096).allow('', null),
     apiKey: Joi.string().trim().max(4096).allow('', null),
+    bearerToken: Joi.string().trim().max(4096).allow('', null),
+    username: Joi.string().trim().max(4096).allow('', null),
+    password: Joi.string().trim().max(4096).allow('', null),
     isActive: Joi.boolean().default(true),
     syncInterval: Joi.number().integer().min(0).default(60),
     supportedFeatures: Joi.array().items(Joi.string()).default([]),
@@ -170,6 +187,9 @@ const updateProviderSchema = Joi.object({
     authType: Joi.string().trim().uppercase().valid('NONE', 'API_KEY', 'BEARER_TOKEN', 'USERNAME_PASSWORD'),
     apiToken: Joi.string().trim().max(4096).allow('', null),
     apiKey: Joi.string().trim().max(4096).allow('', null),
+    bearerToken: Joi.string().trim().max(4096).allow('', null),
+    username: Joi.string().trim().max(4096).allow('', null),
+    password: Joi.string().trim().max(4096).allow('', null),
     isActive: Joi.boolean(),
     syncInterval: Joi.number().integer().min(0),
     supportedFeatures: Joi.array().items(Joi.string()),
@@ -339,6 +359,7 @@ module.exports = {
         updateSupervisorPermissions: updateSupervisorPermissionsSchema,
         updateUserCurrency: updateUserCurrencySchema,
         updateCreditLimit: updateCreditLimitSchema,
+        updateUserGroup: updateUserGroupSchema,
         resetUserPassword: resetUserPasswordSchema,
         updateUserAvatar: updateUserAvatarSchema,
         // Providers

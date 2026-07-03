@@ -55,6 +55,7 @@ Reserved means the enum accepts the value, but no current business flow writes i
 - Manual failed-order refund writes `type: REFUND`, `semanticType: ORDER_REFUND`, `sourceType: ORDER`.
 - Provider failure and cancellation refunds write `type: REFUND`, `semanticType: ORDER_REFUND`, `sourceType: ORDER`.
 - Admin add, deduct, and set-balance operations write `semanticType: ADMIN_ADJUSTMENT`.
+- Phase 2.5T admin user wallet controls expose add/deduct only from the user wallet page; each action still writes a real `ADMIN_ADJUSTMENT` ledger record and audit metadata.
 - Bulk debt inflation and deflation keep `type: DEBT_ADJUSTMENT` and write `semanticType: DEBT_ADJUSTMENT`.
 - Non-production mock wallet top-up confirmation writes `type: CREDIT`, `semanticType: CARD_PAYMENT_SUCCESS`, `sourceType: PAYMENT`.
 - Referral commission writes `type: CREDIT`, `semanticType: REFERRAL_COMMISSION`, `sourceType: REFERRAL`.
@@ -102,3 +103,4 @@ Do not infer deposit/order/admin semantics blindly for old `CREDIT` or `DEBIT` r
 - `reference` is retained as a legacy populated field and may point at non-order ids in older flows.
 - Real card gateway, webhook, and referral reversal logic is not implemented.
 - Wallet stats still aggregate by legacy `type` to preserve existing behavior.
+- Credit/debt limit changes are account settings, not money movement, so they do not create wallet transaction rows.
