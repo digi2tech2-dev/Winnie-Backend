@@ -23,6 +23,12 @@ const providerService = require('../providers/provider.service');
 const ppService = require('../providers/providerProduct.service');
 const productService = require('../products/product.service');
 const { ProviderProduct } = require('../providers/providerProduct.model');
+const { createAuditLog } = require('../audit/audit.service');
+const {
+    PRODUCT_ACTIONS,
+    ENTITY_TYPES,
+    ACTOR_ROLES,
+} = require('../audit/audit.constants');
 const {
     AuthorizationError,
     BusinessRuleError,
@@ -67,6 +73,12 @@ const PROVIDER_LINK_FIELDS = new Set([
     'supplierId',
     'providerProductId',
     'externalProductId',
+    'fulfillmentMode',
+    'linkMode',
+    'mode',
+    'syncPrice',
+    'syncName',
+    'syncLimits',
 ]);
 
 const assertSupervisorDoesNotSubmitPricing = (req) => {
@@ -103,7 +115,7 @@ const assertProviderLinkPayloadOnly = (req) => {
     if (!unsafeFields.length) return;
 
     throw new AuthorizationError(
-        `Provider linking only accepts providerId and providerProductId. Blocked fields: ${unsafeFields.join(', ')}.`
+        `Provider linking only accepts provider/link mode and sync option fields. Blocked fields: ${unsafeFields.join(', ')}.`
     );
 };
 
@@ -125,6 +137,15 @@ const isObjectIdLike = (value) => (
 );
 
 const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(String(value || '').trim());
+
+const parseBoolean = (value, defaultValue = false) => {
+    if (value === undefined || value === null || value === '') return defaultValue;
+    if (typeof value === 'boolean') return value;
+    const normalized = String(value).trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+    return defaultValue;
+};
 
 const toPlainCatalogValue = (value) => {
     if (value && typeof value.toObject === 'function') {
@@ -228,23 +249,69 @@ const sanitizeAdminProductResponse = (payload, user) => {
         : sanitized;
 };
 
-const sanitizeProviderOption = (provider) => ({
-    id: String(provider?._id || provider?.id || ''),
-    name: String(provider?.name || '').trim(),
-    isActive: provider?.isActive !== false,
-});
+const sanitizeProviderOption = (provider) => {
+    const plainProvider = toPlainCatalogValue(provider) || {};
+    const id = String(plainProvider._id || plainProvider.id || '');
+    const slug = String(plainProvider.slug || '').trim();
 
-const sanitizeProviderProductOption = (providerProduct) => ({
-    id: String(providerProduct?._id || providerProduct?.id || ''),
-    name: String(providerProduct?.translatedName || providerProduct?.rawName || '').trim(),
-    providerName: String(providerProduct?.provider?.name || '').trim(),
-    categoryLabel: null,
-    minQty: providerProduct?.minQty ?? null,
-    maxQty: providerProduct?.maxQty ?? null,
-    isActive: providerProduct?.isActive !== false,
-});
+    return {
+        id,
+        name: String(plainProvider.name || '').trim(),
+        slug,
+        code: slug || id,
+        isActive: plainProvider.isActive !== false,
+        authType: String(plainProvider.authType || 'NONE').toUpperCase(),
+        credentialConfigured: Boolean(
+            plainProvider.credentialConfigured
+            || plainProvider.credentialsConfigured
+        ),
+        credentialsConfigured: Boolean(
+            plainProvider.credentialConfigured
+            || plainProvider.credentialsConfigured
+        ),
+        hasCredential: Boolean(
+            plainProvider.credentialConfigured
+            || plainProvider.credentialsConfigured
+        ),
+        supportedFeatures: Array.isArray(plainProvider.supportedFeatures)
+            ? plainProvider.supportedFeatures.map((feature) => String(feature || '').trim()).filter(Boolean)
+            : [],
+    };
+};
+
+const sanitizeProviderProductOption = (providerProduct, user) => {
+    const plainProduct = toPlainCatalogValue(providerProduct) || {};
+    const provider = toPlainCatalogValue(plainProduct.provider) || {};
+    const externalProductId = String(plainProduct.externalProductId || '').trim();
+    const option = {
+        id: String(plainProduct._id || plainProduct.id || ''),
+        providerProductId: String(plainProduct._id || plainProduct.id || ''),
+        externalId: externalProductId,
+        externalProductId,
+        name: String(plainProduct.translatedName || plainProduct.rawName || '').trim(),
+        providerName: String(provider.name || '').trim(),
+        category: null,
+        categoryLabel: null,
+        minQty: plainProduct.minQty ?? null,
+        maxQty: plainProduct.maxQty ?? null,
+        isActive: plainProduct.isActive !== false,
+    };
+
+    if (!isSupervisorRole(user)) {
+        option.price = plainProduct.rawPrice == null ? null : String(plainProduct.rawPrice);
+        option.providerPrice = option.price;
+        option.currency = String(plainProduct.currency || 'USD').toUpperCase();
+    }
+
+    return option;
+};
 
 const resolveProviderLinkPayload = (body = {}) => {
+    const mode = String(body.fulfillmentMode || body.linkMode || body.mode || '').trim().toLowerCase();
+    if (['manual', 'unlink', 'none'].includes(mode)) {
+        return { mode: 'manual' };
+    }
+
     const providerId = String(body.providerId || body.supplierId || '').trim();
     const providerProductId = String(body.providerProductId || body.externalProductId || '').trim();
 
@@ -255,7 +322,27 @@ const resolveProviderLinkPayload = (body = {}) => {
         );
     }
 
-    return { providerId, providerProductId };
+    return {
+        mode: 'automatic',
+        providerId,
+        providerProductId,
+        syncPrice: parseBoolean(body.syncPrice, true),
+        syncName: parseBoolean(body.syncName, false),
+        syncLimits: parseBoolean(body.syncLimits, false),
+    };
+};
+
+const auditProductProviderChange = (req, product, metadata = {}) => {
+    void createAuditLog({
+        actorId: req.user?._id,
+        actorRole: isSupervisorRole(req.user) ? ACTOR_ROLES.SUPERVISOR : ACTOR_ROLES.ADMIN,
+        action: PRODUCT_ACTIONS.PROVIDER_CHANGED,
+        entityType: ENTITY_TYPES.PRODUCT,
+        entityId: product?._id || req.params.id,
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        metadata,
+    });
 };
 
 // ── Sync ──────────────────────────────────────────────────────────────────────
@@ -365,22 +452,24 @@ const listProductProviderOptions = catchAsync(async (req, res) => {
 
 /**
  * GET /admin/product-provider-options/:providerId/products
- * Safe provider product picker for blind supervisor provider linking.
- * Does not return provider prices, raw payloads, external IDs, or internal mapping data.
+ * Safe provider product picker for product provider linking.
+ * Does not return raw payloads, provider credentials, or internal mapping data.
  */
 const listProductProviderProductOptions = catchAsync(async (req, res) => {
-    const { search = '', page = 1, limit = 600 } = req.query;
+    const { search = '', page = 1, limit = 600, includeInactive } = req.query;
     const { providerId } = req.params;
 
     if (!isValidObjectId(providerId)) {
         throw new BusinessRuleError('Valid providerId is required.', 'INVALID_PROVIDER_ID');
     }
 
-    const filter = { provider: providerId, isActive: true };
+    const filter = { provider: providerId };
+    const canIncludeInactive = !isSupervisorRole(req.user) && includeInactive === 'true';
+    if (!canIncludeInactive) filter.isActive = true;
     if (search) {
         const escapedSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const re = new RegExp(escapedSearch, 'i');
-        filter.$or = [{ rawName: re }, { translatedName: re }];
+        filter.$or = [{ rawName: re }, { translatedName: re }, { externalProductId: re }];
     }
 
     const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 600, 1), 1000);
@@ -389,7 +478,7 @@ const listProductProviderProductOptions = catchAsync(async (req, res) => {
 
     const [products, total] = await Promise.all([
         ProviderProduct.find(filter)
-            .select('provider rawName translatedName minQty maxQty isActive')
+            .select('provider externalProductId rawName translatedName rawPrice minQty maxQty isActive')
             .sort({ translatedName: 1, rawName: 1 })
             .skip(skip)
             .limit(parsedLimit)
@@ -399,7 +488,7 @@ const listProductProviderProductOptions = catchAsync(async (req, res) => {
 
     sendPaginated(
         res,
-        products.map(sanitizeProviderProductOption).filter((product) => product.id && product.name),
+        products.map((product) => sanitizeProviderProductOption(product, req.user)).filter((product) => product.id && product.name),
         {
             page: parsedPage,
             limit: parsedLimit,
@@ -582,10 +671,31 @@ const updateProduct = catchAsync(async (req, res) => {
  */
 const linkProductProvider = catchAsync(async (req, res) => {
     assertProviderLinkPayloadOnly(req);
-    const { providerId, providerProductId } = resolveProviderLinkPayload(req.body);
+    const {
+        mode,
+        providerId,
+        providerProductId,
+        syncPrice,
+        syncName,
+        syncLimits,
+    } = resolveProviderLinkPayload(req.body);
+
+    if (mode === 'manual') {
+        const product = await productService.unlinkProductProvider(req.params.id);
+        auditProductProviderChange(req, product, {
+            mode: 'manual',
+            providerCleared: true,
+        });
+
+        if (isSupervisorRole(req.user)) {
+            return sendSuccess(res, getSafeCurrentLinkageSummary(product), 'Product provider link removed.');
+        }
+
+        return sendSuccess(res, sanitizeAdminProductResponse(product, req.user), 'Product provider link removed.');
+    }
 
     const providerProduct = await ProviderProduct.findById(providerProductId)
-        .select('provider isActive')
+        .select('provider externalProductId rawName translatedName rawPrice rawPayload minQty maxQty isActive')
         .populate('provider', 'name isActive');
 
     if (!providerProduct) throw new NotFoundError('ProviderProduct');
@@ -602,11 +712,32 @@ const linkProductProvider = catchAsync(async (req, res) => {
         throw new BusinessRuleError('The selected provider product is inactive.', 'PROVIDER_PRODUCT_INACTIVE');
     }
 
-    const product = await productService.updateProduct(req.params.id, {
+    const productUpdate = {
         provider: providerProduct.provider?._id || providerId,
         providerProduct: providerProduct._id,
-        pricingMode: 'sync',
-        syncPriceWithProvider: true,
+        executionType: 'automatic',
+        pricingMode: syncPrice ? 'sync' : 'manual',
+        syncPriceWithProvider: syncPrice,
+    };
+
+    if (syncName) {
+        productUpdate.name = String(providerProduct.translatedName || providerProduct.rawName || '').trim();
+    }
+
+    if (syncLimits) {
+        productUpdate.minQty = providerProduct.minQty;
+        productUpdate.maxQty = providerProduct.maxQty;
+    }
+
+    const product = await productService.updateProduct(req.params.id, productUpdate);
+    auditProductProviderChange(req, product, {
+        mode: 'automatic',
+        providerId,
+        providerProductId,
+        providerProductExternalId: providerProduct.externalProductId,
+        syncPrice,
+        syncName,
+        syncLimits,
     });
 
     if (isSupervisorRole(req.user)) {

@@ -22,7 +22,7 @@
  *   - Toggle active / deactivate
  */
 
-const { Product, PRICING_MODES, MARKUP_TYPES, computeFinalPrice } = require('./product.model');
+const { Product, PRICING_MODES, MARKUP_TYPES, EXECUTION_TYPES, computeFinalPrice } = require('./product.model');
 const { ProviderProduct } = require('../providers/providerProduct.model');
 const { isPositive, add } = require('../../shared/utils/decimalPrecision');
 const {
@@ -111,10 +111,11 @@ const createProduct = async ({
         throw new BusinessRuleError('maxQty must be >= minQty.', 'INVALID_QTY_RANGE');
     }
 
-    // If a provider link is supplied, default executionType to 'automatic'
-    const resolvedExecutionType = (provider && executionType === 'manual')
-        ? 'automatic'
-        : executionType;
+    // Products become automatic only after a concrete provider product link exists.
+    const hasProviderProductLink = Boolean(provider && providerProduct);
+    const resolvedExecutionType = hasProviderProductLink
+        ? (executionType === EXECUTION_TYPES.MANUAL ? EXECUTION_TYPES.AUTOMATIC : executionType)
+        : EXECUTION_TYPES.MANUAL;
 
     // ── Pricing calculation ───────────────────────────────────────────────
     let resolvedBasePrice = String(basePrice);
@@ -362,12 +363,21 @@ const updateProduct = async (productId, updates) => {
             const canonicalRawPrice = String(
                 newPP.rawPrice || newPP.rawPayload?.product_price || 0
             );
-            const newFinalPrice = computeFinalPrice(
-                canonicalRawPrice, effectiveMarkupType, effectiveMarkupValue
-            );
             safe.providerPrice = canonicalRawPrice;
-            safe.finalPrice = newFinalPrice ?? canonicalRawPrice;
-            safe.basePrice = safe.finalPrice;
+
+            if (effectivePricingMode === PRICING_MODES.SYNC || safe.syncPriceWithProvider === true) {
+                const newFinalPrice = computeFinalPrice(
+                    canonicalRawPrice, effectiveMarkupType, effectiveMarkupValue
+                );
+                safe.finalPrice = newFinalPrice ?? canonicalRawPrice;
+                safe.basePrice = safe.finalPrice;
+            } else if (basePriceChanged) {
+                safe.basePrice = String(safe.basePrice);
+                safe.finalPrice = safe.basePrice;
+            } else if (safe.finalPrice === undefined) {
+                safe.finalPrice = product.finalPrice ?? product.basePrice;
+            }
+
             // Update provider reference to match the new ProviderProduct's provider
             if (newPP.provider) {
                 safe.provider = newPP.provider;
@@ -439,6 +449,13 @@ const updateProduct = async (productId, updates) => {
         safe.syncPriceWithProvider = safe.pricingMode === PRICING_MODES.SYNC;
     }
 
+    const nextProviderProduct = safe.providerProduct !== undefined
+        ? safe.providerProduct
+        : product.providerProduct;
+    if (safe.executionType === EXECUTION_TYPES.AUTOMATIC && !nextProviderProduct) {
+        safe.executionType = EXECUTION_TYPES.MANUAL;
+    }
+
     Object.assign(product, safe);
     await product.save();
     return product.populate([
@@ -489,6 +506,25 @@ const syncProductPriceFromProvider = async (productId) => {
     if (providerProduct.provider?._id) {
         product.provider = providerProduct.provider._id;
     }
+
+    await product.save();
+    return product.populate([
+        { path: 'provider', select: 'name slug' },
+        { path: 'providerProduct', select: 'rawName translatedName externalProductId rawPrice minQty maxQty isActive' },
+    ]);
+};
+
+const unlinkProductProvider = async (productId) => {
+    const product = await Product.findById(productId);
+    if (!product) throw new NotFoundError('Product');
+
+    product.provider = null;
+    product.providerProduct = null;
+    product.providerPrice = null;
+    product.pricingMode = PRICING_MODES.MANUAL;
+    product.syncPriceWithProvider = false;
+    product.executionType = EXECUTION_TYPES.MANUAL;
+    product.finalPrice = product.basePrice;
 
     await product.save();
     return product.populate([
@@ -556,6 +592,7 @@ module.exports = {
     publishFromProviderProduct,
     updateProduct,
     syncProductPriceFromProvider,
+    unlinkProductProvider,
     toggleProductStatus,
     deleteProduct,
     getExternalProductId,
