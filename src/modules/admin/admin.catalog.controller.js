@@ -50,6 +50,8 @@ const SUPERVISOR_SAFE_PRODUCT_UPDATE_FIELDS = new Set([
     'categoryId',
     'displayOrder',
     'isActive',
+    'visibleInStore',
+    'isPaused',
     'status',
 ]);
 
@@ -561,6 +563,9 @@ const createProduct = catchAsync(async (req, res) => {
         image,
         displayOrder,
         isActive,
+        visibleInStore,
+        isPaused,
+        status,
         executionType,
         orderFields,
         providerMapping,
@@ -576,6 +581,9 @@ const createProduct = catchAsync(async (req, res) => {
         image: image ?? null,
         displayOrder: displayOrder ?? 0,
         isActive: isActive ?? true,
+        visibleInStore: visibleInStore ?? true,
+        isPaused: isPaused ?? false,
+        status: status ?? 'available',
         executionType: executionType ?? 'manual',
         orderFields: orderFields ?? [],
         providerMapping: providerMapping ?? {},
@@ -622,6 +630,9 @@ const createProductFromProvider = catchAsync(async (req, res) => {
         markupType,
         markupValue,
         isActive,
+        visibleInStore,
+        isPaused,
+        status,
     } = req.body;
 
     try {
@@ -638,6 +649,9 @@ const createProductFromProvider = catchAsync(async (req, res) => {
             markupType,
             markupValue,
             isActive,
+            visibleInStore,
+            isPaused,
+            status,
             executionType,
             displayOrder,
             createdBy: req.user._id,

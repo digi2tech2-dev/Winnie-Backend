@@ -19,7 +19,7 @@ router.use(authenticate, requireActiveUser);
 
 router.post(
     '/intents',
-    authorize('CUSTOMER'),
+    authorizeRoles('CUSTOMER', 'ADMIN'),
     createPaymentIntentValidation,
     validate,
     paymentController.createPaymentIntent
@@ -27,7 +27,7 @@ router.post(
 
 router.get(
     '/',
-    authorize('CUSTOMER'),
+    authorizeRoles('CUSTOMER', 'ADMIN'),
     listPaymentsValidation,
     validate,
     paymentController.listMyPayments
@@ -59,7 +59,7 @@ router.post(
 
 router.get(
     '/:id',
-    authorize('CUSTOMER'),
+    authorizeRoles('CUSTOMER', 'ADMIN'),
     paymentIdValidation,
     validate,
     paymentController.getMyPayment

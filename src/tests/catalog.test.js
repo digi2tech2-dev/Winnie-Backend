@@ -45,6 +45,7 @@ const { Order, ORDER_STATUS } = require('../modules/orders/order.model');
 
 const catalogService = require('../modules/providers/providerCatalog.service');
 const productService = require('../modules/products/product.service');
+const meController = require('../modules/me/me.controller');
 const { createOrder } = require('../modules/orders/order.service');
 const {
     connectTestDB,
@@ -76,6 +77,21 @@ const SAMPLE_PRODUCTS = [
     { externalProductId: 'CP-002', rawName: 'Widget B', rawPrice: 20.00, minQty: 2, maxQty: 200, isActive: true },
     { externalProductId: 'CP-003', rawName: 'Widget C', rawPrice: 30.00, minQty: 5, maxQty: 50, isActive: false },
 ];
+
+const runHandler = (handler, req) => new Promise((resolve, reject) => {
+    const res = {
+        statusCode: 200,
+        status(code) {
+            this.statusCode = code;
+            return this;
+        },
+        json(payload) {
+            resolve({ statusCode: this.statusCode, body: payload });
+            return this;
+        },
+    };
+    handler(req, res, reject);
+});
 
 // ── [1] syncProviderProducts ──────────────────────────────────────────────────
 
@@ -429,6 +445,29 @@ describe('[3.5] product.service — provider link / unlink updates', () => {
         expect(updated.executionType).toBe(EXECUTION_TYPES.MANUAL);
     });
 
+    it('persists product availability status updates and reloads them from Mongo', async () => {
+        const product = await Product.create({
+            name: 'Unavailable Status Target',
+            basePrice: 10.00,
+            finalPrice: 10.00,
+            minQty: 1,
+            maxQty: 10,
+            status: 'available',
+        });
+        const updateSpy = jest.spyOn(Product, 'updateOne');
+
+        const updated = await productService.updateProduct(product._id, {
+            status: 'unavailable',
+        });
+        const reloaded = await Product.findById(product._id);
+        const mongoUpdate = updateSpy.mock.calls.at(-1)[1].$set;
+
+        expect(mongoUpdate.status).toBe('unavailable');
+        expect(updated.status).toBe('unavailable');
+        expect(reloaded.status).toBe('unavailable');
+        updateSpy.mockRestore();
+    });
+
     it('links a manual product for automatic fulfillment without overwriting manual price', async () => {
         const product = await Product.create({
             name: 'Manual Link Target',
@@ -492,6 +531,42 @@ describe('[3.5] product.service — provider link / unlink updates', () => {
         expect(updated.syncPriceWithProvider).toBe(true);
         expectDecimalString(updated.providerPrice, '7.5');
         expectDecimalString(updated.basePrice, '7.5');
+    });
+
+    it('persists a manual admin price and returns it from the customer product endpoint', async () => {
+        const product = await Product.create({
+            name: 'Manual Price Update',
+            basePrice: 12.34,
+            finalPrice: 12.34,
+            minQty: 1,
+            maxQty: 10,
+            provider: provider._id,
+            providerProduct: providerProduct._id,
+            providerPrice: 7.50,
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+            pricingMode: PRICING_MODES.MANUAL,
+            syncPriceWithProvider: false,
+        });
+        const { customer } = await createCustomerWithGroup(
+            { currency: 'USD' },
+            { percentage: 0 }
+        );
+
+        const updated = await productService.updateProduct(product._id, {
+            basePrice: '19.75',
+            finalPrice: '19.75',
+            pricingMode: PRICING_MODES.MANUAL,
+            syncPriceWithProvider: false,
+        });
+        const response = await runHandler(meController.getProduct, {
+            params: { id: product._id.toString() },
+            user: customer,
+        });
+
+        expectDecimalString(updated.basePrice, '19.75');
+        expectDecimalString(updated.finalPrice, '19.75');
+        expectDecimalString(response.body.data.finalPrice, '19.75');
+        expectDecimalString(response.body.data.sellingPrice, '19.75');
     });
 
     it('manual unlink clears provider refs and preserves customer fields', async () => {

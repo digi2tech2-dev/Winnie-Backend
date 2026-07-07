@@ -217,24 +217,21 @@ router.get('/currencies', authorizeRoles('ADMIN'), catchAsync(async (req, res) =
 }));
 
 router.patch('/currencies/:code', authorizeRoles('ADMIN'), validateBody(schemas.updateCurrency), catchAsync(async (req, res) => {
-    const { platformRate, markupPercentage, isActive, applyDebtAdjustment } = req.body;
+    const { name, symbol, marketRate, platformRate, markupPercentage, isActive, applyDebtAdjustment } = req.body;
     const code = req.params.code.toUpperCase();
 
     // Delegate to the canonical currency service (handles debt adjustment internally)
     const currencyService = require('../currency/currency.service');
     const { currency, debtAdjustment } = await currencyService.updateCurrencyRate(code, {
+        name,
+        symbol,
+        marketRate,
         platformRate,
         markupPercentage,
+        isActive,
         applyDebtAdjustment,
         adminId: req.user._id,
     });
-
-    // Handle isActive separately (toggle status)
-    if (isActive !== undefined && currency.isActive !== isActive) {
-        currency.isActive = isActive;
-        currency.lastUpdatedAt = new Date();
-        await currency.save();
-    }
 
     const message = debtAdjustment?.usersAdjusted
         ? `Currency '${currency.code}' updated. Debt adjustment applied to ${debtAdjustment.usersAdjusted} users.`

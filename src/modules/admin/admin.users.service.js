@@ -399,50 +399,28 @@ const updateSupervisorPermissions = async (id, permissions, adminId) => {
 // ─── Update Currency ──────────────────────────────────────────────────────────
 
 /**
- * Admin update of a user's wallet currency.
- *
- * CRITICAL: When the currency changes the wallet balance MUST be converted
- * so the user's purchasing power is preserved.
- *
- * Formula:  newBalance = (currentBalance / oldRate) * newRate
- *
- * Both `currency` and `walletBalance` are updated atomically to prevent
- * a window where the code is changed but the balance still holds the
- * old-currency amount.
+ * Change the user's preferred currency for future flows only. Existing wallet
+ * balances, ledger entries, orders, and payment snapshots are not converted.
  */
-const updateUserCurrency = async (id, currency, adminId) => {
+const updateUserCurrency = async (id, currency, adminId, reason = null) => {
     const user = await _findOrFail(id);
-    const code = currency.toUpperCase();
+    const code = String(currency || '').trim().toUpperCase();
 
     // Same currency → no-op
     if (user.currency === code) return user;
 
     // Validate new currency exists and is active
     const { Currency } = require('../currency/currency.model');
-    const newCurrencyDoc = await Currency.findOne({ code, isActive: true });
-    if (!newCurrencyDoc) {
+    const activeCurrency = await Currency.exists({ code, isActive: true });
+    if (!activeCurrency) {
         throw new BusinessRuleError(`Currency '${code}' is not active or does not exist.`, 'INVALID_CURRENCY');
     }
 
-    // Fetch old currency rate (USD = 1)
-    const oldCode = user.currency || 'USD';
-    let oldRate = 1;
-    if (oldCode !== 'USD') {
-        const oldCurrencyDoc = await Currency.findOne({ code: oldCode });
-        if (oldCurrencyDoc) oldRate = oldCurrencyDoc.platformRate;
-    }
-    const newRate = newCurrencyDoc.platformRate;
-
-    // Convert balance
-    const { convertBalance } = require('../../shared/utils/currencyMath');
-    const previousBalance = user.walletBalance;
-    const newBalance = convertBalance(previousBalance, oldRate, newRate);
-
-    // Atomic update — currency + balance together
+    // Update only the preference; wallet and role/group fields are untouched.
     const previousCurrency = user.currency;
     const updated = await User.findByIdAndUpdate(
         id,
-        { $set: { currency: code, walletBalance: newBalance } },
+        { $set: { currency: code } },
         { new: true }
     ).populate('groupId', 'name percentage isActive');
 
@@ -456,10 +434,8 @@ const updateUserCurrency = async (id, currency, adminId) => {
             field: 'currency',
             previousCurrency,
             newCurrency: code,
-            previousBalance,
-            newBalance,
-            oldRate,
-            newRate,
+            walletUnchanged: true,
+            reason: reason || undefined,
         },
     });
 

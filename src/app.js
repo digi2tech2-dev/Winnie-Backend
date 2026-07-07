@@ -39,6 +39,7 @@ require('./modules/admin/setting.model').seedDefaultSettings().catch(() => { });
 
 
 const app = express();
+const API_PREFIX = '/api';
 
 // ── Security Middlewares ──────────────────────────────────────────────────────
 app.use(helmet({
@@ -69,8 +70,14 @@ app.use(
 );
 
 // ── Request Parsing ───────────────────────────────────────────────────────────
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+const captureRawBody = (req, _res, buf) => {
+    if (req.originalUrl?.startsWith(`${API_PREFIX}/webhooks/payments/paymento`)) {
+        req.rawBody = Buffer.from(buf || Buffer.alloc(0));
+    }
+};
+
+app.use(express.json({ limit: '10mb', verify: captureRawBody }));
+app.use(express.urlencoded({ extended: true, limit: '10mb', verify: captureRawBody }));
 
 // ── Logging ───────────────────────────────────────────────────────────────────
 if (config.env !== 'test') {
@@ -100,8 +107,6 @@ app.get('/health', (req, res) => {
 });
 
 // ── API Routes ────────────────────────────────────────────────────────────────
-const API_PREFIX = '/api';
-
 // Apply general rate limiter to all API routes (500 req / 15 min per IP)
 app.use(API_PREFIX, apiLimiter);
 

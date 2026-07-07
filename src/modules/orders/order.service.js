@@ -227,7 +227,13 @@ const _attemptCreateOrder = async (
         // â”€â”€ 1. Load & Validate Product â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const product = await Product.findById(productId).session(session);
         if (!product) throw new NotFoundError('Product');
-        if (!product.isActive) {
+        if (
+            !product.isActive
+            || product.visibleInStore === false
+            || product.isPaused === true
+            || product.status === 'unavailable'
+            || product.isAvailableForApi === false
+        ) {
             throw new BusinessRuleError('This product is currently unavailable.', 'PRODUCT_INACTIVE');
         }
 

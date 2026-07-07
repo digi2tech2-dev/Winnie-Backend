@@ -55,6 +55,7 @@ const CURRENCY_CONVERSION_UNAVAILABLE_MESSAGE =
     'Online card payment is temporarily unavailable for this currency. Please try another currency or use manual deposit.';
 
 const NETWORK_GATEWAY_EXCHANGE_SOURCE = 'PLATFORM_CURRENCY_RATES_VIA_USD';
+const PAYMENTO_GATEWAY_EXCHANGE_SOURCE = 'PLATFORM_CURRENCY_RATES_VIA_USD';
 
 const getRuntimePaymentConfig = () => {
     const allowedGateways = (process.env.PAYMENT_ALLOWED_GATEWAYS || config.payments.allowedGateways.join(','))
@@ -151,8 +152,15 @@ const assertWalletCurrencyMatch = (user, currency) => {
 const getNetworkGatewayCurrency = () =>
     normalizeCurrency(process.env.NETWORK_INTERNATIONAL_CURRENCY || config.payments.networkInternational.currency || 'AED');
 
-const convertToNetworkGatewayCurrency = async ({ requestedAmount, requestedCurrency }) => {
-    const gatewayCurrency = getNetworkGatewayCurrency();
+const getPaymentoFiatCurrency = () =>
+    normalizeCurrency(process.env.PAYMENTO_FIAT_CURRENCY || config.payments.paymento?.fiatCurrency || 'USD');
+
+const convertToConfiguredGatewayCurrency = async ({
+    requestedAmount,
+    requestedCurrency,
+    gatewayCurrency,
+    exchangeRateSource,
+} = {}) => {
     if (!gatewayCurrency || gatewayCurrency.length !== 3) {
         throw new BusinessRuleError(CURRENCY_CONVERSION_UNAVAILABLE_MESSAGE, 'PAYMENT_CURRENCY_CONVERSION_UNAVAILABLE');
     }
@@ -194,7 +202,7 @@ const convertToNetworkGatewayCurrency = async ({ requestedAmount, requestedCurre
             gatewayAmount,
             gatewayCurrency: normalizedGatewayCurrency,
             exchangeRate: safeRound(gatewayAmount / Number(requestedAmount), 8),
-            exchangeRateSource: NETWORK_GATEWAY_EXCHANGE_SOURCE,
+            exchangeRateSource,
             requestedAmountUsd: usdConversion.usdAmount,
             requestedCurrencyRate: usdConversion.rate,
             gatewayCurrencyRate: gatewayConversion.rate,
@@ -207,6 +215,22 @@ const convertToNetworkGatewayCurrency = async ({ requestedAmount, requestedCurre
         throw new BusinessRuleError(CURRENCY_CONVERSION_UNAVAILABLE_MESSAGE, 'PAYMENT_CURRENCY_CONVERSION_UNAVAILABLE');
     }
 };
+
+const convertToNetworkGatewayCurrency = async ({ requestedAmount, requestedCurrency }) =>
+    convertToConfiguredGatewayCurrency({
+        requestedAmount,
+        requestedCurrency,
+        gatewayCurrency: getNetworkGatewayCurrency(),
+        exchangeRateSource: NETWORK_GATEWAY_EXCHANGE_SOURCE,
+    });
+
+const convertToPaymentoFiatCurrency = async ({ requestedAmount, requestedCurrency }) =>
+    convertToConfiguredGatewayCurrency({
+        requestedAmount,
+        requestedCurrency,
+        gatewayCurrency: getPaymentoFiatCurrency(),
+        exchangeRateSource: PAYMENTO_GATEWAY_EXCHANGE_SOURCE,
+    });
 
 const assertPaymentOwnerOrAdmin = (payment, actor) => {
     const actorRole = String(actor?.role || actor?.actorRole || '').toUpperCase();
@@ -316,6 +340,7 @@ const buildCheckoutResponse = (payment) => ({
 const metadataModeForGateway = (gateway) => {
     if (gateway === PAYMENT_GATEWAYS.MOCK) return 'mock';
     if (gateway === PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL) return 'network_international';
+    if (gateway === PAYMENT_GATEWAYS.PAYMENTO) return 'paymento_usdt';
     return 'placeholder';
 };
 
@@ -425,12 +450,18 @@ const createPaymentIntent = async ({
     const paymentId = new mongoose.Types.ObjectId();
     const feeAmount = 0;
     const totalAmount = safeRound(parsedAmount + feeAmount);
-    const gatewayCurrencyConversion = normalizedGateway === PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL
-        ? await convertToNetworkGatewayCurrency({
+    let gatewayCurrencyConversion = null;
+    if (normalizedGateway === PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL) {
+        gatewayCurrencyConversion = await convertToNetworkGatewayCurrency({
             requestedAmount: totalAmount,
             requestedCurrency: normalizedCurrency,
-        })
-        : null;
+        });
+    } else if (normalizedGateway === PAYMENT_GATEWAYS.PAYMENTO) {
+        gatewayCurrencyConversion = await convertToPaymentoFiatCurrency({
+            requestedAmount: totalAmount,
+            requestedCurrency: normalizedCurrency,
+        });
+    }
 
     const gatewayAdapter = getPaymentGateway(normalizedGateway);
     const intent = await gatewayAdapter.createPaymentIntent({
@@ -454,7 +485,7 @@ const createPaymentIntent = async ({
         userId,
         purpose: PAYMENT_PURPOSES.WALLET_TOPUP,
         gateway: normalizedGateway,
-        method: PAYMENT_METHODS.CARD,
+        method: normalizedGateway === PAYMENT_GATEWAYS.PAYMENTO ? PAYMENT_METHODS.ONLINE : PAYMENT_METHODS.CARD,
         amount: parsedAmount,
         feeAmount,
         totalAmount,
@@ -500,7 +531,7 @@ const createPaymentIntent = async ({
 
     void createAuditLog({
         actorId: userId,
-        actorRole: ACTOR_ROLES.CUSTOMER,
+        actorRole: user.role === ROLES.ADMIN ? ACTOR_ROLES.ADMIN : ACTOR_ROLES.CUSTOMER,
         action: PAYMENT_ACTIONS.INTENT_CREATED,
         entityType: ENTITY_TYPES.PAYMENT,
         entityId: payment._id,

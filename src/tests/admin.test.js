@@ -13,6 +13,7 @@
 const mongoose = require('mongoose');
 const { User, USER_STATUS } = require('../modules/users/user.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
+const { Currency } = require('../modules/currency/currency.model');
 const { Setting, seedDefaultSettings } = require('../modules/admin/setting.model');
 
 const adminUsersService = require('../modules/admin/admin.users.service');
@@ -50,6 +51,48 @@ const setup = async () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe('[1] Admin Users Service', () => {
+
+    it('changes only the target user currency and creates no wallet transaction', async () => {
+        const { admin, customer } = await setup();
+        await Currency.create({
+            code: 'AED',
+            name: 'UAE Dirham',
+            symbol: 'AED',
+            marketRate: 3.67,
+            platformRate: 3.68,
+            isActive: true,
+        });
+        customer.walletBalance = 125.5;
+        await customer.save();
+
+        const updated = await adminUsersService.updateUserCurrency(
+            customer._id,
+            'AED',
+            admin._id,
+            'QA currency update'
+        );
+
+        expect(updated.currency).toBe('AED');
+        expect(updated.walletBalance).toBe(125.5);
+        expect(updated.role).toBe(customer.role);
+        expect(updated.groupId._id.toString()).toBe(customer.groupId.toString());
+        expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(0);
+    });
+
+    it('rejects an inactive currency for an admin user update', async () => {
+        const { admin, customer } = await setup();
+        await Currency.create({
+            code: 'AED',
+            name: 'UAE Dirham',
+            symbol: 'AED',
+            marketRate: 3.67,
+            platformRate: 3.68,
+            isActive: false,
+        });
+
+        await expect(adminUsersService.updateUserCurrency(customer._id, 'AED', admin._id))
+            .rejects.toMatchObject({ code: 'INVALID_CURRENCY' });
+    });
 
     it('listUsers returns all users with pagination', async () => {
         const { group } = await setup();

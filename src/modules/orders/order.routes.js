@@ -6,6 +6,7 @@ const { createOrderValidation, orderIdParamValidation } = require('./order.valid
 const validate = require('../../shared/middlewares/validate');
 const authenticate = require('../../shared/middlewares/authenticate');
 const authorize = require('../../shared/middlewares/authorize');
+const { authorizeRoles } = authorize;
 const requireActiveUser = require('../../shared/middlewares/requireActiveUser');
 const validateOrderDynamicFields = require('./validateOrderDynamicFields.middleware');
 
@@ -24,7 +25,7 @@ router.use(authenticate);
 router.post(
     '/',
     requireActiveUser,
-    authorize('CUSTOMER'),
+    authorizeRoles('CUSTOMER', 'ADMIN'),
     createOrderValidation,
     validate,
     validateOrderDynamicFields,
@@ -36,14 +37,14 @@ router.post(
  * @desc   Get current user's orders
  * @access Active Customer only
  */
-router.get('/my', requireActiveUser, authorize('CUSTOMER'), orderController.getMyOrders);
+router.get('/my', requireActiveUser, authorizeRoles('CUSTOMER', 'ADMIN'), orderController.getMyOrders);
 
 /**
  * @route  GET /api/orders/my/:id
  * @desc   Get a specific order belonging to the current user
  * @access Active Customer only
  */
-router.get('/my/:id', requireActiveUser, authorize('CUSTOMER'), orderIdParamValidation, validate, orderController.getMyOrder);
+router.get('/my/:id', requireActiveUser, authorizeRoles('CUSTOMER', 'ADMIN'), orderIdParamValidation, validate, orderController.getMyOrder);
 
 // ── Admin Routes ──────────────────────────────────────────────────────────────
 

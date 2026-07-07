@@ -78,6 +78,25 @@ const config = {
             webhookSecretHeader: process.env.NETWORK_INTERNATIONAL_WEBHOOK_SECRET_HEADER ||
                 'x-network-webhook-secret',
         },
+        paymento: {
+            enabled: process.env.PAYMENTO_ENABLED === 'true',
+            apiBaseUrl: process.env.PAYMENTO_API_BASE_URL || 'https://api.paymento.io',
+            apiKey: process.env.PAYMENTO_API_KEY,
+            ipnSecret: process.env.PAYMENTO_IPN_SECRET,
+            returnUrl: process.env.PAYMENTO_RETURN_URL ||
+                `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/success`,
+            cancelUrl: process.env.PAYMENTO_CANCEL_URL ||
+                `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/cancel`,
+            pendingUrl: process.env.PAYMENTO_PENDING_URL ||
+                `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/pending`,
+            ipnUrl: process.env.PAYMENTO_IPN_URL ||
+                `${process.env.APP_URL || `http://localhost:${process.env.PORT || 5000}`}/api/webhooks/payments/paymento`,
+            fiatCurrency: (process.env.PAYMENTO_FIAT_CURRENCY || 'USD').toUpperCase(),
+            allowedCrypto: (process.env.PAYMENTO_ALLOWED_CRYPTO || 'USDT').toUpperCase(),
+            riskSpeed: parseFloat(process.env.PAYMENTO_RISK_SPEED || '1'),
+            createPath: process.env.PAYMENTO_CREATE_PATH || '/v1/payment/request',
+            verifyPath: process.env.PAYMENTO_VERIFY_PATH || '/v1/payment/verify',
+        },
     },
 
     providerCredentials: {

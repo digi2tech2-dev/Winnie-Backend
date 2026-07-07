@@ -25,12 +25,37 @@ const handleDuplicateKeyError = (err) => {
 /**
  * Handle Mongoose validation errors
  */
-const handleValidationError = (err) => {
+const getRuntimeEnv = () => process.env.NODE_ENV || config.env || 'development';
+
+const isDevelopment = () => getRuntimeEnv() === 'development';
+
+const isAdminProductRequest = (req) => (
+    req?.method === 'PATCH' &&
+    /\/admin\/products\/[^/]+$/.test(String(req.originalUrl || req.url || ''))
+);
+
+const handleValidationError = (err, req) => {
     const errors = Object.values(err.errors).map((el) => ({
         field: el.path,
         message: el.message,
+        value: el.value,
     }));
-    return new AppError('Validation failed', 400, 'VALIDATION_ERROR');
+
+    if (isDevelopment() && isAdminProductRequest(req)) {
+        console.warn('[admin.products.validation.failed]', {
+            method: req.method,
+            originalUrl: req.originalUrl,
+            body: req.body,
+            errors,
+        });
+    }
+
+    const appError = new AppError('Validation failed', 400, 'VALIDATION_ERROR');
+    if (isDevelopment()) {
+        appError.details = errors;
+        appError.errors = errors;
+    }
+    return appError;
 };
 
 /**
@@ -41,8 +66,6 @@ const handleJWTError = () =>
 
 const handleJWTExpiredError = () =>
     new AppError('Your token has expired. Please log in again.', 401, 'TOKEN_EXPIRED');
-
-const getRuntimeEnv = () => process.env.NODE_ENV || config.env || 'development';
 
 /**
  * Send error response in development (full stack trace)
@@ -93,7 +116,7 @@ const globalErrorHandler = (err, req, res, next) => {
     // Transform known Mongoose / JWT errors into AppErrors
     if (err.name === 'CastError') error = handleCastError(err);
     if (err.code === 11000) error = handleDuplicateKeyError(err);
-    if (err.name === 'ValidationError' && !err.isOperational) error = handleValidationError(err);
+    if (err.name === 'ValidationError' && !err.isOperational) error = handleValidationError(err, req);
     if (err.name === 'JsonWebTokenError') error = handleJWTError();
     if (err.name === 'TokenExpiredError') error = handleJWTExpiredError();
 

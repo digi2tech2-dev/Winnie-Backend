@@ -193,7 +193,7 @@ const placeOrder = catchAsync(async (req, res) => {
 
     const auditContext = {
         actorId: req.user._id,
-        actorRole: 'CUSTOMER',
+        actorRole: req.user.role,
         ipAddress: req.ip ?? null,
         userAgent: req.get('User-Agent') ?? null,
     };
@@ -233,7 +233,7 @@ const getProducts = catchAsync(async (req, res) => {
     const { usdToLocal } = require('../../shared/utils/currencyMath');
     const { calculateFinalPrice } = require('../orders/pricing.service');
 
-    const filter = { isActive: true };
+    const filter = { isActive: true, visibleInStore: { $ne: false }, deletedAt: null };
     if (req.query.search) {
         filter.$or = [
             { name: { $regex: req.query.search, $options: 'i' } },
@@ -247,7 +247,7 @@ const getProducts = catchAsync(async (req, res) => {
             .sort({ name: 1 })
             .skip(skip)
             .limit(limit)
-            .select('-providerProduct -orderFields')
+            .select('-providerProduct')
             .lean(),
         Product.countDocuments(filter),
     ]);
@@ -274,6 +274,9 @@ const getProducts = catchAsync(async (req, res) => {
             markedUpPriceUSD: markedUpUSD,
             displayPrice: localDisplayPrice,
             displayCurrency: userCurrency,
+            isPurchasable: p.isPaused !== true
+                && p.status !== 'unavailable'
+                && p.isAvailableForApi !== false,
         };
     });
 
@@ -290,7 +293,12 @@ const getProduct = catchAsync(async (req, res) => {
     const { usdToLocal } = require('../../shared/utils/currencyMath');
     const { calculateFinalPrice } = require('../orders/pricing.service');
 
-    const product = await Product.findOne({ _id: req.params.id, isActive: true })
+    const product = await Product.findOne({
+        _id: req.params.id,
+        isActive: true,
+        visibleInStore: { $ne: false },
+        deletedAt: null,
+    })
         .select('-providerProduct')
         .lean();
 
@@ -318,6 +326,9 @@ const getProduct = catchAsync(async (req, res) => {
         markedUpPriceUSD: markedUpUSD,
         displayPrice: localDisplayPrice,
         displayCurrency: userCurrency,
+        isPurchasable: product.isPaused !== true
+            && product.status !== 'unavailable'
+            && product.isAvailableForApi !== false,
     }, req.user));
 });
 
@@ -378,7 +389,7 @@ const createDeposit = catchAsync(async (req, res) => {
         notes: notes || null,
         auditContext: {
             actorId: req.user._id,
-            actorRole: 'CUSTOMER',
+            actorRole: req.user.role,
             ipAddress: req.ip ?? null,
             userAgent: req.get('User-Agent') ?? null,
         },

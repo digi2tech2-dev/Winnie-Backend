@@ -4,12 +4,14 @@ const { BusinessRuleError } = require('../../../shared/errors/AppError');
 const { PAYMENT_GATEWAYS } = require('../payment.constants');
 const MockPaymentGateway = require('./mock.gateway');
 const NetworkInternationalGateway = require('./networkInternational.gateway');
+const PaymentoGateway = require('./paymento.gateway');
 const ZiinaGateway = require('./ziina.gateway');
 const TapGateway = require('./tap.gateway');
 
 const GATEWAY_CLASSES = Object.freeze({
     [PAYMENT_GATEWAYS.MOCK]: MockPaymentGateway,
     [PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL]: NetworkInternationalGateway,
+    [PAYMENT_GATEWAYS.PAYMENTO]: PaymentoGateway,
     [PAYMENT_GATEWAYS.ZIINA]: ZiinaGateway,
     [PAYMENT_GATEWAYS.TAP]: TapGateway,
 });

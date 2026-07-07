@@ -17,6 +17,38 @@
 const Joi = require('joi');
 const { BusinessRuleError } = require('../../shared/errors/AppError');
 
+const isDevelopment = () => (process.env.NODE_ENV || 'development') === 'development';
+
+const isAdminProductRequest = (req) => (
+    req?.method === 'PATCH' &&
+    /\/admin\/products\/[^/]+$/.test(String(req.originalUrl || req.url || ''))
+);
+
+const buildJoiValidationDetails = (error) => error.details.map((detail) => ({
+    field: detail.path.join('.'),
+    message: detail.message,
+    type: detail.type,
+}));
+
+const buildValidationError = (req, message, error) => {
+    const appError = new BusinessRuleError(message, 'VALIDATION_ERROR');
+    if (isDevelopment()) {
+        const details = buildJoiValidationDetails(error);
+        appError.details = details;
+        appError.errors = details;
+
+        if (isAdminProductRequest(req)) {
+            console.warn('[admin.products.validation.failed]', {
+                method: req.method,
+                originalUrl: req.originalUrl,
+                body: req.body,
+                errors: details,
+            });
+        }
+    }
+    return appError;
+};
+
 // ─── Reusable field definitions ───────────────────────────────────────────────
 
 const objectId = () => Joi.string().hex().length(24).messages({
@@ -52,7 +84,7 @@ const validateBody = (schema) => (req, res, next) => {
     });
     if (error) {
         const message = error.details.map((d) => d.message).join('; ');
-        return next(new BusinessRuleError(message, 'VALIDATION_ERROR'));
+        return next(buildValidationError(req, message, error));
     }
     req.body = value;
     next();
@@ -69,7 +101,7 @@ const validateQuery = (schema) => (req, res, next) => {
     });
     if (error) {
         const message = error.details.map((d) => d.message).join('; ');
-        return next(new BusinessRuleError(message, 'VALIDATION_ERROR'));
+        return next(buildValidationError(req, message, error));
     }
     req.query = value;
     next();
@@ -115,6 +147,7 @@ const updateUserCurrencySchema = Joi.object({
         'any.required': 'Currency code is required',
         'string.pattern.base': 'Currency must be a 3-letter ISO 4217 code (e.g. USD, SAR)',
     }),
+    reason: Joi.string().trim().max(255).optional().allow('', null),
 });
 
 const updateCreditLimitSchema = Joi.object({
@@ -265,9 +298,10 @@ const updateGroupSchema = Joi.object({
 // ─── Currency schemas ─────────────────────────────────────────────────────────
 
 const updateCurrencySchema = Joi.object({
-    platformRate: Joi.number().positive().required().messages({
-        'any.required': 'platformRate is required',
-    }),
+    name: Joi.string().trim().min(1).max(64),
+    symbol: Joi.string().trim().min(1).max(8),
+    marketRate: Joi.number().positive().allow(null),
+    platformRate: Joi.number().positive(),
     markupPercentage: Joi.number().min(0).max(100),
     isActive: Joi.boolean(),
     applyDebtAdjustment: Joi.boolean().default(false),
@@ -288,9 +322,7 @@ const createCurrencySchema = Joi.object({
     platformRate: Joi.number().positive().required().messages({
         'any.required': 'platformRate is required',
     }),
-    marketRate: Joi.number().positive().required().messages({
-        'any.required': 'marketRate is required',
-    }),
+    marketRate: Joi.number().positive().allow(null),
     markupPercentage: Joi.number().min(0).default(0),
     isActive: Joi.boolean().default(true),
 });

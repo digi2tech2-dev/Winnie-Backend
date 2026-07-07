@@ -64,15 +64,15 @@ const getCurrencyHandler = catchAsync(async (req, res) => {
 // =============================================================================
 
 /**
- * Update the platformRate (and optionally markupPercentage / name / symbol).
+ * Update display metadata, rates, active state and markup.
  * If applyDebtAdjustment is true and rate increased, adjusts user debts.
  *
- * Body: { platformRate?, markupPercentage?, name?, symbol?, applyDebtAdjustment? }
+ * Body: { name?, symbol?, marketRate?, platformRate?, markupPercentage?, isActive?, applyDebtAdjustment? }
  */
 const updateRateHandler = catchAsync(async (req, res) => {
-    const { platformRate, markupPercentage, name, symbol, applyDebtAdjustment } = req.body;
+    const { marketRate, platformRate, markupPercentage, name, symbol, isActive, applyDebtAdjustment } = req.body;
     const { currency, debtAdjustment } = await currencyService.updateCurrencyRate(req.params.code, {
-        platformRate, markupPercentage, name, symbol,
+        marketRate, platformRate, markupPercentage, name, symbol, isActive,
         applyDebtAdjustment,
         adminId: req.user?._id,
     });
@@ -110,10 +110,20 @@ const setStatusHandler = catchAsync(async (req, res) => {
     );
 });
 
+// =============================================================================
+// DELETE /admin/currencies/:code
+// =============================================================================
+
+const deleteCurrencyHandler = catchAsync(async (req, res) => {
+    const currency = await currencyService.deleteCurrency(req.params.code);
+    sendSuccess(res, { currency }, `Currency '${currency.code}' deleted.`);
+});
+
 module.exports = {
     listCurrenciesHandler,
     createCurrencyHandler,
     getCurrencyHandler,
     updateRateHandler,
     setStatusHandler,
+    deleteCurrencyHandler,
 };

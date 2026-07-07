@@ -22,7 +22,7 @@ const createOrder = catchAsync(async (req, res) => {
 
     const auditContext = {
         actorId: req.user._id,
-        actorRole: 'CUSTOMER',
+        actorRole: req.user.role,
         ipAddress: req.ip ?? null,
         userAgent: req.get('User-Agent') ?? null,
     };

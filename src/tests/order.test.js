@@ -27,6 +27,7 @@ const {
     clearCollections,
     createGroup,
     createCustomer,
+    createAdmin,
     createProduct,
     freshUser,
     countTransactions,
@@ -102,6 +103,19 @@ describe('Order within wallet balance', () => {
         expect(txns[0].sourceId.toString()).toBe(order._id.toString());
         expect(txns[0].direction).toBe('DEBIT');
         expect(txns[0].currency).toBe('USD');
+    });
+
+    it('lets an admin buy with their own wallet under the same balance rules', async () => {
+        const admin = await createAdmin({ groupId: defaultGroup._id, walletBalance: 75 });
+        const product = await createProduct({ basePrice: 25 });
+
+        const { order } = await placeOrder({ userId: admin._id, productId: product._id, quantity: 2 });
+        const freshAdmin = await freshUser(admin._id);
+
+        expect(order.userId.toString()).toBe(admin._id.toString());
+        expectDecimalString(order.totalPrice, '50');
+        expect(freshAdmin.role).toBe('ADMIN');
+        expect(freshAdmin.walletBalance).toBe(25);
     });
 });
 

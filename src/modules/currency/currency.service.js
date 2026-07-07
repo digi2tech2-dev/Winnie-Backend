@@ -9,7 +9,7 @@
  *   - Seed / ensure the USD base currency exists on startup
  *   - List all currencies (with optional active-only filter)
  *   - Get a single currency by code
- *   - Admin: update platformRate and/or markupPercentage
+ *   - Admin: update display metadata, rates and/or markupPercentage
  *   - Admin: enable / disable a currency
  *
  * All writes invalidate the in-process converter cache so the change
@@ -81,7 +81,7 @@ const getCurrencyByCode = async (code) => {
 // =============================================================================
 
 /**
- * Admin updates the platformRate (and optionally markupPercentage) for a currency.
+ * Admin updates a currency's display metadata, rates, active state and markup.
  *
  * Rules:
  *   - USD platformRate is always 1. Attempts to set it to anything else throw.
@@ -92,10 +92,12 @@ const getCurrencyByCode = async (code) => {
  *
  * @param {string} code           - ISO 4217 code
  * @param {Object} updates
+ * @param {number}  [updates.marketRate]            - new market/reference rate
  * @param {number}  [updates.platformRate]          - new billing rate
  * @param {number}  [updates.markupPercentage]      - optional markup (informational)
  * @param {string}  [updates.name]                  - display name override
  * @param {string}  [updates.symbol]                - symbol override
+ * @param {boolean} [updates.isActive]              - active/support status
  * @param {boolean} [updates.applyDebtAdjustment]   - opt-in to debt pegging
  * @param {string}  [updates.adminId]               - admin ObjectId (required if applyDebtAdjustment)
  * @returns {Promise<{ currency: Currency, debtAdjustment: Object|null }>}
@@ -105,7 +107,8 @@ const updateCurrencyRate = async (code, updates) => {
     const doc = await Currency.findOne({ code: upper });
     if (!doc) throw new NotFoundError(`Currency '${upper}'`);
 
-    const { platformRate, markupPercentage, name, symbol, applyDebtAdjustment, adminId } = updates;
+    const { marketRate, platformRate, markupPercentage, name, symbol, isActive, applyDebtAdjustment, adminId } = updates;
+    const updateSet = {};
 
     // Capture old rate BEFORE mutation (needed for percentage calc)
     const oldRate = doc.platformRate;
@@ -125,7 +128,20 @@ const updateCurrencyRate = async (code, updates) => {
                 'INVALID_PLATFORM_RATE'
             );
         }
-        doc.platformRate = parseFloat(platformRate.toFixed(6));
+        updateSet.platformRate = parseFloat(platformRate.toFixed(6));
+    }
+
+    if (marketRate !== undefined) {
+        if (marketRate === null || marketRate === '') {
+            updateSet.marketRate = null;
+        } else if (typeof marketRate !== 'number' || marketRate <= 0) {
+            throw new BusinessRuleError(
+                'marketRate must be a positive number.',
+                'INVALID_MARKET_RATE'
+            );
+        } else {
+            updateSet.marketRate = parseFloat(marketRate.toFixed(6));
+        }
     }
 
     if (markupPercentage !== undefined) {
@@ -135,19 +151,46 @@ const updateCurrencyRate = async (code, updates) => {
                 'INVALID_MARKUP'
             );
         }
-        doc.markupPercentage = markupPercentage;
+        updateSet.markupPercentage = markupPercentage;
     }
 
-    if (name !== undefined) doc.name = name;
-    if (symbol !== undefined) doc.symbol = symbol;
+    if (name !== undefined) {
+        const trimmedName = String(name || '').trim();
+        if (!trimmedName) {
+            throw new BusinessRuleError('Currency name is required.', 'INVALID_CURRENCY_NAME');
+        }
+        updateSet.name = trimmedName;
+    }
+    if (symbol !== undefined) {
+        const trimmedSymbol = String(symbol || '').trim();
+        if (!trimmedSymbol) {
+            throw new BusinessRuleError('Currency symbol is required.', 'INVALID_CURRENCY_SYMBOL');
+        }
+        updateSet.symbol = trimmedSymbol;
+    }
+    if (isActive !== undefined) {
+        if (upper === 'USD' && !isActive) {
+            throw new BusinessRuleError(
+                'The USD base currency cannot be disabled.',
+                'CANNOT_DISABLE_USD'
+            );
+        }
+        updateSet.isActive = Boolean(isActive);
+    }
 
-    doc.lastUpdatedAt = new Date();
-    await doc.save();
+    updateSet.lastUpdatedAt = new Date();
+    await Currency.updateOne(
+        { code: upper },
+        { $set: updateSet },
+        { runValidators: true }
+    );
+
+    const updatedDoc = await Currency.findOne({ code: upper });
 
     invalidateCurrencyCache(upper);
 
     // Strictly cast to Number to prevent string comparison bugs
-    const newRate = Number(doc.platformRate);
+    const newRate = Number(updatedDoc.platformRate);
     const oldRateNum = Number(oldRate);
 
     // ── Debt Adjustment: if rate changed and admin opted in ───────────────
@@ -186,7 +229,7 @@ const updateCurrencyRate = async (code, updates) => {
         }
     }
 
-    return { currency: doc, debtAdjustment: debtAdjustmentResult };
+    return { currency: updatedDoc, debtAdjustment: debtAdjustmentResult };
 };
 
 // =============================================================================
@@ -240,7 +283,7 @@ const createCurrency = async ({
     name,
     symbol,
     platformRate,
-    marketRate,
+    marketRate = null,
     markupPercentage = 0,
     isActive = true,
 }) => {
@@ -269,8 +312,9 @@ const createCurrency = async ({
         );
     }
 
-    const parsedMarketRate = Number(marketRate);
-    if (!Number.isFinite(parsedMarketRate) || parsedMarketRate <= 0) {
+    const hasMarketRate = marketRate !== undefined && marketRate !== null && marketRate !== '';
+    const parsedMarketRate = hasMarketRate ? Number(marketRate) : null;
+    if (hasMarketRate && (!Number.isFinite(parsedMarketRate) || parsedMarketRate <= 0)) {
         throw new BusinessRuleError(
             'marketRate must be a positive number.',
             'INVALID_MARKET_RATE'
@@ -294,13 +338,45 @@ const createCurrency = async ({
         code: upper,
         name: trimmedName,
         symbol: trimmedSymbol,
-        marketRate: parseFloat(parsedMarketRate.toFixed(6)),
+        marketRate: parsedMarketRate == null ? null : parseFloat(parsedMarketRate.toFixed(6)),
         platformRate: parseFloat(parsedPlatformRate.toFixed(6)),
         markupPercentage: parsedMarkupPercentage,
         isActive: Boolean(isActive),
         lastUpdatedAt: new Date(),
     });
 
+    invalidateCurrencyCache(upper);
+
+    return doc;
+};
+
+// =============================================================================
+// ADMIN: DELETE CURRENCY
+// =============================================================================
+
+const deleteCurrency = async (code) => {
+    const upper = (code ?? '').toUpperCase().trim();
+
+    if (upper === 'USD') {
+        throw new BusinessRuleError(
+            'The USD base currency cannot be deleted.',
+            'CANNOT_DELETE_USD'
+        );
+    }
+
+    const doc = await Currency.findOne({ code: upper });
+    if (!doc) throw new NotFoundError(`Currency '${upper}'`);
+
+    const { User } = require('../users/user.model');
+    const assignedUsers = await User.countDocuments({ currency: upper });
+    if (assignedUsers > 0) {
+        throw new BusinessRuleError(
+            `Currency '${upper}' is assigned to ${assignedUsers} user(s). Disable it or reassign users before deleting.`,
+            'CURRENCY_IN_USE'
+        );
+    }
+
+    await doc.deleteOne();
     invalidateCurrencyCache(upper);
 
     return doc;
@@ -313,4 +389,5 @@ module.exports = {
     updateCurrencyRate,
     setCurrencyStatus,
     createCurrency,
+    deleteCurrency,
 };

@@ -116,7 +116,12 @@ const updateSupervisorPermissions = catchAsync(async (req, res) => {
 
 // PATCH /admin/users/:id/currency
 const updateUserCurrency = catchAsync(async (req, res) => {
-    const user = await svc.updateUserCurrency(req.params.id, req.body.currency, req.user._id);
+    const user = await svc.updateUserCurrency(
+        req.params.id,
+        req.body.currency,
+        req.user._id,
+        req.body.reason
+    );
     sendSuccess(res, { user }, 'User currency updated');
 });
 

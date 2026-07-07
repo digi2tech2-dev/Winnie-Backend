@@ -1,7 +1,7 @@
 'use strict';
 
 const { body, param, query } = require('express-validator');
-const { PRICING_MODES, MARKUP_TYPES, EXECUTION_TYPES } = require('./product.model');
+const { PRICING_MODES, MARKUP_TYPES, EXECUTION_TYPES, PRODUCT_STATUSES } = require('./product.model');
 const { isPositive } = require('../../shared/utils/decimalPrecision');
 
 /**
@@ -71,6 +71,19 @@ const createProductValidation = [
     body('isActive')
         .optional()
         .isBoolean().withMessage('isActive must be a boolean'),
+
+    body('visibleInStore')
+        .optional()
+        .isBoolean().withMessage('visibleInStore must be a boolean'),
+
+    body('isPaused')
+        .optional()
+        .isBoolean().withMessage('isPaused must be a boolean'),
+
+    body('status')
+        .optional()
+        .isIn(Object.values(PRODUCT_STATUSES))
+        .withMessage(`status must be one of: ${Object.values(PRODUCT_STATUSES).join(', ')}`),
 
     body('executionType')
         .optional()
@@ -156,6 +169,19 @@ const publishProductValidation = [
         .optional()
         .isBoolean(),
 
+    body('visibleInStore')
+        .optional()
+        .isBoolean().withMessage('visibleInStore must be a boolean'),
+
+    body('isPaused')
+        .optional()
+        .isBoolean().withMessage('isPaused must be a boolean'),
+
+    body('status')
+        .optional()
+        .isIn(Object.values(PRODUCT_STATUSES))
+        .withMessage(`status must be one of: ${Object.values(PRODUCT_STATUSES).join(', ')}`),
+
     body('pricingMode')
         .optional()
         .isIn(Object.values(PRICING_MODES))
@@ -217,6 +243,19 @@ const updateProductValidation = [
     body('isActive')
         .optional()
         .isBoolean(),
+
+    body('visibleInStore')
+        .optional()
+        .isBoolean().withMessage('visibleInStore must be a boolean'),
+
+    body('isPaused')
+        .optional()
+        .isBoolean().withMessage('isPaused must be a boolean'),
+
+    body('status')
+        .optional()
+        .isIn(Object.values(PRODUCT_STATUSES))
+        .withMessage(`status must be one of: ${Object.values(PRODUCT_STATUSES).join(', ')}`),
 
     body('pricingMode')
         .optional()

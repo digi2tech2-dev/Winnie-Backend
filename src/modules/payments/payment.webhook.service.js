@@ -21,6 +21,12 @@ const {
 const config = require('../../config/config');
 
 const DEFAULT_WEBHOOK_SECRET_HEADER = 'x-network-webhook-secret';
+const PAYMENTO_SIGNATURE_HEADERS = [
+    'x-paymento-signature',
+    'x-paymento-hmac-sha256',
+    'x-signature',
+    'signature',
+];
 const SYSTEM_ACTOR_ID = new mongoose.Types.ObjectId('000000000000000000000001');
 const MAX_SUMMARY_STRING_LENGTH = 500;
 const SAFE_HEADER_NAMES = new Set([
@@ -31,6 +37,8 @@ const SAFE_HEADER_NAMES = new Set([
     'x-network-event-id',
     'x-ngenius-event-id',
     'x-ngenius-request-id',
+    'x-paymento-event-id',
+    'x-paymento-request-id',
 ]);
 const SENSITIVE_KEYS = new Set([
     'access_token',
@@ -70,6 +78,14 @@ const getWebhookConfig = () => ({
     ).toLowerCase(),
 });
 
+const getPaymentoWebhookConfig = () => ({
+    secret: trim(
+        process.env.PAYMENTO_IPN_SECRET ||
+        config.payments.paymento?.ipnSecret ||
+        ''
+    ),
+});
+
 const timingSafeEqualString = (actual, expected) => {
     const actualBuffer = Buffer.from(String(actual || ''), 'utf8');
     const expectedBuffer = Buffer.from(String(expected || ''), 'utf8');
@@ -90,6 +106,46 @@ const verifyWebhookSecret = (headers = {}) => {
     }
 
     return { verified: true, mode: 'shared_header_secret', headerName: webhookConfig.secretHeader };
+};
+
+const normalizeSignatureValue = (value) => {
+    const signature = trim(Array.isArray(value) ? value[0] : value);
+    return signature.replace(/^sha256=/i, '');
+};
+
+const hmacCandidates = (rawBody, secret, payload) => {
+    const source = rawBody && Buffer.isBuffer(rawBody)
+        ? rawBody
+        : Buffer.from(stableJson(payload), 'utf8');
+    const digest = crypto.createHmac('sha256', secret).update(source).digest();
+    return [
+        digest.toString('hex'),
+        digest.toString('base64'),
+    ];
+};
+
+const verifyPaymentoSignature = ({ headers = {}, rawBody = null, payload = {} } = {}) => {
+    const webhookConfig = getPaymentoWebhookConfig();
+    if (!webhookConfig.secret) {
+        return { verified: false, mode: 'unverified' };
+    }
+
+    const providedSignature = PAYMENTO_SIGNATURE_HEADERS
+        .map((headerName) => normalizeSignatureValue(headers[headerName]))
+        .find(Boolean);
+
+    if (!providedSignature) {
+        throw new AppError('Invalid Paymento webhook signature.', 401, 'PAYMENTO_WEBHOOK_INVALID_SIGNATURE');
+    }
+
+    const matches = hmacCandidates(rawBody, webhookConfig.secret, payload)
+        .some((expected) => timingSafeEqualString(providedSignature, expected));
+
+    if (!matches) {
+        throw new AppError('Invalid Paymento webhook signature.', 401, 'PAYMENTO_WEBHOOK_INVALID_SIGNATURE');
+    }
+
+    return { verified: true, mode: 'hmac_sha256' };
 };
 
 const safeString = (value) => {
@@ -230,6 +286,86 @@ const extractWebhookRefs = (payload = {}, headers = {}) => {
     };
 };
 
+const extractPaymentoWebhookRefs = (payload = {}, headers = {}) => {
+    const eventId = firstPresent(
+        headers['x-paymento-event-id'],
+        headers['x-paymento-request-id'],
+        payloadAt(payload, 'eventId', 'event_id', 'id', 'uuid', 'event.id', 'data.eventId', 'data.event_id')
+    );
+    const eventType = firstPresent(
+        payloadAt(payload, 'eventType', 'event_type', 'type', 'eventName', 'event.name', 'data.eventType', 'data.type')
+    );
+    const providerStatus = firstPresent(
+        payloadAt(
+            payload,
+            'status',
+            'state',
+            'paymentStatus',
+            'payment_status',
+            'statusName',
+            'status_name',
+            'statusCode',
+            'status_code',
+            'data.status',
+            'data.state',
+            'data.paymentStatus',
+            'data.payment_status',
+            'payment.status',
+            'payment.state'
+        )
+    );
+    const gatewayPaymentId = firstPresent(
+        payloadAt(
+            payload,
+            'paymentId',
+            'payment_id',
+            'gatewayPaymentId',
+            'gateway_payment_id',
+            'token',
+            'data.paymentId',
+            'data.payment_id',
+            'data.id',
+            'payment.id',
+            'payment.paymentId'
+        )
+    );
+    const merchantOrderReference = firstPresent(
+        payloadAt(
+            payload,
+            'merchantReference',
+            'merchant_reference',
+            'merchantOrderReference',
+            'merchant_order_reference',
+            'orderReference',
+            'order_reference',
+            'metadata.paymentId',
+            'paymentIdLocal',
+            'paymentId',
+            'data.merchantReference',
+            'data.merchant_reference',
+            'data.metadata.paymentId'
+        )
+    );
+    const gatewayReference = firstPresent(
+        payloadAt(payload, 'reference', 'ref', 'data.reference', 'data.ref', 'payment.reference'),
+        merchantOrderReference
+    );
+    const eventTimestamp = firstPresent(
+        payloadAt(payload, 'timestamp', 'createdAt', 'created_at', 'eventTime', 'data.timestamp', 'data.createdAt')
+    );
+
+    return {
+        eventId,
+        eventType,
+        providerStatus,
+        gatewayPaymentId,
+        gatewayReference,
+        orderReference: gatewayReference,
+        merchantOrderReference,
+        eventTimestamp,
+    };
+};
+
 const buildDedupeKey = ({ refs, payloadHash }) => {
     if (refs.eventId) return `${PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL}:event:${refs.eventId}`;
     if (refs.orderReference || refs.gatewayPaymentId || refs.merchantOrderReference) {
@@ -255,7 +391,24 @@ const buildPayloadSummary = (payload, refs) => ({
     merchantOrderReference: refs.merchantOrderReference,
     amount: payloadAt(payload, 'amount.value', 'order.amount.value', 'data.amount.value', 'data.order.amount.value'),
     currency: payloadAt(payload, 'amount.currencyCode', 'order.amount.currencyCode', 'data.amount.currencyCode'),
-    payloadKeys: Object.keys(payload || {}).slice(0, 30),
+    payloadKeys: safePayloadKeys(payload),
+});
+
+const safePayloadKeys = (payload = {}) => Object.keys(payload || {})
+    .filter((key) => !SENSITIVE_KEYS.has(normalizedKey(key)))
+    .slice(0, 30);
+
+const buildPaymentoPayloadSummary = (payload, refs) => ({
+    eventId: refs.eventId,
+    eventType: refs.eventType,
+    providerStatus: refs.providerStatus,
+    gatewayPaymentId: refs.gatewayPaymentId,
+    gatewayReference: refs.gatewayReference,
+    merchantOrderReference: refs.merchantOrderReference,
+    amount: payloadAt(payload, 'amount', 'fiatAmount', 'data.amount', 'data.fiatAmount', 'payment.amount'),
+    currency: payloadAt(payload, 'currency', 'fiatCurrency', 'data.currency', 'data.fiatCurrency', 'payment.currency'),
+    cryptoCurrency: payloadAt(payload, 'cryptoCurrency', 'crypto_currency', 'data.cryptoCurrency', 'data.crypto_currency'),
+    payloadKeys: safePayloadKeys(payload),
 });
 
 const paymentLookupRefs = (refs) => [
@@ -289,6 +442,52 @@ const resolvePaymentFromWebhook = async (refs) => {
     });
 };
 
+const buildPaymentoDedupeKey = ({ refs, payloadHash }) => {
+    if (refs.eventId) return `${PAYMENT_GATEWAYS.PAYMENTO}:event:${refs.eventId}`;
+    if (refs.gatewayPaymentId || refs.gatewayReference || refs.merchantOrderReference) {
+        return [
+            PAYMENT_GATEWAYS.PAYMENTO,
+            'payment',
+            refs.gatewayPaymentId || refs.gatewayReference || refs.merchantOrderReference,
+            refs.eventType || 'event',
+            refs.providerStatus || 'unknown',
+            refs.eventTimestamp || 'no_timestamp',
+        ].join(':');
+    }
+    return `${PAYMENT_GATEWAYS.PAYMENTO}:hash:${payloadHash}`;
+};
+
+const paymentoPaymentLookupRefs = (refs) => [
+    refs.merchantOrderReference,
+    refs.gatewayPaymentId,
+    refs.gatewayReference,
+    refs.orderReference,
+].map((ref) => trim(ref)).filter(Boolean);
+
+const resolvePaymentoPaymentFromWebhook = async (refs) => {
+    const lookupRefs = paymentoPaymentLookupRefs(refs);
+    if (lookupRefs.length === 0) return null;
+
+    const or = [];
+    lookupRefs.forEach((ref) => {
+        if (mongoose.Types.ObjectId.isValid(ref)) {
+            or.push({ _id: ref });
+        }
+        or.push(
+            { gatewayPaymentId: ref },
+            { gatewayReference: ref },
+            { 'metadata.gatewayMetadata.gatewayPaymentId': ref },
+            { 'metadata.gatewayMetadata.gatewayReference': ref },
+            { 'metadata.gatewayMetadata.paymentId': ref }
+        );
+    });
+
+    return Payment.findOne({
+        gateway: PAYMENT_GATEWAYS.PAYMENTO,
+        $or: or,
+    });
+};
+
 const systemActor = () => ({
     actorId: SYSTEM_ACTOR_ID,
     actorRole: ACTOR_ROLES.SYSTEM,
@@ -301,6 +500,7 @@ const auditWebhook = ({
     payment = null,
     requestMeta = {},
     metadata = {},
+    provider = PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL,
 }) => {
     void createAuditLog({
         actorId: SYSTEM_ACTOR_ID,
@@ -311,7 +511,7 @@ const auditWebhook = ({
         metadata: {
             webhookEventId: event?._id,
             dedupeKey: event?.dedupeKey,
-            provider: PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL,
+            provider,
             status: event?.status,
             gatewayReference: event?.gatewayReference,
             gatewayPaymentId: event?.gatewayPaymentId,
@@ -511,10 +711,207 @@ const processNetworkWebhook = async ({ payload = {}, headers = {}, requestMeta =
     }
 };
 
+const processPaymentoWebhook = async ({
+    payload = {},
+    headers = {},
+    rawBody = null,
+    requestMeta = {},
+} = {}) => {
+    const verification = verifyPaymentoSignature({ headers, rawBody, payload });
+    const refs = extractPaymentoWebhookRefs(payload, headers);
+    const payloadHash = hashPayload(payload);
+    const dedupeKey = buildPaymentoDedupeKey({ refs, payloadHash });
+    const now = new Date();
+
+    const duplicateEvent = await PaymentWebhookEvent.findOneAndUpdate(
+        { dedupeKey },
+        {
+            $inc: { attempts: 1 },
+            $set: {
+                lastReceivedAt: now,
+                processingStatus: 'DUPLICATE',
+            },
+        },
+        { new: true }
+    );
+
+    if (duplicateEvent) {
+        auditWebhook({
+            event: duplicateEvent,
+            action: PAYMENT_ACTIONS.WEBHOOK_DUPLICATE,
+            requestMeta,
+            metadata: { duplicate: true },
+            provider: PAYMENT_GATEWAYS.PAYMENTO,
+        });
+        return {
+            accepted: true,
+            duplicate: true,
+            event: duplicateEvent,
+            payment: duplicateEvent.paymentId ? await Payment.findById(duplicateEvent.paymentId) : null,
+            verification,
+        };
+    }
+
+    let event;
+    try {
+        event = await PaymentWebhookEvent.create({
+            provider: PAYMENT_GATEWAYS.PAYMENTO,
+            eventId: refs.eventId,
+            dedupeKey,
+            gatewayPaymentId: refs.gatewayPaymentId,
+            gatewayReference: refs.gatewayReference,
+            orderReference: refs.orderReference,
+            eventType: refs.eventType,
+            providerStatus: refs.providerStatus,
+            status: PAYMENT_WEBHOOK_EVENT_STATUSES.RECEIVED,
+            processingStatus: 'RECEIVED',
+            httpHeaders: safeHeaders(headers),
+            payloadHash,
+            payloadSummary: sanitizeValue(buildPaymentoPayloadSummary(payload, refs)),
+            attempts: 1,
+            receivedAt: now,
+        });
+    } catch (err) {
+        if (err.code !== 11000) throw err;
+
+        const racedDuplicate = await PaymentWebhookEvent.findOneAndUpdate(
+            { dedupeKey },
+            {
+                $inc: { attempts: 1 },
+                $set: {
+                    lastReceivedAt: now,
+                    processingStatus: 'DUPLICATE',
+                },
+            },
+            { new: true }
+        );
+
+        auditWebhook({
+            event: racedDuplicate,
+            action: PAYMENT_ACTIONS.WEBHOOK_DUPLICATE,
+            requestMeta,
+            metadata: { duplicate: true, source: 'unique_index_race' },
+            provider: PAYMENT_GATEWAYS.PAYMENTO,
+        });
+
+        return {
+            accepted: true,
+            duplicate: true,
+            event: racedDuplicate,
+            payment: racedDuplicate?.paymentId ? await Payment.findById(racedDuplicate.paymentId) : null,
+            verification,
+        };
+    }
+
+    auditWebhook({
+        event,
+        action: PAYMENT_ACTIONS.WEBHOOK_RECEIVED,
+        requestMeta,
+        metadata: { verificationMode: verification.mode },
+        provider: PAYMENT_GATEWAYS.PAYMENTO,
+    });
+
+    const payment = await resolvePaymentoPaymentFromWebhook(refs);
+    if (!payment) {
+        event = await markEvent(event, {
+            status: PAYMENT_WEBHOOK_EVENT_STATUSES.UNMATCHED,
+            processingStatus: 'UNMATCHED',
+            processedAt: new Date(),
+            errorCode: 'PAYMENTO_WEBHOOK_UNMATCHED_PAYMENT',
+            errorMessage: 'Paymento webhook accepted but no matching payment was found.',
+        });
+        auditWebhook({
+            event,
+            action: PAYMENT_ACTIONS.WEBHOOK_UNMATCHED,
+            requestMeta,
+            provider: PAYMENT_GATEWAYS.PAYMENTO,
+        });
+        return {
+            accepted: true,
+            duplicate: false,
+            event,
+            payment: null,
+            verification,
+            unmatched: true,
+        };
+    }
+
+    event = await markEvent(event, {
+        paymentId: payment._id,
+        processingStatus: 'VERIFYING_PROVIDER_STATUS',
+    });
+
+    try {
+        const syncResult = await paymentService.syncPaymentStatus(payment._id, {
+            actor: systemActor(),
+            requestMeta,
+            source: 'paymento_webhook',
+        });
+        event = await markEvent(event, {
+            status: PAYMENT_WEBHOOK_EVENT_STATUSES.PROCESSED,
+            processingStatus: 'PROCESSED',
+            processedAt: new Date(),
+            providerStatus: syncResult.providerStatus || refs.providerStatus || null,
+            errorCode: null,
+            errorMessage: null,
+        });
+        auditWebhook({
+            event,
+            action: PAYMENT_ACTIONS.WEBHOOK_PROCESSED,
+            payment,
+            requestMeta,
+            metadata: {
+                providerStatus: syncResult.providerStatus || null,
+                paymentStatus: syncResult.payment?.status || null,
+                alreadyProcessed: Boolean(syncResult.alreadyProcessed),
+            },
+            provider: PAYMENT_GATEWAYS.PAYMENTO,
+        });
+        return {
+            accepted: true,
+            duplicate: false,
+            event,
+            payment: syncResult.payment,
+            syncResult,
+            verification,
+        };
+    } catch (err) {
+        event = await markEvent(event, {
+            status: PAYMENT_WEBHOOK_EVENT_STATUSES.FAILED,
+            processingStatus: 'FAILED',
+            processedAt: new Date(),
+            errorCode: err.code || 'PAYMENTO_WEBHOOK_PROCESSING_FAILED',
+            errorMessage: err.message || 'Paymento webhook could not be processed.',
+        });
+        auditWebhook({
+            event,
+            action: PAYMENT_ACTIONS.WEBHOOK_FAILED,
+            payment,
+            requestMeta,
+            metadata: {
+                errorCode: err.code || 'PAYMENTO_WEBHOOK_PROCESSING_FAILED',
+                errorMessage: err.message || 'Paymento webhook could not be processed.',
+            },
+            provider: PAYMENT_GATEWAYS.PAYMENTO,
+        });
+        return {
+            accepted: true,
+            duplicate: false,
+            event,
+            payment,
+            verification,
+            errorCode: err.code || 'PAYMENTO_WEBHOOK_PROCESSING_FAILED',
+        };
+    }
+};
+
 module.exports = {
     processNetworkWebhook,
+    processPaymentoWebhook,
     verifyWebhookSecret,
+    verifyPaymentoSignature,
     resolvePaymentFromWebhook,
+    resolvePaymentoPaymentFromWebhook,
     sanitizeValue,
     SYSTEM_ACTOR_ID,
 };

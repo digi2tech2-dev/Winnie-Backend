@@ -23,6 +23,12 @@ const EXECUTION_TYPES = Object.freeze({
     AUTOMATIC: 'automatic',  // sent to provider fulfillment engine
 });
 
+/** Admin-facing store availability state. */
+const PRODUCT_STATUSES = Object.freeze({
+    AVAILABLE: 'available',
+    UNAVAILABLE: 'unavailable',
+});
+
 /**
  * All field types the frontend form builder supports.
  * Validated server-side during order creation.
@@ -270,6 +276,25 @@ const productSchema = new mongoose.Schema(
             default: true,
         },
 
+        /** Whether the product appears in customer catalogues. */
+        visibleInStore: {
+            type: Boolean,
+            default: true,
+        },
+
+        /** Temporary sales pause: product remains visible but cannot be purchased. */
+        isPaused: {
+            type: Boolean,
+            default: false,
+        },
+
+        /** Display/purchase status controlled by the admin settings tab. */
+        status: {
+            type: String,
+            enum: Object.values(PRODUCT_STATUSES),
+            default: PRODUCT_STATUSES.AVAILABLE,
+        },
+
         isAvailableForApi: {
             type: Boolean,
             default: true,
@@ -505,7 +530,7 @@ productSchema.index({ isActive: 1, isAvailableForApi: 1 });
 productSchema.index({ provider: 1, isActive: 1 });        // provider product listings
 productSchema.index({ providerProduct: 1 });               // price-sync: find Products by ProviderProduct
 productSchema.index({ pricingMode: 1, provider: 1 });     // price-sync: find 'sync' mode candidates
-productSchema.index({ isActive: 1, displayOrder: 1 });    // user-facing product list
+productSchema.index({ isActive: 1, visibleInStore: 1, displayOrder: 1 });    // user-facing product list
 productSchema.index({ deletedAt: 1 }, { sparse: true });   // fast filter for non-deleted products
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -531,6 +556,7 @@ module.exports = {
     PRICING_MODES,
     MARKUP_TYPES,
     EXECUTION_TYPES,
+    PRODUCT_STATUSES,
     FIELD_TYPES,
     DYNAMIC_FIELD_TYPES,
     dynamicFieldSchema,

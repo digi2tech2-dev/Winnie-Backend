@@ -22,7 +22,7 @@
  *   - Toggle active / deactivate
  */
 
-const { Product, PRICING_MODES, MARKUP_TYPES, EXECUTION_TYPES, computeFinalPrice } = require('./product.model');
+const { Product, PRICING_MODES, MARKUP_TYPES, EXECUTION_TYPES, PRODUCT_STATUSES, computeFinalPrice } = require('./product.model');
 const { ProviderProduct } = require('../providers/providerProduct.model');
 const { isPositive, add } = require('../../shared/utils/decimalPrecision');
 const {
@@ -43,7 +43,10 @@ const {
  */
 const listProducts = async ({ activeOnly = true, page = 1, limit = 50 } = {}) => {
     const filter = { deletedAt: null };
-    if (activeOnly) filter.isActive = true;
+    if (activeOnly) {
+        filter.isActive = true;
+        filter.visibleInStore = { $ne: false };
+    }
     const skip = (page - 1) * limit;
 
     const [products, total] = await Promise.all([
@@ -94,6 +97,9 @@ const createProduct = async ({
     image = null,
     displayOrder = 0,
     isActive = true,
+    visibleInStore = true,
+    isPaused = false,
+    status = PRODUCT_STATUSES.AVAILABLE,
     executionType = 'manual',
     orderFields = [],
     dynamicFields = [],
@@ -161,6 +167,9 @@ const createProduct = async ({
         image,
         displayOrder,
         isActive,
+        visibleInStore,
+        isPaused,
+        status,
         pricingMode,
         markupType,
         markupValue,
@@ -207,6 +216,9 @@ const publishFromProviderProduct = async ({
     image = null,
     displayOrder = 0,
     isActive = true,
+    visibleInStore = true,
+    isPaused = false,
+    status = PRODUCT_STATUSES.AVAILABLE,
     pricingMode = PRICING_MODES.MANUAL,
     markupType = MARKUP_TYPES.PERCENTAGE,
     markupValue = 0,
@@ -284,6 +296,9 @@ const publishFromProviderProduct = async ({
         image,
         displayOrder,
         isActive,
+        visibleInStore,
+        isPaused,
+        status,
         pricingMode,
         markupType,
         markupValue,
@@ -304,7 +319,8 @@ const publishFromProviderProduct = async ({
  * Admin modifies a published product.
  *
  * Safe fields (all optional):
- *   name, description, image, category, displayOrder, isActive,
+     *   name, description, image, category, displayOrder, isActive,
+     *   visibleInStore, isPaused, status,
  *   basePrice, minQty, maxQty, pricingMode, markupType, markupValue, executionType
  *
  * Pricing rules on update:
@@ -322,6 +338,7 @@ const updateProduct = async (productId, updates) => {
 
     const ALLOWED = [
         'name', 'description', 'image', 'category', 'displayOrder', 'isActive',
+        'visibleInStore', 'isPaused', 'status',
         'basePrice', 'minQty', 'maxQty', 'pricingMode', 'markupType', 'markupValue',
         'executionType', 'orderFields', 'dynamicFields', 'providerMapping',
         'provider', 'providerProduct',
@@ -332,11 +349,16 @@ const updateProduct = async (productId, updates) => {
     );
 
     // ── Determine effective pricing fields ────────────────────────────────
-    const effectivePricingMode = safe.pricingMode ?? product.pricingMode;
+    const requestedPricingMode = safe.pricingMode ?? (
+        safe.syncPriceWithProvider === undefined
+            ? undefined
+            : safe.syncPriceWithProvider ? PRICING_MODES.SYNC : PRICING_MODES.MANUAL
+    );
+    const effectivePricingMode = requestedPricingMode ?? product.pricingMode;
     const effectiveMarkupType = safe.markupType ?? product.markupType;
     const effectiveMarkupValue = safe.markupValue ?? product.markupValue;
 
-    const pricingModeChanged = safe.pricingMode != null && safe.pricingMode !== product.pricingMode;
+    const pricingModeChanged = requestedPricingMode != null && requestedPricingMode !== product.pricingMode;
     const markupChanged = safe.markupType != null || safe.markupValue != null;
     const basePriceChanged = safe.basePrice != null;
     const hasProviderLink = product.providerProduct != null;
@@ -389,7 +411,7 @@ const updateProduct = async (productId, updates) => {
     // Skip recomputation if we already handled this in the safety-net above.
     if (!providerLinkChanged && effectivePricingMode === PRICING_MODES.SYNC && hasProviderLink) {
         // SYNC mode: always compute from providerPrice + markup
-        if (pricingModeChanged || markupChanged) {
+        if (pricingModeChanged || markupChanged || basePriceChanged || safe.finalPrice != null || safe.syncPriceWithProvider === true) {
             const pp = product.providerProduct;
             const effectiveRawPrice = String(pp.rawPrice || pp.rawPayload?.product_price || 0);
             const rawPrice = effectiveRawPrice;
@@ -404,6 +426,7 @@ const updateProduct = async (productId, updates) => {
             // Admin directly set a basePrice — use it as-is
             safe.basePrice = String(safe.basePrice);
             safe.finalPrice = safe.basePrice;
+            safe.enableManualPrice = safe.enableManualPrice ?? false;
         } else if (markupChanged && hasProviderLink) {
             // Admin changed markup while in manual mode — apply one-time markup
             const pp = product.providerProduct;
@@ -431,7 +454,7 @@ const updateProduct = async (productId, updates) => {
     const effectiveEnableManual = safe.enableManualPrice ?? product.enableManualPrice;
     const effectiveManualAdj = safe.manualPriceAdjustment ?? product.manualPriceAdjustment ?? 0;
 
-    if (!providerLinkChanged && effectiveEnableManual && hasProviderLink) {
+    if (!providerLinkChanged && effectiveEnableManual && hasProviderLink && !basePriceChanged) {
         const pp = product.providerProduct;
         const effectiveRawPrice = String(pp.rawPrice || pp.rawPayload?.product_price || 0);
         const rawPrice = effectiveRawPrice;
@@ -456,12 +479,23 @@ const updateProduct = async (productId, updates) => {
         safe.executionType = EXECUTION_TYPES.MANUAL;
     }
 
-    Object.assign(product, safe);
-    await product.save();
-    return product.populate([
-        { path: 'provider', select: 'name slug' },
-        { path: 'providerProduct', select: 'rawName translatedName externalProductId rawPrice minQty maxQty isActive' },
-    ]);
+    product.set(safe);
+    await product.validate();
+
+    const updateSet = {};
+    for (const key of Object.keys(safe)) {
+        updateSet[key] = product.get(key);
+    }
+
+    await Product.updateOne(
+        { _id: product._id },
+        { $set: updateSet },
+        { runValidators: true }
+    );
+
+    return Product.findById(product._id)
+        .populate('provider', 'name slug')
+        .populate('providerProduct', 'rawName translatedName externalProductId rawPrice minQty maxQty isActive');
 };
 
 // =============================================================================

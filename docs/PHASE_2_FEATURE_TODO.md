@@ -6,17 +6,17 @@ Phase 2 should build new business features on top of the cleaned baseline. None 
 
 Purpose: let customers fund wallets or pay invoices through an online payment gateway.
 
-Phase 2.2 status: a wallet top-up only payments base module exists with `Payment`, mock gateway support, real gateway placeholders, and one-time wallet credit through `CARD_PAYMENT_SUCCESS`. Phase 2.5N adds admin-configured online payment risk limits before gateway/payment-intent creation. Phase 2.5P implements Network International / N-Genius Hosted Payment Page order creation and authenticated status sync for wallet top-up only. Phase 2.5P.1 adds backend Network gateway currency conversion so the requested wallet top-up currency can differ from the configured Network outlet currency. Phase 2.5Q adds Network webhook intake, safe event persistence, dedupe, provider re-fetch before credit, and admin reconciliation. Phase 2.5S adds a safe admin payments list/detail/reconciliation UI backed by `/api/admin/payments`. See `docs/PAYMENTS_ARCHITECTURE.md`.
+Phase 2.2 status: a wallet top-up only payments base module exists with `Payment`, mock gateway support, real gateway placeholders, and one-time wallet credit through `CARD_PAYMENT_SUCCESS`. Phase 2.5N adds admin-configured online payment risk limits before gateway/payment-intent creation. Phase 2.5P implements Network International / N-Genius Hosted Payment Page order creation and authenticated status sync for wallet top-up only. Phase 2.5P.1 adds backend Network gateway currency conversion so the requested wallet top-up currency can differ from the configured Network outlet currency. Phase 2.5Q adds Network webhook intake, safe event persistence, dedupe, provider re-fetch before credit, and admin reconciliation. Phase 2.5S adds a safe admin payments list/detail/reconciliation UI backed by `/api/admin/payments`. Phase 2.5W implements Paymento hosted USDT wallet top-ups with backend fiat conversion, the Paymento `Api-key` create/verify contract, token checkout URL handling, HMAC IPN verification when configured, provider verify/status before success, and idempotent wallet credit. See `docs/PAYMENTS_ARCHITECTURE.md`.
 
 Suggested future models: gateway-specific `PaymentWebhookEvent`, optional `PaymentMethod`, and reconciliation records.
 
-Current endpoints: `POST /api/payments/intents`, `GET /api/payments`, `GET /api/payments/:id`, `POST /api/payments/:id/sync-status`, `POST /api/webhooks/payments/network`, `GET /api/admin/payments`, `GET /api/admin/payments/:id`, `POST /api/admin/payments/:id/sync-status`, plus non-production mock confirmation/failure endpoints.
+Current endpoints: `POST /api/payments/intents`, `GET /api/payments`, `GET /api/payments/:id`, `POST /api/payments/:id/sync-status`, `POST /api/webhooks/payments/network`, `POST /api/webhooks/payments/paymento`, `GET /api/admin/payments`, `GET /api/admin/payments/:id`, `POST /api/admin/payments/:id/sync-status`, plus non-production mock confirmation/failure endpoints.
 
 Suggested future endpoints: scheduled reconciliation jobs and settlement/reconciliation reporting endpoints.
 
 Dependencies: gateway SDK/API choice, webhook signature verification, settlement/fee rules, admin settings.
 
-Risks: double-crediting, chargebacks, currency conversion drift, PCI/security boundaries, replayed webhooks. Phase 2.5N reduces gateway-abuse exposure by blocking unusual online top-up amount/attempt patterns before a gateway call is made. Phase 2.5P keeps card data on Network hosted pages and never credits the wallet from browser return alone. Phase 2.5P.1 snapshots requested/gateway currency conversion with platform rates and keeps wallet credit based on the intended payment amount/currency. Phase 2.5Q deduplicates webhook events and still re-fetches Network status before success/credit.
+Risks: double-crediting, chargebacks, currency conversion drift, PCI/security boundaries, replayed webhooks. Phase 2.5N reduces gateway-abuse exposure by blocking unusual online top-up amount/attempt patterns before a gateway call is made. Phase 2.5P keeps card data on Network hosted pages and never credits the wallet from browser return alone. Phase 2.5P.1 snapshots requested/gateway currency conversion with platform rates and keeps wallet credit based on the intended payment amount/currency. Phase 2.5Q deduplicates webhook events and still re-fetches Network status before success/credit. Phase 2.5W keeps USDT checkout hosted by Paymento, verifies Paymento status server-side before success, and never credits from IPN/browser return payload alone.
 
 ## Payment Gateway Webhooks
 
@@ -26,7 +26,7 @@ Suggested models: `PaymentWebhookEvent`, webhook event metadata on `PaymentTrans
 
 Suggested endpoints: `POST /api/webhooks/payments/:provider`.
 
-Dependencies: confirmed Network portal webhook header/signature settings, replay protection, payment state machine, gateway-specific event schemas. Phase 2.5Q supports shared-header secret verification and unverified intake mode that still requires provider status re-fetch before credit.
+Dependencies: confirmed Network portal webhook header/signature settings, confirmed Paymento signature headers, replay protection, payment state machine, gateway-specific event schemas. Phase 2.5Q supports shared-header secret verification and unverified intake mode that still requires provider status re-fetch before credit. Phase 2.5W supports Paymento create at `/v1/payment/request`, verify at `/v1/payment/verify`, token-based checkout/status sync, HMAC SHA-256 verification when `PAYMENTO_IPN_SECRET` is configured, and still requires Paymento verify/status before credit.
 
 Risks: replay attacks, out-of-order events, retry storms, partial wallet updates.
 

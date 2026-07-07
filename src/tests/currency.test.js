@@ -224,8 +224,39 @@ describe('[5] currency.service admin operations', () => {
 
     it('updateCurrencyRate changes platformRate and invalidates cache', async () => {
         await makeCurrency({ code: 'SAR', platformRate: 4.00 });
+        const cached = await convertUsdToUserCurrency(10, 'SAR');
+        expect(cached.rate).toBe(4.00);
+
         const { currency: updated } = await currencyService.updateCurrencyRate('SAR', { platformRate: 4.50 });
+        const converted = await convertUsdToUserCurrency(10, 'SAR');
+
         expect(updated.platformRate).toBeCloseTo(4.50, 4);
+        expect(converted.rate).toBe(4.50);
+        expect(converted.finalAmount).toBe(45);
+    });
+
+    it('updateCurrencyRate edits display fields, rates, markup and active state together', async () => {
+        await makeCurrency({ code: 'SAR' });
+
+        const { currency: updated } = await currencyService.updateCurrencyRate('SAR', {
+            name: 'Saudi Riyal Updated',
+            symbol: 'SAR',
+            marketRate: 3.76,
+            platformRate: 4.25,
+            markupPercentage: 7.5,
+            isActive: false,
+        });
+        const active = await currencyService.listCurrencies({ activeOnly: true });
+
+        expect(updated).toMatchObject({
+            name: 'Saudi Riyal Updated',
+            symbol: 'SAR',
+            marketRate: 3.76,
+            platformRate: 4.25,
+            markupPercentage: 7.5,
+            isActive: false,
+        });
+        expect(active.some((currency) => currency.code === 'SAR')).toBe(false);
     });
 
     it('updateCurrencyRate refuses to change USD rate away from 1', async () => {
@@ -272,12 +303,57 @@ describe('[5] currency.service admin operations', () => {
         expect(c.marketRate).toBeCloseTo(3.67, 4);
     });
 
-    it('createCurrency rejects missing marketRate', async () => {
-        await expect(
-            currencyService.createCurrency({
-                code: 'AED', name: 'UAE Dirham', symbol: 'AED', platformRate: 3.67,
-            })
-        ).rejects.toMatchObject({ code: 'INVALID_MARKET_RATE' });
+    it('createCurrency allows missing marketRate and persists it as null', async () => {
+        const c = await currencyService.createCurrency({
+            code: 'AED', name: 'UAE Dirham', symbol: 'AED', platformRate: 3.67,
+        });
+
+        expect(c.code).toBe('AED');
+        expect(c.marketRate).toBeNull();
+    });
+
+    it('updateCurrencyRate allows clearing marketRate and persists it as null', async () => {
+        await makeCurrency({ code: 'SAR', marketRate: 3.75 });
+
+        const { currency } = await currencyService.updateCurrencyRate('SAR', { marketRate: null });
+        const reloaded = await Currency.findOne({ code: 'SAR' });
+
+        expect(currency.marketRate).toBeNull();
+        expect(reloaded.marketRate).toBeNull();
+    });
+
+    it('updateCurrencyRate persists all editable form fields after reload', async () => {
+        await makeCurrency({ code: 'SAR', marketRate: 3.75, markupPercentage: 5, platformRate: 4.00 });
+        const updateSpy = jest.spyOn(Currency, 'updateOne');
+
+        await currencyService.updateCurrencyRate('SAR', {
+            name: 'Saudi Riyal Reloaded',
+            symbol: 'SR',
+            marketRate: 3.76,
+            platformRate: 4.25,
+            markupPercentage: 0,
+            isActive: false,
+        });
+        const reloaded = await Currency.findOne({ code: 'SAR' });
+        const mongoUpdate = updateSpy.mock.calls.at(-1)[1].$set;
+
+        expect(mongoUpdate).toMatchObject({
+            name: 'Saudi Riyal Reloaded',
+            symbol: 'SR',
+            marketRate: 3.76,
+            platformRate: 4.25,
+            markupPercentage: 0,
+            isActive: false,
+        });
+        expect(reloaded).toMatchObject({
+            name: 'Saudi Riyal Reloaded',
+            symbol: 'SR',
+            marketRate: 3.76,
+            platformRate: 4.25,
+            markupPercentage: 0,
+            isActive: false,
+        });
+        updateSpy.mockRestore();
     });
 
     it('createCurrency refuses duplicate codes', async () => {
@@ -288,6 +364,34 @@ describe('[5] currency.service admin operations', () => {
                 code: 'SAR', name: 'X', symbol: 'X', platformRate: 1,
             })
         ).rejects.toThrow('already exists');
+    });
+
+    it('deleteCurrency removes an unused non-USD currency', async () => {
+        await makeCurrency({ code: 'SAR' });
+
+        const deleted = await currencyService.deleteCurrency('SAR');
+        const found = await Currency.findOne({ code: 'SAR' });
+
+        expect(deleted.code).toBe('SAR');
+        expect(found).toBeNull();
+    });
+
+    it('deleteCurrency refuses to delete USD', async () => {
+        await currencyService.seedBaseCurrency();
+
+        await expect(currencyService.deleteCurrency('USD')).rejects.toMatchObject({
+            code: 'CANNOT_DELETE_USD',
+        });
+    });
+
+    it('deleteCurrency refuses to delete a currency assigned to users', async () => {
+        await makeCurrency({ code: 'SAR' });
+        const { customer } = await createCustomerWithGroup();
+        await User.findByIdAndUpdate(customer._id, { currency: 'SAR' });
+
+        await expect(currencyService.deleteCurrency('SAR')).rejects.toMatchObject({
+            code: 'CURRENCY_IN_USE',
+        });
     });
 });
 
