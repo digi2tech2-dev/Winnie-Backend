@@ -225,7 +225,18 @@ const getMyProfile = async (userId) => {
  * Only allows safe profile fields. Password changes require
  * updateMyPassword so currentPassword is verified first.
  */
-const updateMyProfile = async (userId, { name, email, phone, username }) => {
+const updateMyProfile = async (userId, updates = {}) => {
+    if (
+        Object.prototype.hasOwnProperty.call(updates, 'currency')
+        || Object.prototype.hasOwnProperty.call(updates, 'walletCurrency')
+    ) {
+        throw new BusinessRuleError(
+            'Currency can only be changed by an administrator.',
+            'CUSTOMER_CURRENCY_CHANGE_DISABLED'
+        );
+    }
+
+    const { name, email, phone, username } = updates;
     const user = await User.findById(userId);
     if (!user) throw new NotFoundError('User');
 
@@ -296,47 +307,13 @@ const updateMyPassword = async (userId, { currentPassword, newPassword }) => {
 };
 
 /**
- * Customer: Update own preferred currency.
- *
- * This intentionally updates only User.currency. Wallet balances, wallet
- * ledger entries, orders, deposits, payments, pricing groups, and referrals
- * are not recalculated here.
+ * Customer currency changes are disabled. Currency assignment is admin-only.
  */
-const updateMyCurrency = async (userId, currency) => {
-    const code = String(currency || '').trim().toUpperCase();
-
-    if (!code) {
-        throw new BusinessRuleError('Currency is required.', 'CURRENCY_REQUIRED');
-    }
-
-    if (!/^[A-Z]{3}$/.test(code)) {
-        throw new BusinessRuleError(
-            'Currency must be a 3-letter ISO 4217 code.',
-            'INVALID_CURRENCY'
-        );
-    }
-
-    const { Currency } = require('../currency/currency.model');
-    const currencyDoc = await Currency.findOne({ code, isActive: true });
-    if (!currencyDoc || currencyDoc.deletedAt) {
-        throw new BusinessRuleError(
-            `Currency '${code}' is not supported or is inactive.`,
-            'INVALID_CURRENCY'
-        );
-    }
-
-    const user = await User.findById(userId);
-    if (!user) throw new NotFoundError('User');
-
-    if (user.currency !== code) {
-        user.currency = code;
-        await user.save();
-    }
-
-    return {
-        user: user.toSafeObject ? user.toSafeObject() : user.toObject(),
-        currency: code,
-    };
+const updateMyCurrency = async () => {
+    throw new BusinessRuleError(
+        'Currency can only be changed by an administrator.',
+        'CUSTOMER_CURRENCY_CHANGE_DISABLED'
+    );
 };
 
 /**

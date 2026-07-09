@@ -17,12 +17,12 @@ const ROLES = Object.freeze({
 /**
  * User status lifecycle enum.
  *
- * PENDING  → registered, awaiting admin approval (default for new registrations)
- * ACTIVE   → approved by admin; full platform access
+ * PENDING  → registered, awaiting email verification (default)
+ * ACTIVE   → email verified or manually activated; full platform access
  * REJECTED → denied by admin; cannot log in
  *
  * Transitions allowed:
- *   PENDING  → ACTIVE    (admin approval)
+ *   PENDING  → ACTIVE    (email verification or admin activation)
  *   PENDING  → REJECTED  (admin rejection)
  *   ACTIVE   → REJECTED  (admin revoke)
  *   REJECTED → ACTIVE    (admin re-approve)
@@ -205,8 +205,8 @@ const userSchema = new mongoose.Schema(
         // ── Activation Lifecycle ─────────────────────────────────────────────
         /**
          * status governs platform access.
-         * New registrations default to PENDING — admin must approve before the
-         * user can log in, place orders, or use their wallet.
+         * New registrations default to PENDING until email verification.
+         * Administrators can still reject, deactivate, and reactivate users.
          *
          * Backwards-compatibility: the `isActive` virtual below delegates to
          * this field so any code that already reads `user.isActive` continues
@@ -222,7 +222,7 @@ const userSchema = new mongoose.Schema(
             index: true,
         },
 
-        /** Admin who approved the account (null until approved). */
+        /** Admin who manually activated the account (null for email activation). */
         approvedBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',

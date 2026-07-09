@@ -144,7 +144,7 @@ describe('[1] Registration', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('[2] Email Verification', () => {
-    it('marks user as verified and clears token on valid token', async () => {
+    it('marks a pending user as verified and active, then clears the token', async () => {
         const { user, rawToken } = await registerUser();
         expect(user.verified).toBe(false);
 
@@ -154,8 +154,36 @@ describe('[2] Email Verification', () => {
             .select('+emailVerificationToken +emailVerificationExpires +verified');
 
         expect(updated.verified).toBe(true);
+        expect(updated.status).toBe(USER_STATUS.ACTIVE);
         expect(updated.emailVerificationToken).toBeNull();
         expect(updated.emailVerificationExpires).toBeNull();
+    });
+
+    it('allows login immediately after successful email verification', async () => {
+        const { user, rawToken } = await registerUser();
+
+        await verifyEmail(rawToken);
+        const result = await login({ email: user.email, password: 'SecurePass@1' });
+
+        expect(result.token).toBeDefined();
+        expect(result.user.status).toBe(USER_STATUS.ACTIVE);
+        expect(result.user.verified).toBe(true);
+    });
+
+    it('does not reactivate a user rejected by an administrator', async () => {
+        const { user, rawToken } = await registerUser();
+        await User.findByIdAndUpdate(user._id, {
+            status: USER_STATUS.REJECTED,
+            rejectedAt: new Date(),
+        });
+
+        await verifyEmail(rawToken);
+
+        const updated = await User.findById(user._id);
+        expect(updated.verified).toBe(true);
+        expect(updated.status).toBe(USER_STATUS.REJECTED);
+        await expect(login({ email: updated.email, password: 'SecurePass@1' }))
+            .rejects.toMatchObject({ code: 'AUTHENTICATION_ERROR' });
     });
 
     it('returns a redirectUrl', async () => {

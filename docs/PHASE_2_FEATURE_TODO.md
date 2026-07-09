@@ -139,3 +139,35 @@ Current referral endpoints: `GET /api/admin/referral-settings` and `PATCH /api/a
 Dependencies still remaining: payment provider settings beyond Phase 2.2 placeholders and any future typed settings split.
 
 Risks: changing live rules without operational communication; Phase 2.3 validates percentage ranges and audits referral settings updates.
+
+# Account activation and currency contract update
+
+- Customer/self-service currency mutation is disabled. Keep
+  `PATCH /api/admin/users/:id/currency` as the supported assignment path.
+- Email verification atomically changes a non-deleted `PENDING` account to
+  `ACTIVE`. It never changes a `REJECTED` or soft-deleted account to `ACTIVE`.
+- Admin reject/reactivate controls remain supported.
+
+## Existing verified users awaiting legacy approval
+
+The current lifecycle uses `REJECTED` for administrator-disabled accounts, so
+only verified, non-deleted `PENDING` users are eligible for a one-time backfill.
+Inspect the candidates first:
+
+```javascript
+db.users.find(
+  { verified: true, status: "PENDING", deletedAt: null },
+  { email: 1, status: 1, verified: 1, deletedAt: 1 }
+)
+```
+
+After review, activate exactly that set:
+
+```javascript
+db.users.updateMany(
+  { verified: true, status: "PENDING", deletedAt: null },
+  { $set: { status: "ACTIVE", updatedAt: new Date() } }
+)
+```
+
+Do not broaden this query to `REJECTED` or deleted users.
