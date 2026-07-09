@@ -270,13 +270,58 @@ const walletAdjustmentSchema = Joi.object({
         'number.positive': 'Amount must be a positive number',
         'any.required': 'Amount is required',
     }),
-    reason: Joi.string().trim().min(3).max(255).optional().messages({
-        'string.min': 'Reason must be at least 3 characters',
+    reason: Joi.string().trim().min(1).max(500).optional().messages({
+        'string.empty': 'Reason is required',
+        'string.min': 'Reason is required',
+        'string.max': 'Reason cannot exceed 500 characters',
     }),
-    description: Joi.string().trim().min(3).max(255).optional().messages({
-        'string.min': 'Description must be at least 3 characters',
+    note: Joi.string().trim().min(1).max(500).optional().messages({
+        'string.empty': 'Reason is required',
+        'string.min': 'Reason is required',
+        'string.max': 'Reason cannot exceed 500 characters',
     }),
-}).or('reason', 'description');
+    description: Joi.string().trim().min(1).max(500).optional().messages({
+        'string.empty': 'Reason is required',
+        'string.min': 'Reason is required',
+        'string.max': 'Reason cannot exceed 500 characters',
+    }),
+}).custom((value, helpers) => {
+    const reason = [value.reason, value.note, value.description]
+        .map((item) => String(item || '').trim())
+        .find(Boolean);
+    if (!reason) {
+        return helpers.error('any.custom', { message: 'Reason is required' });
+    }
+    return { ...value, reason };
+}).messages({
+    'any.custom': '{{#message}}',
+});
+
+const listAdminWalletAdjustmentsQuery = Joi.object({
+    ...pagination,
+    search: Joi.string().trim().max(200).allow('', null),
+    type: Joi.string().trim().lowercase().valid('all', 'add', 'deduct').default('all'),
+    currency: Joi.string().trim().uppercase().pattern(/^[A-Z]{3}$/).allow('', null),
+    userId: objectId().allow('', null),
+    adminId: objectId().allow('', null),
+    actorId: objectId().allow('', null),
+    dateFrom: Joi.date().iso(),
+    dateTo: Joi.date().iso().min(Joi.ref('dateFrom')),
+    minAmount: Joi.number().min(0),
+    maxAmount: Joi.number().min(0),
+    sort: Joi.string().trim().lowercase().valid('newest', 'oldest', 'amount_desc', 'amount_asc').default('newest'),
+}).custom((value, helpers) => {
+    if (
+        value.minAmount !== undefined &&
+        value.maxAmount !== undefined &&
+        Number(value.minAmount) > Number(value.maxAmount)
+    ) {
+        return helpers.error('any.custom', { message: 'minAmount cannot be greater than maxAmount' });
+    }
+    return value;
+}).messages({
+    'any.custom': '{{#message}}',
+});
 
 const walletSetBalanceSchema = Joi.object({
     targetBalance: Joi.number().required().messages({
@@ -413,6 +458,7 @@ module.exports = {
         updateOrderStatus: updateOrderStatusSchema,
         // Wallet
         walletAdjustment: walletAdjustmentSchema,
+        listAdminWalletAdjustmentsQuery,
         walletSetBalance: walletSetBalanceSchema,
         // Groups
         createGroup: createGroupSchema,

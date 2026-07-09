@@ -196,6 +196,7 @@ router.get('/payments/:id', requirePermission('payments.view'), paymentIdValidat
 // ═══════════════════════════════════════════════════════════════════════════════
 
 router.get('/wallets', requirePermission('wallet.view'), walletCtrl.listWallets);
+router.get('/wallet-adjustments', requirePermission('wallet.view'), validateQuery(schemas.listAdminWalletAdjustmentsQuery), walletCtrl.listAdminAdjustments);
 router.get('/wallets/:userId/transactions', requirePermission('wallet.view'), walletCtrl.getTransactionHistory);
 router.post('/wallets/:userId/add', requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.walletAdjustment), walletCtrl.addFunds);
 router.post('/wallets/:userId/deduct', authorizeRoles('ADMIN'), requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.walletAdjustment), walletCtrl.deductFunds);

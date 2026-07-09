@@ -165,7 +165,21 @@ const walletTransactionSchema = new mongoose.Schema(
         description: {
             type: String,
             trim: true,
-            maxlength: 255,
+            maxlength: 500,
+        },
+
+        reason: {
+            type: String,
+            trim: true,
+            maxlength: 500,
+            default: undefined,
+        },
+
+        note: {
+            type: String,
+            trim: true,
+            maxlength: 500,
+            default: undefined,
         },
 
         metadata: {

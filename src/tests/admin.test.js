@@ -12,7 +12,13 @@
 
 const mongoose = require('mongoose');
 const { User, USER_STATUS } = require('../modules/users/user.model');
-const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
+const {
+    WalletTransaction,
+    TRANSACTION_TYPES,
+    LEDGER_TRANSACTION_TYPES,
+    TRANSACTION_DIRECTIONS,
+    TRANSACTION_SOURCE_TYPES,
+} = require('../modules/wallet/walletTransaction.model');
 const { Currency } = require('../modules/currency/currency.model');
 const { Setting, seedDefaultSettings } = require('../modules/admin/setting.model');
 
@@ -20,6 +26,7 @@ const adminUsersService = require('../modules/admin/admin.users.service');
 const adminWalletService = require('../modules/admin/admin.wallet.service');
 const adminSettingService = require('../modules/admin/admin.settings.service');
 const { validateBody, schemas } = require('../modules/admin/admin.validation');
+const { authorizeRoles } = require('../shared/middlewares/authorize');
 
 const {
     connectTestDB,
@@ -307,6 +314,18 @@ describe('[1] Admin Users Service', () => {
 
 describe('[2] Admin Wallet Service', () => {
 
+    it('addFunds requires a reason', async () => {
+        const { customer, admin } = await setup();
+        await expect(adminWalletService.addFunds(customer._id, 50, '', admin._id))
+            .rejects.toMatchObject({ code: 'ADJUSTMENT_REASON_REQUIRED' });
+    });
+
+    it('deductFunds requires a reason', async () => {
+        const { customer, admin } = await setup();
+        await expect(adminWalletService.deductFunds(customer._id, 30, '   ', admin._id))
+            .rejects.toMatchObject({ code: 'ADJUSTMENT_REASON_REQUIRED' });
+    });
+
     it('addFunds credits the user wallet and creates a CREDIT transaction', async () => {
         const { customer, admin } = await setup();
         const before = customer.walletBalance;
@@ -323,6 +342,9 @@ describe('[2] Admin Wallet Service', () => {
         expect(txn.sourceType).toBe('ADMIN_ADJUSTMENT');
         expect(txn.direction).toBe('CREDIT');
         expect(txn.currency).toBe(customer.currency || 'USD');
+        expect(txn.reason).toBe('Test credit');
+        expect(txn.note).toBe('Test credit');
+        expect(txn.metadata.reason).toBe('Test credit');
         expect(txn.actorId.toString()).toBe(admin._id.toString());
     });
 
@@ -354,6 +376,9 @@ describe('[2] Admin Wallet Service', () => {
         expect(txn.sourceType).toBe('ADMIN_ADJUSTMENT');
         expect(txn.direction).toBe('DEBIT');
         expect(txn.currency).toBe(customer.currency || 'USD');
+        expect(txn.reason).toBe('Test debit');
+        expect(txn.note).toBe('Test debit');
+        expect(txn.metadata.reason).toBe('Test debit');
         expect(txn.actorId.toString()).toBe(admin._id.toString());
     });
 
@@ -413,6 +438,90 @@ describe('[2] Admin Wallet Service', () => {
         const result = await adminWalletService.listWallets({ page: 1, limit: 10 });
         expect(Array.isArray(result.wallets)).toBe(true);
         expect(result.pagination).toBeDefined();
+    });
+
+    it('listAdminAdjustments returns only manual admin add/deduct ledger entries', async () => {
+        const { customer, admin } = await setup();
+        await adminWalletService.addFunds(customer._id, 40, 'Support correction', admin._id);
+        await adminWalletService.deductFunds(customer._id, 10, 'Incorrect credit reversal', admin._id);
+
+        await WalletTransaction.create({
+            userId: customer._id,
+            type: TRANSACTION_TYPES.CREDIT,
+            semanticType: LEDGER_TRANSACTION_TYPES.CARD_PAYMENT_SUCCESS,
+            sourceType: TRANSACTION_SOURCE_TYPES.CARD_PAYMENT,
+            direction: TRANSACTION_DIRECTIONS.CREDIT,
+            amount: 99,
+            balanceBefore: 100,
+            balanceAfter: 199,
+            currency: customer.currency || 'USD',
+            description: 'Payment gateway wallet credit',
+        });
+
+        const result = await adminWalletService.listAdminAdjustments({ page: 1, limit: 20 });
+
+        expect(result.items).toHaveLength(2);
+        expect(result.items.map((item) => item.action).sort()).toEqual(['ADD', 'DEDUCT']);
+        expect(result.items.some((item) => item.amount === 99)).toBe(false);
+        expect(result.summary).toMatchObject({
+            totalAdded: 40,
+            totalDeducted: 10,
+            net: 30,
+            count: 2,
+        });
+    });
+
+    it('listAdminAdjustments filters by add/deduct', async () => {
+        const { customer, admin } = await setup();
+        await adminWalletService.addFunds(customer._id, 25, 'Manual add', admin._id);
+        await adminWalletService.deductFunds(customer._id, 5, 'Manual deduct', admin._id);
+
+        const addOnly = await adminWalletService.listAdminAdjustments({ type: 'add' });
+        const deductOnly = await adminWalletService.listAdminAdjustments({ type: 'deduct' });
+
+        expect(addOnly.items).toHaveLength(1);
+        expect(addOnly.items[0].action).toBe('ADD');
+        expect(deductOnly.items).toHaveLength(1);
+        expect(deductOnly.items[0].action).toBe('DEDUCT');
+    });
+
+    it('listAdminAdjustments searches by user email and reason', async () => {
+        const { customer, admin } = await setup();
+        await adminWalletService.addFunds(customer._id, 15, 'Unique support review adjustment', admin._id);
+
+        const byEmail = await adminWalletService.listAdminAdjustments({ search: customer.email });
+        const byReason = await adminWalletService.listAdminAdjustments({ search: 'support review' });
+
+        expect(byEmail.items).toHaveLength(1);
+        expect(byEmail.items[0].user.email).toBe(customer.email);
+        expect(byReason.items).toHaveLength(1);
+        expect(byReason.items[0].reason).toBe('Unique support review adjustment');
+    });
+
+    it('listAdminAdjustments paginates results', async () => {
+        const { customer, admin } = await setup();
+        await adminWalletService.addFunds(customer._id, 1, 'First adjustment', admin._id);
+        await adminWalletService.addFunds(customer._id, 2, 'Second adjustment', admin._id);
+        await adminWalletService.addFunds(customer._id, 3, 'Third adjustment', admin._id);
+
+        const result = await adminWalletService.listAdminAdjustments({ page: 2, limit: 2 });
+
+        expect(result.items).toHaveLength(1);
+        expect(result.pagination).toMatchObject({ page: 2, limit: 2, total: 3, pages: 2 });
+    });
+
+    it('admin adjustment access rejects non-admin roles at the route guard', () => {
+        const req = { user: { role: 'CUSTOMER' } };
+        const res = {};
+        let caught = null;
+
+        try {
+            authorizeRoles('ADMIN', 'SUPERVISOR')(req, res, () => undefined);
+        } catch (err) {
+            caught = err;
+        }
+
+        expect(caught).toMatchObject({ code: 'AUTHORIZATION_ERROR' });
     });
 });
 
@@ -517,6 +626,17 @@ describe('[4] Joi Validation Schemas', () => {
     it('walletAdjustment: requires reason', () => {
         const err = runBodyValidation(schemas.walletAdjustment, { amount: 10 });
         expect(err).not.toBeNull();
+    });
+
+    it('walletAdjustment: accepts note and normalizes it to reason', () => {
+        const mw = validateBody(schemas.walletAdjustment);
+        const req = { body: { amount: 100, note: 'Admin note alias' } };
+        let caught = undefined;
+
+        mw(req, {}, (err) => { caught = err ?? null; });
+
+        expect(caught).toBeNull();
+        expect(req.body.reason).toBe('Admin note alias');
     });
 
     it('walletAdjustment: accepts valid payload', () => {

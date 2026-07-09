@@ -10,6 +10,7 @@
  */
 
 const { User, ROLES } = require('../users/user.model');
+const mongoose = require('mongoose');
 const {
     WalletTransaction,
     TRANSACTION_TYPES,
@@ -23,6 +24,7 @@ const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.con
 const { notifyManualWalletAdjustment } = require('../notifications/notification.events');
 
 const MAX_ADJUSTMENT = 100_000;  // guard against fat-finger typos
+const MAX_REASON_LENGTH = 500;
 
 /**
  * Safe rounding via integer math — kills IEEE-754 dust like 5.684e-14.
@@ -33,6 +35,23 @@ const safeRound = (value, decimals = 2) => {
     const factor = Math.pow(10, decimals);
     return Math.round(value * factor) / factor;
 };
+
+function normalizeAdjustmentReason(reason) {
+    const normalized = String(reason || '').trim();
+    if (!normalized) {
+        throw new BusinessRuleError(
+            'Adjustment reason is required.',
+            'ADJUSTMENT_REASON_REQUIRED'
+        );
+    }
+    if (normalized.length > MAX_REASON_LENGTH) {
+        throw new BusinessRuleError(
+            `Adjustment reason cannot exceed ${MAX_REASON_LENGTH} characters.`,
+            'ADJUSTMENT_REASON_TOO_LONG'
+        );
+    }
+    return normalized;
+}
 
 function normalizeActorRole(role) {
     const normalized = String(role || ACTOR_ROLES.ADMIN).toUpperCase();
@@ -152,6 +171,195 @@ const getTransactionHistory = async (userId, { page = 1, limit = 20 } = {}) => {
     return { transactions, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
 };
 
+const toObjectId = (value) => (
+    mongoose.Types.ObjectId.isValid(String(value || ''))
+        ? new mongoose.Types.ObjectId(String(value))
+        : null
+);
+
+const buildDateRange = ({ dateFrom, dateTo }) => {
+    const range = {};
+    if (dateFrom) {
+        const from = new Date(dateFrom);
+        if (!Number.isNaN(from.getTime())) range.$gte = from;
+    }
+    if (dateTo) {
+        const to = new Date(dateTo);
+        if (!Number.isNaN(to.getTime())) {
+            const looksLikeDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(dateTo)) ||
+                (dateTo instanceof Date && to.getHours() === 0 && to.getMinutes() === 0 &&
+                    to.getSeconds() === 0 && to.getMilliseconds() === 0);
+            if (looksLikeDateOnly) {
+                to.setHours(23, 59, 59, 999);
+            }
+            range.$lte = to;
+        }
+    }
+    return Object.keys(range).length ? range : null;
+};
+
+const listAdminAdjustments = async (filters = {}) => {
+    const page = Math.max(parseInt(filters.page ?? 1, 10), 1);
+    const limit = Math.min(Math.max(parseInt(filters.limit ?? 20, 10), 1), 100);
+    const skip = (page - 1) * limit;
+    const type = String(filters.type || 'all').toLowerCase();
+    const sort = String(filters.sort || 'newest').toLowerCase();
+
+    const match = {
+        semanticType: LEDGER_TRANSACTION_TYPES.ADMIN_ADJUSTMENT,
+        sourceType: TRANSACTION_SOURCE_TYPES.ADMIN_ADJUSTMENT,
+        'metadata.operation': { $in: ['ADD', 'DEDUCT'] },
+    };
+
+    if (type === 'add') match['metadata.operation'] = 'ADD';
+    if (type === 'deduct') match['metadata.operation'] = 'DEDUCT';
+
+    if (filters.currency) {
+        match.currency = String(filters.currency).trim().toUpperCase();
+    }
+
+    const userObjectId = toObjectId(filters.userId);
+    if (userObjectId) match.userId = userObjectId;
+
+    const actorObjectId = toObjectId(filters.adminId || filters.actorId);
+    if (actorObjectId) match.actorId = actorObjectId;
+
+    const minAmount = Number(filters.minAmount);
+    const maxAmount = Number(filters.maxAmount);
+    if (Number.isFinite(minAmount) || Number.isFinite(maxAmount)) {
+        match.amount = {};
+        if (Number.isFinite(minAmount)) match.amount.$gte = minAmount;
+        if (Number.isFinite(maxAmount)) match.amount.$lte = maxAmount;
+    }
+
+    const dateRange = buildDateRange(filters);
+    if (dateRange) match.createdAt = dateRange;
+
+    const sortStage = {
+        oldest: { createdAt: 1, _id: 1 },
+        amount_desc: { amount: -1, createdAt: -1 },
+        amount_asc: { amount: 1, createdAt: -1 },
+        newest: { createdAt: -1, _id: -1 },
+    }[sort] || { createdAt: -1, _id: -1 };
+
+    const pipeline = [
+        { $match: match },
+        { $addFields: { idString: { $toString: '$_id' } } },
+        {
+            $lookup: {
+                from: 'users',
+                localField: 'userId',
+                foreignField: '_id',
+                as: 'user',
+            },
+        },
+        { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+        {
+            $lookup: {
+                from: 'users',
+                localField: 'actorId',
+                foreignField: '_id',
+                as: 'actor',
+            },
+        },
+        { $unwind: { path: '$actor', preserveNullAndEmptyArrays: true } },
+    ];
+
+    const search = String(filters.search || '').trim();
+    if (search) {
+        const searchRegex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        pipeline.push({
+            $match: {
+                $or: [
+                    { idString: searchRegex },
+                    { description: searchRegex },
+                    { reason: searchRegex },
+                    { note: searchRegex },
+                    { 'metadata.reason': searchRegex },
+                    { 'metadata.note': searchRegex },
+                    { 'user.name': searchRegex },
+                    { 'user.email': searchRegex },
+                    { 'actor.name': searchRegex },
+                    { 'actor.email': searchRegex },
+                ],
+            },
+        });
+    }
+
+    pipeline.push({
+        $facet: {
+            items: [
+                { $sort: sortStage },
+                { $skip: skip },
+                { $limit: limit },
+                {
+                    $project: {
+                        _id: 0,
+                        id: '$idString',
+                        user: {
+                            id: { $toString: '$user._id' },
+                            name: '$user.name',
+                            email: '$user.email',
+                        },
+                        actor: {
+                            id: { $toString: '$actor._id' },
+                            name: '$actor.name',
+                            email: '$actor.email',
+                        },
+                        action: '$metadata.operation',
+                        amount: 1,
+                        currency: 1,
+                        beforeBalance: '$balanceBefore',
+                        afterBalance: '$balanceAfter',
+                        reason: { $ifNull: ['$reason', { $ifNull: ['$metadata.reason', '$description'] }] },
+                        note: { $ifNull: ['$note', '$metadata.note'] },
+                        createdAt: 1,
+                    },
+                },
+            ],
+            total: [{ $count: 'count' }],
+            summary: [
+                {
+                    $group: {
+                        _id: null,
+                        totalAdded: {
+                            $sum: { $cond: [{ $eq: ['$metadata.operation', 'ADD'] }, '$amount', 0] },
+                        },
+                        totalDeducted: {
+                            $sum: { $cond: [{ $eq: ['$metadata.operation', 'DEDUCT'] }, '$amount', 0] },
+                        },
+                        count: { $sum: 1 },
+                    },
+                },
+                {
+                    $project: {
+                        _id: 0,
+                        totalAdded: { $round: ['$totalAdded', 2] },
+                        totalDeducted: { $round: ['$totalDeducted', 2] },
+                        net: { $round: [{ $subtract: ['$totalAdded', '$totalDeducted'] }, 2] },
+                        count: 1,
+                    },
+                },
+            ],
+        },
+    });
+
+    const [result = {}] = await WalletTransaction.aggregate(pipeline);
+    const total = result.total?.[0]?.count || 0;
+    const summary = result.summary?.[0] || {
+        totalAdded: 0,
+        totalDeducted: 0,
+        net: 0,
+        count: 0,
+    };
+
+    return {
+        items: result.items || [],
+        pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+        summary,
+    };
+};
+
 // ─── Manual Add ───────────────────────────────────────────────────────────────
 
 /**
@@ -167,6 +375,7 @@ const getTransactionHistory = async (userId, { page = 1, limit = 20 } = {}) => {
 const addFunds = async (userId, amount, reason, actorContext) => {
     const actor = normalizeActorContext(actorContext);
     const parsedAmount = safeRound(Number(amount));
+    const normalizedReason = normalizeAdjustmentReason(reason);
 
     if (parsedAmount <= 0 || parsedAmount > MAX_ADJUSTMENT) {
         throw new BusinessRuleError(
@@ -216,10 +425,13 @@ const addFunds = async (userId, amount, reason, actorContext) => {
         reference: null,
         currency: userCurrency,
         status: 'COMPLETED',
-        description: reason || `Admin manual credit (${userCurrency})`,
+        description: normalizedReason,
+        reason: normalizedReason,
+        note: normalizedReason,
         metadata: {
             operation: 'ADD',
-            reason,
+            reason: normalizedReason,
+            note: normalizedReason,
             creditRepaid,
             creditUsedBefore,
             creditUsedAfter,
@@ -239,7 +451,7 @@ const addFunds = async (userId, amount, reason, actorContext) => {
             type: 'ADD',
             amount: parsedAmount,
             currency: userCurrency,
-            reason,
+            reason: normalizedReason,
             userId,
             balanceBefore,
             balanceAfter,
@@ -281,6 +493,7 @@ const addFunds = async (userId, amount, reason, actorContext) => {
 const deductFunds = async (userId, amount, reason, actorContext) => {
     const actor = normalizeActorContext(actorContext);
     const parsedAmount = safeRound(Number(amount));
+    const normalizedReason = normalizeAdjustmentReason(reason);
 
     if (parsedAmount <= 0 || parsedAmount > MAX_ADJUSTMENT) {
         throw new BusinessRuleError(
@@ -338,10 +551,13 @@ const deductFunds = async (userId, amount, reason, actorContext) => {
         reference: null,
         currency: userCurrency,
         status: 'COMPLETED',
-        description: reason || `Admin manual debit (${userCurrency})`,
+        description: normalizedReason,
+        reason: normalizedReason,
+        note: normalizedReason,
         metadata: {
             operation: 'DEDUCT',
-            reason,
+            reason: normalizedReason,
+            note: normalizedReason,
             creditDrawn,
             creditUsedBefore,
             creditUsedAfter,
@@ -361,7 +577,7 @@ const deductFunds = async (userId, amount, reason, actorContext) => {
             type: 'DEDUCT',
             amount: parsedAmount,
             currency: userCurrency,
-            reason,
+            reason: normalizedReason,
             userId,
             balanceBefore,
             balanceAfter,
@@ -760,6 +976,7 @@ module.exports = {
     listWallets,
     getWallet,
     getTransactionHistory,
+    listAdminAdjustments,
     addFunds,
     deductFunds,
     setBalance,

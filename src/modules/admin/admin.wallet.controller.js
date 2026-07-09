@@ -41,17 +41,29 @@ const getTransactionHistory = catchAsync(async (req, res) => {
     sendPaginated(res, result.transactions, result.pagination, 'Transactions retrieved');
 });
 
+// GET /admin/wallet-adjustments
+const listAdminAdjustments = catchAsync(async (req, res) => {
+    const result = await svc.listAdminAdjustments(req.query);
+    res.status(200).json({
+        success: true,
+        message: 'Admin wallet adjustments retrieved',
+        data: { items: result.items },
+        pagination: result.pagination,
+        summary: result.summary,
+    });
+});
+
 // POST /admin/wallets/:userId/add
 const addFunds = catchAsync(async (req, res) => {
-    const { amount, reason, description } = req.body;
-    const result = await svc.addFunds(req.params.userId, amount, reason || description, getActorContext(req));
+    const { amount, reason, note, description } = req.body;
+    const result = await svc.addFunds(req.params.userId, amount, reason || note || description, getActorContext(req));
     sendCreated(res, { transaction: result.transaction, user: result.user }, 'Funds added to wallet');
 });
 
 // POST /admin/wallets/:userId/deduct
 const deductFunds = catchAsync(async (req, res) => {
-    const { amount, reason, description } = req.body;
-    const result = await svc.deductFunds(req.params.userId, amount, reason || description, getActorContext(req));
+    const { amount, reason, note, description } = req.body;
+    const result = await svc.deductFunds(req.params.userId, amount, reason || note || description, getActorContext(req));
     sendSuccess(res, { transaction: result.transaction, user: result.user }, 'Funds deducted from wallet');
 });
 
@@ -74,4 +86,4 @@ const adjustDebt = catchAsync(async (req, res) => {
     }, `Debt adjustment (${percentage}%) applied to ${result.usersAdjusted} users`);
 });
 
-module.exports = { listWallets, getWallet, getTransactionHistory, addFunds, deductFunds, setBalance, adjustDebt };
+module.exports = { listWallets, getWallet, getTransactionHistory, listAdminAdjustments, addFunds, deductFunds, setBalance, adjustDebt };
