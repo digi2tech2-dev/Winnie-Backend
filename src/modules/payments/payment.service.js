@@ -19,6 +19,7 @@ const {
 } = require('./paymentRisk.service');
 const { Currency } = require('../currency/currency.model');
 const { User, ROLES } = require('../users/user.model');
+const { assertIdentityVerificationNotRequired } = require('../users/identityVerification.guard');
 const { creditWalletDirect } = require('../wallet/wallet.service');
 const { processWalletCreditSafely } = require('../referrals/referral.service');
 const {
@@ -409,8 +410,9 @@ const createPaymentIntent = async ({
     const normalizedCurrency = normalizeCurrency(currency);
     await assertCurrencySupported(normalizedCurrency);
 
-    const user = await User.findById(userId).select('currency status role createdAt');
+    const user = await User.findById(userId).select('currency status role createdAt identityVerificationRequired');
     if (!user) throw new NotFoundError('User');
+    assertIdentityVerificationNotRequired(user);
     assertWalletCurrencyMatch(user, normalizedCurrency);
 
     const riskResult = await evaluatePaymentRisk({

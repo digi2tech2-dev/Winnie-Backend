@@ -150,6 +150,16 @@ const updateUserCurrencySchema = Joi.object({
     reason: Joi.string().trim().max(255).optional().allow('', null),
 });
 
+const updateIdentityVerificationSchema = Joi.object({
+    required: Joi.boolean().required().messages({
+        'any.required': 'required must be provided',
+        'boolean.base': 'required must be a boolean',
+    }),
+    reason: Joi.string().trim().max(500).optional().allow('', null).messages({
+        'string.max': 'reason cannot exceed 500 characters',
+    }),
+});
+
 const updateCreditLimitSchema = Joi.object({
     creditLimit: Joi.number().min(0).required().messages({
         'number.min': 'Credit limit cannot be negative',
@@ -390,6 +400,7 @@ module.exports = {
         updateUserRole: updateUserRoleSchema,
         updateSupervisorPermissions: updateSupervisorPermissionsSchema,
         updateUserCurrency: updateUserCurrencySchema,
+        updateIdentityVerification: updateIdentityVerificationSchema,
         updateCreditLimit: updateCreditLimitSchema,
         updateUserGroup: updateUserGroupSchema,
         resetUserPassword: resetUserPasswordSchema,

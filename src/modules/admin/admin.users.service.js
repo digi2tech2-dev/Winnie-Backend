@@ -553,6 +553,54 @@ const updateUserGroup = async (id, { groupId, reason } = {}, adminId) => {
     return user;
 };
 
+const updateIdentityVerificationHold = async (id, { required, reason } = {}, adminId) => {
+    if (typeof required !== 'boolean') {
+        throw new BusinessRuleError('required must be a boolean.', 'INVALID_IDENTITY_VERIFICATION_REQUIRED');
+    }
+
+    const user = await _findOrFail(id);
+    if (user.deletedAt) {
+        throw new BusinessRuleError('Cannot update identity verification for a deleted user.', 'DELETED_USER_IDENTITY_VERIFICATION_CHANGE');
+    }
+
+    const now = new Date();
+    const normalizedReason = reason === undefined || reason === null || String(reason).trim() === ''
+        ? null
+        : String(reason).trim();
+
+    user.identityVerificationRequired = required;
+    user.identityVerificationReason = normalizedReason;
+
+    if (required === true) {
+        user.identityVerificationRequestedAt = now;
+        user.identityVerificationRequestedBy = adminId;
+        user.identityVerificationClearedAt = null;
+        user.identityVerificationClearedBy = null;
+    } else {
+        user.identityVerificationClearedAt = now;
+        user.identityVerificationClearedBy = adminId;
+    }
+
+    await user.save();
+    await user.populate('groupId', 'name percentage isActive');
+
+    createAuditLog({
+        actorId: adminId,
+        actorRole: ACTOR_ROLES.ADMIN,
+        action: required === true
+            ? USER_ACTIONS.IDENTITY_VERIFICATION_REQUIRED
+            : USER_ACTIONS.IDENTITY_VERIFICATION_CLEARED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: {
+            required: user.identityVerificationRequired,
+            reason: normalizedReason || undefined,
+        },
+    });
+
+    return user;
+};
+
 module.exports = {
     listUsers,
     listSupervisors,
@@ -566,6 +614,7 @@ module.exports = {
     updateUserRole,
     updateSupervisorPermissions,
     updateUserCurrency,
+    updateIdentityVerificationHold,
     updateUserCreditLimit,
     updateUserGroup,
     resetUserPassword,

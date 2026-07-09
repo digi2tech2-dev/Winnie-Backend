@@ -146,6 +146,12 @@ router.patch('/users/:id/restore', requirePermission('users.status'), usersCtrl.
 // Phase 4 gap-bridged routes
 router.patch('/users/:id/role', authorizeRoles('ADMIN'), validateBody(schemas.updateUserRole), usersCtrl.updateUserRole);
 router.patch('/users/:id/currency', authorizeRoles('ADMIN'), validateBody(schemas.updateUserCurrency), usersCtrl.updateUserCurrency);
+router.patch(
+    '/users/:id/identity-verification',
+    authorizeRoles('ADMIN'),
+    validateBody(schemas.updateIdentityVerification),
+    usersCtrl.updateIdentityVerificationHold
+);
 router.patch('/users/:id/credit-limit', authorizeRoles('ADMIN'), validateBody(schemas.updateCreditLimit), usersCtrl.updateUserCreditLimit);
 router.patch('/users/:id/group', authorizeRoles('ADMIN'), validateBody(schemas.updateUserGroup), usersCtrl.updateUserGroup);
 router.post('/users/:id/reset-password', authorizeRoles('ADMIN'), validateBody(schemas.resetUserPassword), usersCtrl.resetUserPassword);

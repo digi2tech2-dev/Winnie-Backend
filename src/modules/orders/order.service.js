@@ -28,6 +28,7 @@ const {
 } = require('../audit/audit.constants');
 const { convertUsdToUserCurrency } = require('../../services/currencyConverter.service');
 const { User } = require('../users/user.model');
+const { assertIdentityVerificationNotRequired } = require('../users/identityVerification.guard');
 const {
     notifyOrderCompleted,
     notifyOrderCreated,
@@ -116,6 +117,10 @@ const createOrder = async ({
     provider = null,   // â† injected; null = auto-resolve from factory
     customerInput = null,
 }) => {
+    const actionUser = await User.findById(userId).select('identityVerificationRequired');
+    if (!actionUser) throw new NotFoundError('User');
+    assertIdentityVerificationNotRequired(actionUser);
+
     // â”€â”€ Pre-transaction: Idempotency Check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (idempotencyKey) {
         const existing = await Order.findOne({ userId, idempotencyKey })

@@ -3,6 +3,7 @@
 const mongoose = require('mongoose');
 const { DepositRequest, DEPOSIT_STATUS } = require('./deposit.model');
 const { User } = require('../users/user.model');
+const { assertIdentityVerificationNotRequired } = require('../users/identityVerification.guard');
 const { creditWalletDirect } = require('../wallet/wallet.service');
 const { processWalletCreditSafely } = require('../referrals/referral.service');
 const {
@@ -63,8 +64,9 @@ const createDepositRequest = async ({
     auditContext = null,
 }) => {
     // Confirm user exists (belt-and-suspenders — middleware already checks ACTIVE)
-    const user = await User.findById(userId).select('_id role');
+    const user = await User.findById(userId).select('_id role identityVerificationRequired');
     if (!user) throw new NotFoundError('User');
+    assertIdentityVerificationNotRequired(user);
 
     // ── Guard: prevent duplicate pending deposits ────────────────────────
     const existingPending = await DepositRequest.findOne({

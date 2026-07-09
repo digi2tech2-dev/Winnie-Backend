@@ -49,6 +49,8 @@ const getProfile = catchAsync(async (req, res) => {
         status: user.status,
         verified: user.verified,
         currency: user.currency,
+        identityVerificationRequired: user.identityVerificationRequired === true,
+        identityVerificationReason: user.identityVerificationReason || null,
         walletBalance: user.walletBalance,
         group: user.groupId,
         createdAt: user.createdAt,

@@ -62,6 +62,17 @@ class BusinessRuleError extends AppError {
     }
 }
 
+class IdentityVerificationRequiredError extends AppError {
+    constructor(message = 'Please contact support to verify your identity before continuing.') {
+        super(message, 403, 'IDENTITY_VERIFICATION_REQUIRED');
+        this.support = {
+            type: 'whatsapp',
+            phone: '+971527715868',
+            url: 'https://wa.me/971527715868',
+        };
+    }
+}
+
 module.exports = {
     AppError,
     ValidationError,
@@ -71,4 +82,5 @@ module.exports = {
     ConflictError,
     InsufficientFundsError,
     BusinessRuleError,
+    IdentityVerificationRequiredError,
 };

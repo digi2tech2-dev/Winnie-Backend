@@ -332,6 +332,47 @@ const userSchema = new mongoose.Schema(
             match: [/^[A-Z]{3}$/, 'currency must be a 3-letter ISO 4217 code (e.g. USD, SAR)'],
         },
 
+        // ── Identity Verification Hold ────────────────────────────────────────
+        /**
+         * Admin-controlled support hold. Users can still authenticate and view
+         * their account, but sensitive financial/product actions are blocked
+         * while this flag is active.
+         */
+        identityVerificationRequired: {
+            type: Boolean,
+            default: false,
+            index: true,
+        },
+
+        identityVerificationReason: {
+            type: String,
+            trim: true,
+            maxlength: [500, 'Identity verification reason cannot exceed 500 characters'],
+            default: null,
+        },
+
+        identityVerificationRequestedAt: {
+            type: Date,
+            default: null,
+        },
+
+        identityVerificationRequestedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+        },
+
+        identityVerificationClearedAt: {
+            type: Date,
+            default: null,
+        },
+
+        identityVerificationClearedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+        },
+
         // ── Avatar ───────────────────────────────────────────────────────────
         /**
          * URL to the user's profile picture.
@@ -460,6 +501,8 @@ userSchema.methods.toSafeObject = function () {
     delete obj.twoFactorTempToken;
     delete obj.twoFactorTempTokenExpires;
     delete obj.apiToken;
+    delete obj.identityVerificationRequestedBy;
+    delete obj.identityVerificationClearedBy;
     return obj;
 };
 

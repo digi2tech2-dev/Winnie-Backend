@@ -125,6 +125,25 @@ const updateUserCurrency = catchAsync(async (req, res) => {
     sendSuccess(res, { user }, 'User currency updated');
 });
 
+// PATCH /admin/users/:id/identity-verification
+const updateIdentityVerificationHold = catchAsync(async (req, res) => {
+    const user = await svc.updateIdentityVerificationHold(
+        req.params.id,
+        {
+            required: req.body.required,
+            reason: req.body.reason,
+        },
+        req.user._id
+    );
+    sendSuccess(
+        res,
+        { user },
+        user.identityVerificationRequired
+            ? 'Identity verification hold enabled.'
+            : 'Identity verification hold cleared.'
+    );
+});
+
 // POST /admin/users/:id/reset-password
 const resetUserPassword = catchAsync(async (req, res) => {
     const user = await svc.resetUserPassword(req.params.id, req.body.password, req.user._id);
@@ -175,6 +194,7 @@ module.exports = {
     updateUserRole,
     updateSupervisorPermissions,
     updateUserCurrency,
+    updateIdentityVerificationHold,
     updateUserCreditLimit,
     updateUserGroup,
     resetUserPassword,

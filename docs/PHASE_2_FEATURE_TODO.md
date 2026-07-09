@@ -18,6 +18,18 @@ Dependencies: gateway SDK/API choice, webhook signature verification, settlement
 
 Risks: double-crediting, chargebacks, currency conversion drift, PCI/security boundaries, replayed webhooks. Phase 2.5N reduces gateway-abuse exposure by blocking unusual online top-up amount/attempt patterns before a gateway call is made. Phase 2.5P keeps card data on Network hosted pages and never credits the wallet from browser return alone. Phase 2.5P.1 snapshots requested/gateway currency conversion with platform rates and keeps wallet credit based on the intended payment amount/currency. Phase 2.5Q deduplicates webhook events and still re-fetches Network status before success/credit. Phase 2.5W keeps USDT checkout hosted by Paymento, verifies Paymento status server-side before success, and never credits from IPN/browser return payload alone.
 
+## Identity Verification Support Hold
+
+Phase 2.5X status: implemented an admin-controlled `identityVerificationRequired` hold on `User`. Admins can enable or clear the hold from `PATCH /api/admin/users/:id/identity-verification` with an optional reason. Enable/clear writes immutable audit events `USER_IDENTITY_VERIFICATION_REQUIRED` and `USER_IDENTITY_VERIFICATION_CLEARED`.
+
+Customers under hold can still log in and view dashboard/profile/wallet/orders. Sensitive customer actions are blocked server-side before side effects:
+
+- product/order creation, before wallet debit, order creation, or provider execution;
+- online wallet top-up/payment intent creation, before risk/gateway/payment creation;
+- manual deposit request creation, before a pending deposit request is stored.
+
+Blocked responses use HTTP 403 with code `IDENTITY_VERIFICATION_REQUIRED`, message `Please contact support to verify your identity before continuing.`, and WhatsApp support metadata for `+971527715868`. Frontend displays a support modal/banner with the WhatsApp CTA `https://wa.me/971527715868?text=Hello%20Winnie%20Support%2C%20I%20need%20to%20verify%20my%20identity.` No identity documents are uploaded or stored in this phase.
+
 ## Payment Gateway Webhooks
 
 Purpose: receive asynchronous gateway status events and reconcile wallet credits.

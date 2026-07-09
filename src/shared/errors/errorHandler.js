@@ -75,6 +75,7 @@ const sendErrorDev = (err, res) => {
         success: false,
         code: err.code,
         message: err.message,
+        support: err.support || undefined,
         details: err.details || undefined,
         errors: err.errors || undefined,
         stack: err.stack,
@@ -91,6 +92,7 @@ const sendErrorProd = (err, res) => {
             success: false,
             code: err.code,
             message: err.message,
+            support: err.support || undefined,
             details: err.details || undefined,
             errors: err.errors || undefined,
         });
