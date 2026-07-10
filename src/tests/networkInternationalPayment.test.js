@@ -173,6 +173,34 @@ const saveRiskSettings = async (overrides = {}) => {
     );
 };
 
+const savePaymentMethod = async (method = {}) => {
+    await Setting.updateOne(
+        { key: 'paymentGroups' },
+        {
+            $set: {
+                key: 'paymentGroups',
+                value: [{
+                    id: 'wallet-topup',
+                    name: 'Wallet top-up',
+                    currency: method.currency || 'EGP',
+                    isActive: true,
+                    methods: [{
+                        id: method.id || 'pm-network-fee',
+                        name: 'Network fee method',
+                        gateway: PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL,
+                        currencies: [method.currency || 'EGP'],
+                        fee: method.fee ?? 2,
+                        isActive: true,
+                        customerVisible: true,
+                    }],
+                }],
+                description: 'Network payment method test settings',
+            },
+        },
+        { upsert: true }
+    );
+};
+
 describe('Network International hosted payment gateway', () => {
     it('requires Network configuration only when the gateway is selected', async () => {
         process.env.PAYMENT_ALLOWED_GATEWAYS = 'MOCK,NETWORK_INTERNATIONAL';
@@ -360,6 +388,65 @@ describe('Network International hosted payment gateway', () => {
         expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(0);
     });
 
+    it('charges Network from fee-inclusive payable amount while preserving wallet credit amount', async () => {
+        enableNetworkGateway();
+        const customer = await createNetworkCustomer({ walletBalance: 500, currency: 'EGP' });
+        await savePaymentMethod({ fee: 2, currency: 'EGP' });
+        const client = makeHttpClient();
+        mockCreateOrder(client);
+
+        const result = await createNetworkIntent(customer, {
+            amount: 100,
+            currency: 'EGP',
+            paymentMethodId: 'pm-network-fee',
+        });
+
+        expect(client.post).toHaveBeenNthCalledWith(
+            2,
+            '/transactions/outlets/outlet-123/orders',
+            expect.objectContaining({
+                amount: { currencyCode: 'AED', value: 749 },
+                merchantOrderReference: result.payment._id.toString(),
+            }),
+            expect.any(Object)
+        );
+        expect(result.payment.amount).toBe(100);
+        expect(result.payment.feePercent).toBe(2);
+        expect(result.payment.feeAmount).toBe(2);
+        expect(result.payment.totalAmount).toBe(102);
+        expect(result.payment.metadata.gatewayMetadata).toMatchObject({
+            requestedAmount: 100,
+            requestedCurrency: 'EGP',
+            feePercent: 2,
+            feeAmount: 2,
+            payableAmount: 102,
+            payableCurrency: 'EGP',
+            gatewayAmount: 7.49,
+            gatewayCurrency: 'AED',
+            amountMinor: 749,
+        });
+        expect(result.payment.metadata.gatewayCurrencyConversion).toMatchObject({
+            requestedAmount: 100,
+            requestedCurrency: 'EGP',
+            feePercent: 2,
+            feeAmount: 2,
+            payableAmount: 102,
+            payableCurrency: 'EGP',
+            gatewayAmount: 7.49,
+            gatewayCurrency: 'AED',
+        });
+        expect(result.checkout).toMatchObject({
+            requestedAmount: 100,
+            requestedCurrency: 'EGP',
+            feePercent: 2,
+            feeAmount: 2,
+            payableAmount: 102,
+            payableCurrency: 'EGP',
+            gatewayAmount: 7.49,
+            gatewayCurrency: 'AED',
+        });
+    });
+
     it('returns a safe conversion error and skips Network HTTP calls when gateway currency rate is unavailable', async () => {
         enableNetworkGateway();
         await createEgpCurrency();
@@ -417,7 +504,9 @@ describe('Network International hosted payment gateway', () => {
             '[payments.networkInternational.createOrder.failed]',
             expect.any(String)
         );
-        const loggedPayload = warnSpy.mock.calls[0][1];
+        const failureLog = warnSpy.mock.calls.find(([label]) => label === '[payments.networkInternational.createOrder.failed]');
+        expect(failureLog).toBeDefined();
+        const loggedPayload = failureLog[1];
         const parsedPayload = JSON.parse(loggedPayload);
         expect(parsedPayload).toMatchObject({
             endpointPath: '/transactions/outlets/[REDACTED]/orders',

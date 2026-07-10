@@ -1,6 +1,7 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const Decimal = require('decimal.js');
 const { Payment } = require('./payment.model');
 const { PaymentWebhookEvent } = require('./paymentWebhookEvent.model');
 const {
@@ -18,6 +19,7 @@ const {
     logPaymentRiskBlock,
 } = require('./paymentRisk.service');
 const { Currency } = require('../currency/currency.model');
+const { Setting } = require('../admin/setting.model');
 const { User, ROLES } = require('../users/user.model');
 const { assertIdentityVerificationNotRequired } = require('../users/identityVerification.guard');
 const { creditWalletDirect } = require('../wallet/wallet.service');
@@ -81,6 +83,11 @@ const normalizeCurrency = (currency) => String(currency || 'USD').trim().toUpper
 const normalizeIdempotencyKey = (key) => {
     const normalized = String(key || '').trim();
     return normalized ? normalized.slice(0, 160) : undefined;
+};
+
+const normalizeOptionalPaymentMethodId = (value) => {
+    const normalized = String(value || '').trim();
+    return normalized ? normalized.slice(0, 160) : null;
 };
 
 const assertPaymentsEnabled = () => {
@@ -217,6 +224,115 @@ const convertToConfiguredGatewayCurrency = async ({
     }
 };
 
+const normalizePaymentMethodAmountLimit = (value) => {
+    if (value === undefined || value === null || value === '') return null;
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? number : null;
+};
+
+const assertPaymentMethodAmountAllowed = (amount, method) => {
+    if (!method) return;
+
+    const minAmount = normalizePaymentMethodAmountLimit(method.minAmount);
+    const maxAmount = normalizePaymentMethodAmountLimit(method.maxAmount);
+
+    if (minAmount !== null && amount < minAmount) {
+        throw new BusinessRuleError(
+            `Payment amount must be at least ${minAmount} for this payment method.`,
+            'PAYMENT_METHOD_AMOUNT_TOO_LOW'
+        );
+    }
+
+    if (maxAmount !== null && amount > maxAmount) {
+        throw new BusinessRuleError(
+            `Payment amount cannot exceed ${maxAmount} for this payment method.`,
+            'PAYMENT_METHOD_AMOUNT_TOO_HIGH'
+        );
+    }
+};
+
+const getPaymentMethodFeePercent = (method) => {
+    if (!method) return 0;
+    const rawFee = method.fee ?? method.feePercent ?? method.feePercentage ?? 0;
+    if (rawFee === undefined || rawFee === null || rawFee === '') return 0;
+
+    const feePercent = Number(rawFee);
+    if (!Number.isFinite(feePercent)) return 0;
+    if (feePercent < 0) {
+        throw new BusinessRuleError('Payment method fee percent cannot be negative.', 'INVALID_PAYMENT_METHOD_FEE');
+    }
+    return feePercent;
+};
+
+const getPaymentMethodCurrencies = (method, group) => {
+    const source = method?.currencies || method?.currency || group?.currency;
+    const values = Array.isArray(source) ? source : [source];
+    return values
+        .map((currency) => String(currency || '').trim().toUpperCase())
+        .filter((currency) => /^[A-Z]{3}$/.test(currency));
+};
+
+const getPaymentMethodGateway = (method) => (
+    method?.gateway ||
+    method?.provider ||
+    ''
+).toString().trim().toUpperCase();
+
+const assertPaymentMethodUsable = (method, group, { gateway, currency }) => {
+    if (group?.isActive === false || group?.active === false || method?.isActive === false || method?.active === false) {
+        throw new BusinessRuleError('Selected payment method is not active.', 'PAYMENT_METHOD_INACTIVE');
+    }
+
+    const methodGateway = getPaymentMethodGateway(method);
+    if (methodGateway && methodGateway !== gateway) {
+        throw new BusinessRuleError('Selected payment method does not match the requested gateway.', 'PAYMENT_METHOD_GATEWAY_MISMATCH');
+    }
+
+    const currencies = getPaymentMethodCurrencies(method, group);
+    if (currencies.length && !currencies.includes(currency)) {
+        throw new BusinessRuleError('Selected payment method does not support this currency.', 'PAYMENT_METHOD_CURRENCY_MISMATCH');
+    }
+};
+
+const findConfiguredPaymentMethod = async (paymentMethodId, { gateway, currency } = {}) => {
+    const normalizedPaymentMethodId = normalizeOptionalPaymentMethodId(paymentMethodId);
+    if (!normalizedPaymentMethodId) return null;
+
+    const setting = await Setting.findOne({ key: 'paymentGroups' }).lean();
+    const groups = Array.isArray(setting?.value) ? setting.value : [];
+
+    for (const group of groups) {
+        const methods = Array.isArray(group?.methods) ? group.methods : [];
+        const method = methods.find((candidate) => String(candidate?.id || candidate?._id || '') === normalizedPaymentMethodId);
+        if (!method) continue;
+
+        assertPaymentMethodUsable(method, group, { gateway, currency });
+        return { ...method, paymentMethodId: normalizedPaymentMethodId, group };
+    }
+
+    throw new BusinessRuleError('Selected payment method was not found.', 'PAYMENT_METHOD_NOT_FOUND');
+};
+
+const calculatePaymentFeeBreakdown = ({ requestedAmount, feePercent }) => {
+    const requested = new Decimal(requestedAmount);
+    const percent = new Decimal(feePercent || 0);
+    const feeAmount = percent.isZero() ? new Decimal(0) : requested.mul(percent).div(100);
+    const payableAmount = requested.plus(feeAmount);
+
+    if (feeAmount.isNegative()) {
+        throw new BusinessRuleError('Payment fee cannot be negative.', 'INVALID_PAYMENT_METHOD_FEE');
+    }
+    if (!payableAmount.isFinite() || payableAmount.lte(0)) {
+        throw new BusinessRuleError('Payment payable amount must be greater than zero.', 'INVALID_PAYMENT_AMOUNT');
+    }
+
+    return {
+        feePercent: percent.toNumber(),
+        feeAmount: feeAmount.toNumber(),
+        totalAmount: payableAmount.toNumber(),
+    };
+};
+
 const convertToNetworkGatewayCurrency = async ({ requestedAmount, requestedCurrency }) =>
     convertToConfiguredGatewayCurrency({
         requestedAmount,
@@ -290,6 +406,10 @@ const safePaymentMetadata = (metadata = {}) => {
         response.gatewayCurrencyConversion = pickDefined(conversion, [
             'requestedAmount',
             'requestedCurrency',
+            'feePercent',
+            'feeAmount',
+            'payableAmount',
+            'payableCurrency',
             'gatewayAmount',
             'gatewayCurrency',
             'exchangeRate',
@@ -315,16 +435,29 @@ const safePaymentMetadata = (metadata = {}) => {
 
 const safeGatewayChargeFields = (paymentOrDoc) => {
     const conversion = getGatewayCurrencyConversion(paymentOrDoc);
+    const totalAmount = paymentOrDoc?.totalAmount ?? paymentOrDoc?.amount;
+    const currency = paymentOrDoc?.currency;
+    const feeAmount = paymentOrDoc?.feeAmount ?? 0;
+    const feePercent = paymentOrDoc?.feePercent ?? 0;
+    const baseFields = {
+        feePercent,
+        feeAmount,
+        payableAmount: totalAmount,
+        payableCurrency: currency,
+    };
+
     if (!conversion) {
         return {
+            ...baseFields,
             requestedAmount: paymentOrDoc?.amount,
-            requestedCurrency: paymentOrDoc?.currency,
+            requestedCurrency: currency,
         };
     }
 
     return {
-        requestedAmount: conversion.requestedAmount,
-        requestedCurrency: conversion.requestedCurrency,
+        ...baseFields,
+        requestedAmount: paymentOrDoc?.amount ?? conversion.requestedAmount,
+        requestedCurrency: currency ?? conversion.requestedCurrency,
         gatewayAmount: conversion.gatewayAmount,
         gatewayCurrency: conversion.gatewayCurrency,
         exchangeRate: conversion.exchangeRate,
@@ -357,7 +490,9 @@ const serializePayment = (payment, { admin = false, webhookEvents = [] } = {}) =
         purpose: doc.purpose,
         gateway: doc.gateway,
         method: doc.method,
+        paymentMethodId: doc.paymentMethodId || null,
         amount: doc.amount,
+        feePercent: doc.feePercent || 0,
         feeAmount: doc.feeAmount,
         totalAmount: doc.totalAmount,
         currency: doc.currency,
@@ -394,6 +529,7 @@ const createPaymentIntent = async ({
     amount,
     currency,
     gateway,
+    paymentMethodId = null,
     returnUrl = null,
     cancelUrl = null,
     idempotencyKey = null,
@@ -409,6 +545,12 @@ const createPaymentIntent = async ({
 
     const normalizedCurrency = normalizeCurrency(currency);
     await assertCurrencySupported(normalizedCurrency);
+
+    const selectedPaymentMethod = await findConfiguredPaymentMethod(paymentMethodId, {
+        gateway: normalizedGateway,
+        currency: normalizedCurrency,
+    });
+    assertPaymentMethodAmountAllowed(parsedAmount, selectedPaymentMethod);
 
     const user = await User.findById(userId).select('currency status role createdAt identityVerificationRequired');
     if (!user) throw new NotFoundError('User');
@@ -450,8 +592,13 @@ const createPaymentIntent = async ({
     }
 
     const paymentId = new mongoose.Types.ObjectId();
-    const feeAmount = 0;
-    const totalAmount = safeRound(parsedAmount + feeAmount);
+    const feeBreakdown = calculatePaymentFeeBreakdown({
+        requestedAmount: parsedAmount,
+        feePercent: getPaymentMethodFeePercent(selectedPaymentMethod),
+    });
+    const feePercent = feeBreakdown.feePercent;
+    const feeAmount = feeBreakdown.feeAmount;
+    const totalAmount = feeBreakdown.totalAmount;
     let gatewayCurrencyConversion = null;
     if (normalizedGateway === PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL) {
         gatewayCurrencyConversion = await convertToNetworkGatewayCurrency({
@@ -470,13 +617,15 @@ const createPaymentIntent = async ({
         paymentId,
         userId,
         amount: parsedAmount,
+        paymentMethodId: selectedPaymentMethod?.paymentMethodId || null,
+        feePercent,
         feeAmount,
         totalAmount,
         currency: normalizedCurrency,
         gatewayAmount: gatewayCurrencyConversion?.gatewayAmount,
         gatewayCurrency: gatewayCurrencyConversion?.gatewayCurrency,
-        requestedAmount: gatewayCurrencyConversion?.requestedAmount || parsedAmount,
-        requestedCurrency: gatewayCurrencyConversion?.requestedCurrency || normalizedCurrency,
+        requestedAmount: parsedAmount,
+        requestedCurrency: normalizedCurrency,
         gatewayCurrencyConversion,
         returnUrl,
         cancelUrl,
@@ -489,6 +638,8 @@ const createPaymentIntent = async ({
         gateway: normalizedGateway,
         method: normalizedGateway === PAYMENT_GATEWAYS.PAYMENTO ? PAYMENT_METHODS.ONLINE : PAYMENT_METHODS.CARD,
         amount: parsedAmount,
+        paymentMethodId: selectedPaymentMethod?.paymentMethodId || null,
+        feePercent,
         feeAmount,
         totalAmount,
         currency: normalizedCurrency,
@@ -508,7 +659,22 @@ const createPaymentIntent = async ({
                 evaluatedAt: new Date(),
             },
             gatewayMetadata: intent.metadata || {},
-            gatewayCurrencyConversion: intent.gatewayCurrencyConversion || gatewayCurrencyConversion || undefined,
+            gatewayCurrencyConversion: (intent.gatewayCurrencyConversion || gatewayCurrencyConversion)
+                ? {
+                    ...(intent.gatewayCurrencyConversion || gatewayCurrencyConversion),
+                    requestedAmount: parsedAmount,
+                    requestedCurrency: normalizedCurrency,
+                    payableAmount: totalAmount,
+                    payableCurrency: normalizedCurrency,
+                    feePercent,
+                    feeAmount,
+                }
+                : undefined,
+            paymentMethod: selectedPaymentMethod ? {
+                id: selectedPaymentMethod.paymentMethodId,
+                name: selectedPaymentMethod.name || selectedPaymentMethod.title || null,
+                gateway: getPaymentMethodGateway(selectedPaymentMethod) || normalizedGateway,
+            } : undefined,
         },
         createdByIp: requestMeta.ipAddress || null,
         userAgent: requestMeta.userAgent || null,

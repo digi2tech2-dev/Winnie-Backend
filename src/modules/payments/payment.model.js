@@ -44,6 +44,19 @@ const paymentSchema = new mongoose.Schema(
             min: [0.01, 'Payment amount must be greater than 0'],
         },
 
+        paymentMethodId: {
+            type: String,
+            trim: true,
+            default: null,
+            index: true,
+        },
+
+        feePercent: {
+            type: Number,
+            default: 0,
+            min: [0, 'Payment fee percent cannot be negative'],
+        },
+
         feeAmount: {
             type: Number,
             default: 0,

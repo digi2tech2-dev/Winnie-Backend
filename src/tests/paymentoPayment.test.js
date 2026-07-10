@@ -173,6 +173,34 @@ const saveRiskSettings = async (overrides = {}) => {
     );
 };
 
+const savePaymentMethod = async (method = {}) => {
+    await Setting.updateOne(
+        { key: 'paymentGroups' },
+        {
+            $set: {
+                key: 'paymentGroups',
+                value: [{
+                    id: 'wallet-topup',
+                    name: 'Wallet top-up',
+                    currency: method.currency || 'EGP',
+                    isActive: true,
+                    methods: [{
+                        id: method.id || 'pm-paymento-fee',
+                        name: 'Paymento fee method',
+                        gateway: PAYMENT_GATEWAYS.PAYMENTO,
+                        currencies: [method.currency || 'EGP'],
+                        fee: method.fee ?? 2,
+                        isActive: true,
+                        customerVisible: true,
+                    }],
+                }],
+                description: 'Paymento payment method test settings',
+            },
+        },
+        { upsert: true }
+    );
+};
+
 describe('Paymento USDT hosted payment gateway', () => {
     it('returns a safe error when Paymento config is missing and skips HTTP calls', async () => {
         process.env.PAYMENT_ALLOWED_GATEWAYS = 'MOCK,PAYMENTO';
@@ -291,6 +319,48 @@ describe('Paymento USDT hosted payment gateway', () => {
 
         expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(0);
         expect((await User.findById(customer._id)).walletBalance).toBe(500);
+    });
+
+    it('sends Paymento fiatAmount from fee-inclusive payable amount', async () => {
+        enablePaymentoGateway();
+        const customer = await createPaymentoCustomer({ currency: 'EGP', walletBalance: 500 });
+        await savePaymentMethod({ fee: 2, currency: 'EGP' });
+        const client = makeHttpClient();
+        mockCreatePaymentoPayment(client);
+
+        const result = await createPaymentoIntent(customer, {
+            amount: 250,
+            currency: 'EGP',
+            paymentMethodId: 'pm-paymento-fee',
+        });
+
+        const [, createPayload] = client.post.mock.calls[0];
+        expect(createPayload).toMatchObject({
+            fiatAmount: '5.10',
+            fiatCurrency: 'USD',
+            additionalData: expect.arrayContaining([
+                { key: 'requestedAmount', value: '250' },
+                { key: 'requestedCurrency', value: 'EGP' },
+                { key: 'feePercent', value: '2' },
+                { key: 'feeAmount', value: '5' },
+                { key: 'payableAmount', value: '255' },
+                { key: 'payableCurrency', value: 'EGP' },
+            ]),
+        });
+        expect(result.payment.amount).toBe(250);
+        expect(result.payment.feePercent).toBe(2);
+        expect(result.payment.feeAmount).toBe(5);
+        expect(result.payment.totalAmount).toBe(255);
+        expect(result.checkout).toMatchObject({
+            requestedAmount: 250,
+            requestedCurrency: 'EGP',
+            feePercent: 2,
+            feeAmount: 5,
+            payableAmount: 255,
+            payableCurrency: 'EGP',
+            gatewayAmount: 5.1,
+            gatewayCurrency: 'USD',
+        });
     });
 
     it('does not expose Paymento API keys, IPN secrets, or raw auth headers in serialized responses', async () => {

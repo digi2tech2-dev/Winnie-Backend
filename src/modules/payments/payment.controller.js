@@ -22,6 +22,7 @@ const createPaymentIntent = catchAsync(async (req, res) => {
         amount: req.body.amount,
         currency: req.body.currency,
         gateway: req.body.gateway,
+        paymentMethodId: req.body.paymentMethodId,
         returnUrl: req.body.returnUrl,
         cancelUrl: req.body.cancelUrl,
         idempotencyKey: req.get('Idempotency-Key') || req.body.idempotencyKey,

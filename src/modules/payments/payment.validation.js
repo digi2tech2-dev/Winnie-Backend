@@ -35,6 +35,12 @@ const createPaymentIntentValidation = [
         .isIn(Object.values(PAYMENT_GATEWAYS))
         .withMessage(`gateway must be one of: ${Object.values(PAYMENT_GATEWAYS).join(', ')}`),
 
+    body('paymentMethodId')
+        .optional({ nullable: true, checkFalsy: true })
+        .isString().withMessage('paymentMethodId must be a string')
+        .trim()
+        .isLength({ max: 160 }).withMessage('paymentMethodId cannot exceed 160 characters'),
+
     urlValidation('returnUrl'),
     urlValidation('cancelUrl'),
 ];

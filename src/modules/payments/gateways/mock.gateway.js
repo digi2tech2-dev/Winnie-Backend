@@ -9,7 +9,7 @@ class MockPaymentGateway extends PaymentGatewayInterface {
         super(PAYMENT_GATEWAYS.MOCK);
     }
 
-    async createPaymentIntent({ paymentId, amount, totalAmount, currency, returnUrl, cancelUrl }) {
+    async createPaymentIntent({ paymentId, amount, feePercent = 0, feeAmount = 0, totalAmount, currency, returnUrl, cancelUrl }) {
         const id = paymentId.toString();
         const baseUrl = config.payments.mockCheckoutBaseUrl.replace(/\/+$/, '');
 
@@ -22,6 +22,8 @@ class MockPaymentGateway extends PaymentGatewayInterface {
             metadata: {
                 mode: 'mock',
                 amount,
+                feePercent,
+                feeAmount,
                 totalAmount,
                 currency,
                 returnUrl: returnUrl || null,
