@@ -116,6 +116,19 @@ const createOrderValidation = [
         .isInt({ min: 1 }).withMessage('quantity must be a positive integer'),
 ];
 
+const quoteOrderValidation = [
+    body('productId')
+        .notEmpty().withMessage('productId is required')
+        .isMongoId().withMessage('productId must be a valid Mongo ID'),
+    body('quantity')
+        .notEmpty().withMessage('quantity is required')
+        .isInt({ min: 1 }).withMessage('quantity must be a positive integer'),
+    body('values')
+        .optional({ nullable: true })
+        .isObject().withMessage('values must be an object'),
+];
+
+router.post('/orders/quote', quoteOrderValidation, validate, me.quoteOrder);
 router.post('/orders', createOrderValidation, validate, me.placeOrder);
 router.get('/orders', me.getOrders);
 router.get(

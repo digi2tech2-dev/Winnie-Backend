@@ -2,7 +2,7 @@
 
 const { Router } = require('express');
 const orderController = require('./order.controller');
-const { createOrderValidation, orderIdParamValidation } = require('./order.validation');
+const { createOrderValidation, quoteOrderValidation, orderIdParamValidation } = require('./order.validation');
 const validate = require('../../shared/middlewares/validate');
 const authenticate = require('../../shared/middlewares/authenticate');
 const authorize = require('../../shared/middlewares/authorize');
@@ -22,6 +22,15 @@ router.use(authenticate);
  * @desc   Place a new order
  * @access Active Customer only
  */
+router.post(
+    '/quote',
+    requireActiveUser,
+    authorizeRoles('CUSTOMER', 'ADMIN'),
+    quoteOrderValidation,
+    validate,
+    orderController.quoteOrder
+);
+
 router.post(
     '/',
     requireActiveUser,

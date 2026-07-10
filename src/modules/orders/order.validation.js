@@ -23,10 +23,28 @@ const createOrderValidation = [
         .isObject().withMessage('dynamicData must be an object'),
 ];
 
+const quoteOrderValidation = [
+    body('productId')
+        .notEmpty().withMessage('Product ID is required')
+        .isMongoId().withMessage('Invalid product ID format'),
+
+    body('quantity')
+        .notEmpty().withMessage('Quantity is required')
+        .isInt({ min: 1 }).withMessage('Quantity must be a positive integer'),
+
+    body('values')
+        .optional({ nullable: true })
+        .isObject().withMessage('values must be an object'),
+
+    body('orderFieldsValues')
+        .optional({ nullable: true })
+        .isObject().withMessage('orderFieldsValues must be an object'),
+];
+
 const orderIdParamValidation = [
     param('id')
         .isMongoId().withMessage('Invalid order ID format'),
 ];
 
-module.exports = { createOrderValidation, orderIdParamValidation };
+module.exports = { createOrderValidation, quoteOrderValidation, orderIdParamValidation };
 

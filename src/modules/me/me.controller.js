@@ -13,6 +13,7 @@ const userService = require('../users/user.service');
 const orderService = require('../orders/order.service');
 const depositService = require('../deposits/deposit.service');
 const productService = require('../products/product.service');
+const { buildCustomerPricingFields } = require('../products/customerPricingPresenter');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { NotFoundError } = require('../../shared/errors/AppError');
@@ -215,6 +216,16 @@ const placeOrder = catchAsync(async (req, res) => {
     sendCreated(res, sanitizePricingForSupervisor(order, req.user), 'Order placed successfully.');
 });
 
+const quoteOrder = catchAsync(async (req, res) => {
+    const quote = await orderService.quoteOrder({
+        userId: req.user._id,
+        productId: req.body.productId,
+        quantity: parseInt(req.body.quantity, 10) || 1,
+    });
+
+    sendSuccess(res, sanitizePricingForSupervisor(quote, req.user), 'Order quote calculated successfully.');
+});
+
 // =============================================================================
 // PRODUCTS  —  GET /api/me/products  |  GET /api/me/products/:id
 // =============================================================================
@@ -232,7 +243,6 @@ const getProducts = catchAsync(async (req, res) => {
     const { Product } = require('../products/product.model');
     const Group = require('../groups/group.model');
     const { getConversionRate } = require('../../services/currencyConverter.service');
-    const { usdToLocal } = require('../../shared/utils/currencyMath');
     const { calculateFinalPrice } = require('../orders/pricing.service');
 
     const filter = { isActive: true, visibleInStore: { $ne: false }, deletedAt: null };
@@ -268,13 +278,18 @@ const getProducts = catchAsync(async (req, res) => {
     // ── 3. Apply pipeline: Base → Markup → Currency ───────────────────────────
     const converted = products.map((p) => {
         const markedUpUSD = calculateFinalPrice(p.basePrice, markupPercentage);
-        const localDisplayPrice = usdToLocal(markedUpUSD, rate);
+        const pricingFields = buildCustomerPricingFields({
+            product: p,
+            unitPriceUsd: markedUpUSD,
+            currency: userCurrency,
+            rate,
+        });
         return {
             ...p,
+            ...pricingFields,
             finalPrice: markedUpUSD,
             sellingPrice: markedUpUSD,
             markedUpPriceUSD: markedUpUSD,
-            displayPrice: localDisplayPrice,
             displayCurrency: userCurrency,
             isPurchasable: p.isPaused !== true
                 && p.status !== 'unavailable'
@@ -292,7 +307,6 @@ const getProduct = catchAsync(async (req, res) => {
     const { Product } = require('../products/product.model');
     const Group = require('../groups/group.model');
     const { getConversionRate } = require('../../services/currencyConverter.service');
-    const { usdToLocal } = require('../../shared/utils/currencyMath');
     const { calculateFinalPrice } = require('../orders/pricing.service');
 
     const product = await Product.findOne({
@@ -319,14 +333,19 @@ const getProduct = catchAsync(async (req, res) => {
 
     // ── 3. Pipeline: Base → Markup → Currency ─────────────────────────────────
     const markedUpUSD = calculateFinalPrice(product.basePrice, markupPercentage);
-    const localDisplayPrice = usdToLocal(markedUpUSD, rate);
+    const pricingFields = buildCustomerPricingFields({
+        product,
+        unitPriceUsd: markedUpUSD,
+        currency: userCurrency,
+        rate,
+    });
 
     sendSuccess(res, sanitizePricingForSupervisor({
         ...product,
+        ...pricingFields,
         finalPrice: markedUpUSD,
         sellingPrice: markedUpUSD,
         markedUpPriceUSD: markedUpUSD,
-        displayPrice: localDisplayPrice,
         displayCurrency: userCurrency,
         isPurchasable: product.isPaused !== true
             && product.status !== 'unavailable'
@@ -437,6 +456,7 @@ module.exports = {
     getOrders,
     getOrder,
     placeOrder,
+    quoteOrder,
     getProducts,
     getProduct,
     createDeposit,

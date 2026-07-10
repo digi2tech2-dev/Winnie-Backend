@@ -81,6 +81,97 @@ const _autoUpdateProductPrice = (productId, newProviderPrice, markupType, markup
     })();
 };
 
+const _assertProductAvailable = (product) => {
+    if (!product) throw new NotFoundError('Product');
+    if (
+        !product.isActive
+        || product.visibleInStore === false
+        || product.isPaused === true
+        || product.status === 'unavailable'
+        || product.isAvailableForApi === false
+    ) {
+        throw new BusinessRuleError('This product is currently unavailable.', 'PRODUCT_INACTIVE');
+    }
+};
+
+const _normaliseOrderQuantity = (quantity, product) => {
+    const qty = parseInt(quantity, 10);
+    if (!Number.isInteger(qty) || qty < product.minQty || qty > product.maxQty) {
+        throw new BusinessRuleError(
+            `Quantity must be between ${product.minQty} and ${product.maxQty}.`,
+            'QUANTITY_OUT_OF_RANGE'
+        );
+    }
+    return qty;
+};
+
+const calculateOrderPricing = async ({ userId, product, quantity, session = null }) => {
+    _assertProductAvailable(product);
+    const qty = _normaliseOrderQuantity(quantity, product);
+
+    const pricing = await calculateUserPrice(userId, product.basePrice, session);
+    const usdTotalPrice = multiply(pricing.finalPrice, String(qty));
+    const profitUsd = multiply(subtract(pricing.finalPrice, pricing.basePrice), String(qty));
+
+    const userQuery = User.findById(userId).select('currency walletBalance');
+    if (session) userQuery.session(session);
+    const userDoc = await userQuery;
+    if (!userDoc) throw new NotFoundError('User');
+
+    const userCurrency = userDoc.currency ?? 'USD';
+    const conversion = await convertUsdToUserCurrency(Number(toDecimal(usdTotalPrice).toNumber()), userCurrency);
+    const chargedAmount = toFiat(conversion.finalAmount);
+    const rateSnapshot = conversion.rate;
+
+    if (!Number.isFinite(chargedAmount) || chargedAmount <= 0) {
+        throw new BusinessRuleError(
+            'Invalid order price calculation. The final charged amount must be a positive number. ' +
+            `(basePrice=${pricing.basePrice}, markup=${pricing.markupPercentage}%, ` +
+            `usdTotal=${usdTotalPrice}, currency=${userCurrency}, rate=${rateSnapshot}, ` +
+            `chargedAmount=${chargedAmount})`,
+            'INVALID_PRICE_CALCULATION'
+        );
+    }
+
+    const walletBalance = Number(userDoc.walletBalance ?? 0);
+
+    return {
+        qty,
+        pricing,
+        usdTotalPrice,
+        profitUsd,
+        userCurrency,
+        rateSnapshot,
+        chargedAmount,
+        walletBalance,
+        hasEnoughBalance: walletBalance >= chargedAmount,
+    };
+};
+
+const quoteOrder = async ({ userId, productId, quantity }) => {
+    const product = await Product.findById(productId);
+    const quote = await calculateOrderPricing({ userId, product, quantity });
+
+    return {
+        productId: product._id.toString(),
+        quantity: quote.qty,
+        currency: quote.userCurrency,
+        unitPriceUsd: quote.pricing.finalPrice,
+        totalUsd: quote.usdTotalPrice,
+        rateSnapshot: quote.rateSnapshot,
+        payableAmount: quote.chargedAmount,
+        chargedAmount: quote.chargedAmount,
+        displayTotal: `${quote.chargedAmount.toFixed(2)} ${quote.userCurrency}`,
+        walletBalance: quote.walletBalance,
+        hasEnoughBalance: quote.hasEnoughBalance,
+        minQty: product.minQty,
+        maxQty: product.maxQty,
+        basePriceSnapshot: quote.pricing.basePrice,
+        markupPercentage: quote.pricing.markupPercentage,
+        finalPriceCharged: quote.pricing.finalPrice,
+    };
+};
+
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // CREATE ORDER
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -231,25 +322,10 @@ const _attemptCreateOrder = async (
 
         // â”€â”€ 1. Load & Validate Product â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const product = await Product.findById(productId).session(session);
-        if (!product) throw new NotFoundError('Product');
-        if (
-            !product.isActive
-            || product.visibleInStore === false
-            || product.isPaused === true
-            || product.status === 'unavailable'
-            || product.isAvailableForApi === false
-        ) {
-            throw new BusinessRuleError('This product is currently unavailable.', 'PRODUCT_INACTIVE');
-        }
+        _assertProductAvailable(product);
 
         // â”€â”€ 2. Validate Quantity Bounds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        const qty = parseInt(quantity, 10);
-        if (qty < product.minQty || qty > product.maxQty) {
-            throw new BusinessRuleError(
-                `Quantity must be between ${product.minQty} and ${product.maxQty}.`,
-                'QUANTITY_OUT_OF_RANGE'
-            );
-        }
+        const qty = _normaliseOrderQuantity(quantity, product);
 
         // â”€â”€ 2b. Validate / capture dynamic order fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Runs BEFORE any financial mutation so a bad field value costs nothing.
@@ -323,22 +399,21 @@ const _attemptCreateOrder = async (
         }
 
         // â”€â”€ 3. Pricing Engine (USD) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        const pricing = await calculateUserPrice(userId, product.basePrice, session);
-        const usdTotalPrice = multiply(pricing.finalPrice, String(qty));
+        const orderPricing = await calculateOrderPricing({ userId, product, quantity: qty, session });
+        const pricing = orderPricing.pricing;
 
         // â”€â”€ 3a. Profit Calculation (USD) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Profit = markup portion only = (markedUpPrice - basePrice) Ã— quantity
-        const profitUsd = multiply(subtract(pricing.finalPrice, pricing.basePrice), String(qty));
+        const usdTotalPrice = orderPricing.usdTotalPrice;
 
         // â”€â”€ 3b. Currency Conversion â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Fetch the user's preferred currency (within the session for consistency).
         // For USD users this is a no-op (rate = 1, finalAmount = usdTotalPrice).
-        const userDoc = await User.findById(userId).select('currency').session(session);
-        const userCurrency = userDoc?.currency ?? 'USD';
-        const conversion = await convertUsdToUserCurrency(Number(toDecimal(usdTotalPrice).toNumber()), userCurrency);
+        const profitUsd = orderPricing.profitUsd;
+        const userCurrency = orderPricing.userCurrency;
+        const rateSnapshot = orderPricing.rateSnapshot;
         // â”€â”€ FINAL ROUNDING â€” only place we round to 2dp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        const chargedAmount = toFiat(conversion.finalAmount);
-        const rateSnapshot = conversion.rate;
+        const chargedAmount = orderPricing.chargedAmount;
 
         // â”€â”€ 3c. FINAL PRICE GUARD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Prevent NaN / Infinity / zero from reaching the wallet debit.
@@ -940,6 +1015,8 @@ const getOrderById = async (orderId, userId = null) => {
 
 module.exports = {
     createOrder,
+    quoteOrder,
+    calculateOrderPricing,
     markOrderAsFailed,
     processOrderRefund,
     markOrderAsCompleted,

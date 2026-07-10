@@ -44,6 +44,16 @@ const createOrder = catchAsync(async (req, res) => {
     sendCreated(res, order, 'Order placed successfully.');
 });
 
+const quoteOrder = catchAsync(async (req, res) => {
+    const quote = await orderService.quoteOrder({
+        userId: req.user._id,
+        productId: req.body.productId,
+        quantity: parseInt(req.body.quantity, 10),
+    });
+
+    sendSuccess(res, quote, 'Order quote calculated successfully.');
+});
+
 const getMyOrders = catchAsync(async (req, res) => {
     const page = parseInt(req.query.page, 10) || 1;
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
@@ -89,6 +99,7 @@ const completeOrder = catchAsync(async (req, res) => {
 
 module.exports = {
     createOrder,
+    quoteOrder,
     getMyOrders,
     getMyOrder,
     getAllOrders,
