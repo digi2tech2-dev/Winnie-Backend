@@ -141,6 +141,8 @@ describe('Identity verification hold', () => {
             amount: 25,
             currency: 'USD',
             gateway: 'MOCK',
+            antiScamConfirmed: true,
+            termsAccepted: true,
         })).rejects.toMatchObject({
             statusCode: 403,
             code: 'IDENTITY_VERIFICATION_REQUIRED',
@@ -188,6 +190,8 @@ describe('Identity verification hold', () => {
             exchangeRate: 1,
             amountUsd: 50,
             receiptImage: 'uploads/deposits/test.png',
+            antiScamConfirmed: true,
+            termsAccepted: true,
         })).rejects.toMatchObject({
             statusCode: 403,
             code: 'IDENTITY_VERIFICATION_REQUIRED',
@@ -217,6 +221,8 @@ describe('Identity verification hold', () => {
             amount: 25,
             currency: 'USD',
             gateway: 'MOCK',
+            antiScamConfirmed: true,
+            termsAccepted: true,
         });
         expect(payment.payment._id).toBeTruthy();
 

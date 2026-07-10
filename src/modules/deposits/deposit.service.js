@@ -19,9 +19,23 @@ const {
     NotFoundError,
     BusinessRuleError,
     AuthorizationError,
+    AntiScamConfirmationRequiredError,
 } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+
+const ANTI_SCAM_CONFIRMATION_REQUIRED_MESSAGE =
+    'Please confirm the anti-scam safety warning before continuing.';
+
+const isTruthyConfirmation = (value) => (
+    value === true || String(value || '').trim().toLowerCase() === 'true'
+);
+
+const assertAntiScamConfirmation = ({ antiScamConfirmed, termsAccepted } = {}) => {
+    if (!isTruthyConfirmation(antiScamConfirmed) || !isTruthyConfirmation(termsAccepted)) {
+        throw new AntiScamConfirmationRequiredError(ANTI_SCAM_CONFIRMATION_REQUIRED_MESSAGE);
+    }
+};
 
 // =============================================================================
 // CREATE
@@ -61,8 +75,13 @@ const createDepositRequest = async ({
     amountUsd,
     receiptImage,
     notes = null,
+    antiScamConfirmed = false,
+    termsAccepted = false,
+    antiScamConfirmedAt = null,
     auditContext = null,
 }) => {
+    assertAntiScamConfirmation({ antiScamConfirmed, termsAccepted });
+
     // Confirm user exists (belt-and-suspenders — middleware already checks ACTIVE)
     const user = await User.findById(userId).select('_id role identityVerificationRequired');
     if (!user) throw new NotFoundError('User');
@@ -106,6 +125,9 @@ const createDepositRequest = async ({
             currency,
             exchangeRate,
             amountUsd: deposit.amountUsd,
+            antiScamConfirmed: true,
+            termsAccepted: true,
+            antiScamConfirmedAt: antiScamConfirmedAt || null,
         },
         ipAddress: auditContext?.ipAddress ?? null,
         userAgent: auditContext?.userAgent ?? null,

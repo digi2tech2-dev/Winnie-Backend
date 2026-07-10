@@ -31,6 +31,20 @@ const createDepositValidation = [
         .isString().withMessage('notes must be a string')
         .trim()
         .isLength({ max: 500 }).withMessage('notes cannot exceed 500 characters'),
+
+    body('antiScamConfirmed')
+        .optional()
+        .isBoolean().withMessage('antiScamConfirmed must be true or false')
+        .toBoolean(),
+
+    body('termsAccepted')
+        .optional()
+        .isBoolean().withMessage('termsAccepted must be true or false')
+        .toBoolean(),
+
+    body('antiScamConfirmedAt')
+        .optional({ nullable: true, checkFalsy: true })
+        .isISO8601().withMessage('antiScamConfirmedAt must be an ISO date'),
 ];
 
 /**

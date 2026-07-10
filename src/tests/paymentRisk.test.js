@@ -83,6 +83,8 @@ const createIntent = (customer, overrides = {}) => (
         gateway: PAYMENT_GATEWAYS.MOCK,
         returnUrl: 'http://localhost:5173/customer/wallet/transactions',
         cancelUrl: 'http://localhost:5173/customer/wallet',
+        antiScamConfirmed: true,
+        termsAccepted: true,
         ...overrides,
     })
 );
@@ -212,6 +214,8 @@ describe('Payment risk limits', () => {
             exchangeRate: 1,
             amountUsd: 500,
             receiptImage: 'uploads/deposits/test-risk-receipt.jpg',
+            antiScamConfirmed: true,
+            termsAccepted: true,
         });
 
         expect(deposit._id).toBeDefined();

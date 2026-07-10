@@ -43,6 +43,7 @@ const {
 const { notifyPaymentSucceeded } = require('../notifications/notification.events');
 const config = require('../../config/config');
 const {
+    AntiScamConfirmationRequiredError,
     AuthorizationError,
     BusinessRuleError,
     ConflictError,
@@ -56,6 +57,8 @@ const safeRound = (value, decimals = 2) => {
 
 const CURRENCY_CONVERSION_UNAVAILABLE_MESSAGE =
     'Online card payment is temporarily unavailable for this currency. Please try another currency or use manual deposit.';
+const ANTI_SCAM_CONFIRMATION_REQUIRED_MESSAGE =
+    'Please confirm the anti-scam safety warning before continuing.';
 
 const NETWORK_GATEWAY_EXCHANGE_SOURCE = 'PLATFORM_CURRENCY_RATES_VIA_USD';
 const PAYMENTO_GATEWAY_EXCHANGE_SOURCE = 'PLATFORM_CURRENCY_RATES_VIA_USD';
@@ -88,6 +91,16 @@ const normalizeIdempotencyKey = (key) => {
 const normalizeOptionalPaymentMethodId = (value) => {
     const normalized = String(value || '').trim();
     return normalized ? normalized.slice(0, 160) : null;
+};
+
+const isTruthyConfirmation = (value) => (
+    value === true || String(value || '').trim().toLowerCase() === 'true'
+);
+
+const assertAntiScamConfirmation = ({ antiScamConfirmed, termsAccepted } = {}) => {
+    if (!isTruthyConfirmation(antiScamConfirmed) || !isTruthyConfirmation(termsAccepted)) {
+        throw new AntiScamConfirmationRequiredError(ANTI_SCAM_CONFIRMATION_REQUIRED_MESSAGE);
+    }
 };
 
 const assertPaymentsEnabled = () => {
@@ -533,9 +546,13 @@ const createPaymentIntent = async ({
     returnUrl = null,
     cancelUrl = null,
     idempotencyKey = null,
+    antiScamConfirmed = false,
+    termsAccepted = false,
+    antiScamConfirmedAt = null,
     requestMeta = {},
 } = {}) => {
     assertPaymentsEnabled();
+    assertAntiScamConfirmation({ antiScamConfirmed, termsAccepted });
 
     const normalizedGateway = normalizeGatewayKey(gateway || getRuntimePaymentConfig().defaultGateway);
     assertGatewayAllowed(normalizedGateway);
@@ -675,6 +692,11 @@ const createPaymentIntent = async ({
                 name: selectedPaymentMethod.name || selectedPaymentMethod.title || null,
                 gateway: getPaymentMethodGateway(selectedPaymentMethod) || normalizedGateway,
             } : undefined,
+            antiScamConfirmation: {
+                confirmed: true,
+                termsAccepted: true,
+                confirmedAt: antiScamConfirmedAt ? new Date(antiScamConfirmedAt) : new Date(),
+            },
         },
         createdByIp: requestMeta.ipAddress || null,
         userAgent: requestMeta.userAgent || null,

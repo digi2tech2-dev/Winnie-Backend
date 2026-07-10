@@ -353,7 +353,7 @@ const createDeposit = catchAsync(async (req, res) => {
         );
     }
 
-    const { requestedAmount, currency, paymentMethodId, notes } = req.body;
+    const { requestedAmount, currency, paymentMethodId, notes, antiScamConfirmed, termsAccepted, antiScamConfirmedAt } = req.body;
 
     // ── Fetch current exchange rate ──────────────────────────────────────
     const { Currency } = require('../currency/currency.model');
@@ -389,6 +389,9 @@ const createDeposit = catchAsync(async (req, res) => {
         amountUsd,
         receiptImage,
         notes: notes || null,
+        antiScamConfirmed,
+        termsAccepted,
+        antiScamConfirmedAt,
         auditContext: {
             actorId: req.user._id,
             actorRole: req.user.role,

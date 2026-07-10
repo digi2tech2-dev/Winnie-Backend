@@ -152,6 +152,8 @@ const createPaymentoIntent = (customer, overrides = {}) => (
         amount: 100,
         currency: customer.currency || 'USD',
         gateway: PAYMENT_GATEWAYS.PAYMENTO,
+        antiScamConfirmed: true,
+        termsAccepted: true,
         ...overrides,
     })
 );

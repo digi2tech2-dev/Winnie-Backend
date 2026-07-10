@@ -73,6 +73,12 @@ class IdentityVerificationRequiredError extends AppError {
     }
 }
 
+class AntiScamConfirmationRequiredError extends AppError {
+    constructor(message = 'Please confirm the anti-scam safety warning before continuing.') {
+        super(message, 400, 'ANTI_SCAM_CONFIRMATION_REQUIRED');
+    }
+}
+
 module.exports = {
     AppError,
     ValidationError,
@@ -83,4 +89,5 @@ module.exports = {
     InsufficientFundsError,
     BusinessRuleError,
     IdentityVerificationRequiredError,
+    AntiScamConfirmationRequiredError,
 };

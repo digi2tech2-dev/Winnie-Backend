@@ -74,6 +74,8 @@ const createPendingDeposit = (userId, overrides = {}) => (
     depositService.createDepositRequest({
         userId,
         ...VALID_DEPOSIT,
+        antiScamConfirmed: true,
+        termsAccepted: true,
         ...overrides,
     })
 );
@@ -86,6 +88,8 @@ const createMockPayment = async (customer, overrides = {}) => {
         gateway: PAYMENT_GATEWAYS.MOCK,
         returnUrl: 'http://localhost:5173/wallet',
         cancelUrl: 'http://localhost:5173/wallet',
+        antiScamConfirmed: true,
+        termsAccepted: true,
         ...overrides,
     });
     return result.payment;

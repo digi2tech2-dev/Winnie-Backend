@@ -120,6 +120,8 @@ const createPaymentoPayment = async (customer, client, overrides = {}, reference
         amount: 75,
         currency: 'USD',
         gateway: PAYMENT_GATEWAYS.PAYMENTO,
+        antiScamConfirmed: true,
+        termsAccepted: true,
         ...overrides,
     });
     client.post.mockReset();

@@ -41,6 +41,20 @@ const createPaymentIntentValidation = [
         .trim()
         .isLength({ max: 160 }).withMessage('paymentMethodId cannot exceed 160 characters'),
 
+    body('antiScamConfirmed')
+        .optional()
+        .isBoolean().withMessage('antiScamConfirmed must be true or false')
+        .toBoolean(),
+
+    body('termsAccepted')
+        .optional()
+        .isBoolean().withMessage('termsAccepted must be true or false')
+        .toBoolean(),
+
+    body('antiScamConfirmedAt')
+        .optional({ nullable: true, checkFalsy: true })
+        .isISO8601().withMessage('antiScamConfirmedAt must be an ISO date'),
+
     urlValidation('returnUrl'),
     urlValidation('cancelUrl'),
 ];

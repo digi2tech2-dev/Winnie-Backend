@@ -41,6 +41,8 @@ const createMockPayment = async (customer, overrides = {}) => {
         gateway: PAYMENT_GATEWAYS.MOCK,
         returnUrl: 'http://localhost:5173/customer/wallet/transactions',
         cancelUrl: 'http://localhost:5173/customer/wallet',
+        antiScamConfirmed: true,
+        termsAccepted: true,
         ...overrides,
     });
 
@@ -88,6 +90,8 @@ describe('Payments base module', () => {
             gateway: PAYMENT_GATEWAYS.MOCK,
             returnUrl: 'http://localhost:5173/customer/wallet/transactions',
             cancelUrl: 'http://localhost:5173/customer/wallet',
+            antiScamConfirmed: true,
+            termsAccepted: true,
         });
 
         expect(result.payment.status).toBe(PAYMENT_STATUSES.REQUIRES_ACTION);
@@ -116,6 +120,8 @@ describe('Payments base module', () => {
             paymentMethodId: 'pm-mock-fee',
             feeAmount: 999,
             totalAmount: 999,
+            antiScamConfirmed: true,
+            termsAccepted: true,
         });
 
         expect(result.payment.amount).toBe(100);
@@ -150,6 +156,8 @@ describe('Payments base module', () => {
             currency: 'USD',
             gateway: PAYMENT_GATEWAYS.MOCK,
             paymentMethodId: 'pm-mock-fee',
+            antiScamConfirmed: true,
+            termsAccepted: true,
         });
 
         expect(result.payment.feePercent).toBe(0);
@@ -165,7 +173,43 @@ describe('Payments base module', () => {
             amount: 0,
             currency: 'USD',
             gateway: PAYMENT_GATEWAYS.MOCK,
+            antiScamConfirmed: true,
+            termsAccepted: true,
         })).rejects.toMatchObject({ code: 'INVALID_PAYMENT_AMOUNT' });
+    });
+
+    it('requires anti-scam confirmation before creating a payment intent', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+
+        await expect(paymentService.createPaymentIntent({
+            userId: customer._id,
+            amount: 100,
+            currency: 'USD',
+            gateway: PAYMENT_GATEWAYS.MOCK,
+            termsAccepted: true,
+        })).rejects.toMatchObject({
+            statusCode: 400,
+            code: 'ANTI_SCAM_CONFIRMATION_REQUIRED',
+        });
+
+        expect(await Payment.countDocuments({ userId: customer._id })).toBe(0);
+    });
+
+    it('requires terms acceptance before creating a payment intent', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+
+        await expect(paymentService.createPaymentIntent({
+            userId: customer._id,
+            amount: 100,
+            currency: 'USD',
+            gateway: PAYMENT_GATEWAYS.MOCK,
+            antiScamConfirmed: true,
+        })).rejects.toMatchObject({
+            statusCode: 400,
+            code: 'ANTI_SCAM_CONFIRMATION_REQUIRED',
+        });
+
+        expect(await Payment.countDocuments({ userId: customer._id })).toBe(0);
     });
 
     it('lets a customer view their own payment', async () => {

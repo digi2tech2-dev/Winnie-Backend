@@ -147,6 +147,8 @@ const createNetworkPayment = async (customer, client, overrides = {}, reference 
         amount: 123.45,
         currency: 'AED',
         gateway: PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL,
+        antiScamConfirmed: true,
+        termsAccepted: true,
         ...overrides,
     });
     client.post.mockReset();
@@ -358,6 +360,8 @@ describe('Network International webhook and reconciliation', () => {
             amount: 50,
             currency: 'AED',
             gateway: PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL,
+            antiScamConfirmed: true,
+            termsAccepted: true,
         });
         client.post.mockReset();
         client.get.mockReset();

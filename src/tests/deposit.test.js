@@ -74,6 +74,8 @@ const createPendingDeposit = async (userId, overrides = {}) => (
     depositService.createDepositRequest({
         userId,
         ...VALID_DEPOSIT,
+        antiScamConfirmed: true,
+        termsAccepted: true,
         ...overrides,
     })
 );
@@ -203,6 +205,32 @@ describe('[2] createDepositRequest', () => {
         expect(deposit.amountUsd).toBe(500);
         expect(deposit.receiptImage).toBe(VALID_DEPOSIT.receiptImage);
         expect(deposit.reviewedBy).toBeNull();
+    });
+
+    it('requires anti-scam confirmation before creating a manual deposit request', async () => {
+        await expect(depositService.createDepositRequest({
+            userId: customer._id,
+            ...VALID_DEPOSIT,
+            termsAccepted: true,
+        })).rejects.toMatchObject({
+            statusCode: 400,
+            code: 'ANTI_SCAM_CONFIRMATION_REQUIRED',
+        });
+
+        expect(await DepositRequest.countDocuments({ userId: customer._id })).toBe(0);
+    });
+
+    it('requires terms acceptance before creating a manual deposit request', async () => {
+        await expect(depositService.createDepositRequest({
+            userId: customer._id,
+            ...VALID_DEPOSIT,
+            antiScamConfirmed: true,
+        })).rejects.toMatchObject({
+            statusCode: 400,
+            code: 'ANTI_SCAM_CONFIRMATION_REQUIRED',
+        });
+
+        expect(await DepositRequest.countDocuments({ userId: customer._id })).toBe(0);
     });
 
     it('persists to the database', async () => {

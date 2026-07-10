@@ -152,6 +152,8 @@ const createNetworkIntent = (customer, overrides = {}) => (
         amount: 123.45,
         currency: 'AED',
         gateway: PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL,
+        antiScamConfirmed: true,
+        termsAccepted: true,
         ...overrides,
     })
 );

@@ -25,6 +25,9 @@ const createPaymentIntent = catchAsync(async (req, res) => {
         paymentMethodId: req.body.paymentMethodId,
         returnUrl: req.body.returnUrl,
         cancelUrl: req.body.cancelUrl,
+        antiScamConfirmed: req.body.antiScamConfirmed,
+        termsAccepted: req.body.termsAccepted,
+        antiScamConfirmedAt: req.body.antiScamConfirmedAt,
         idempotencyKey: req.get('Idempotency-Key') || req.body.idempotencyKey,
         requestMeta: requestMetaFrom(req),
     });
