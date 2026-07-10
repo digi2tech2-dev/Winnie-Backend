@@ -423,7 +423,32 @@ describe('[5] AlkasrVipAdapter — placeOrder()', () => {
             params: {
                 qty: 7,
                 playerId: 'uid555',
-                order_uuid: expect.any(String),
+                order_uuid: 'ref-7',
+            },
+        });
+    });
+
+    it('uses stable orderUuid and forwards mapped extra params', async () => {
+        const { adapter, client } = makeAlkasrAdapter();
+        client.get.mockResolvedValueOnce({
+            data: { status: 'OK', data: { order_id: 'ID_TEST', status: 'wait' } },
+        });
+
+        await adapter.placeOrder({
+            productId: '7097',
+            amount: 10000,
+            account_id: '64632491',
+            orderUuid: 'stable-order-uuid',
+            params: { server: 'EU' },
+        });
+
+        expect(client.get).toHaveBeenCalledWith('/client/api/newOrder/7097/params', {
+            params: {
+                qty: 10000,
+                playerId: '64632491',
+                order_uuid: 'stable-order-uuid',
+                server: 'EU',
+                account_id: '64632491',
             },
         });
     });

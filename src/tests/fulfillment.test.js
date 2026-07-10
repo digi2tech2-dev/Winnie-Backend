@@ -15,6 +15,7 @@ const mongoose = require('mongoose');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES, MAX_RETRY_COUNT } = require('../modules/orders/order.model');
 const { AuditLog } = require('../modules/audit/audit.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
+const { ProviderProduct } = require('../modules/providers/providerProduct.model');
 const { toInternalStatus, isTerminal, requiresRefund } = require('../modules/providers/statusMapper');
 const { executeOrder, refundFailedOrder, processOrderStatusResult, pollProcessingOrders } = require('../modules/orders/orderFulfillment.service');
 const { createOrder } = require('../modules/orders/order.service');
@@ -52,7 +53,21 @@ let directOrderSeq = 0;
  */
 const makeOrderDoc = async (userId, overrides = {}) => {
     const { group } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
-    const product = await createProduct({ executionType: ORDER_EXECUTION_TYPES.AUTOMATIC });
+    const providerId = new mongoose.Types.ObjectId();
+    const providerProduct = await ProviderProduct.create({
+        provider: providerId,
+        externalProductId: `TEST-${directOrderSeq + 1}`,
+        rawName: 'Fulfillment Test Product',
+        rawPrice: '1',
+        minQty: 1,
+        maxQty: 100,
+        isActive: true,
+    });
+    const product = await createProduct({
+        executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        provider: providerId,
+        providerProduct: providerProduct._id,
+    });
 
     const [order] = await Order.create([{
         userId,

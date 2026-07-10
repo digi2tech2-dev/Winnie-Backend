@@ -14,8 +14,7 @@ const {
     LEDGER_TRANSACTION_TYPES,
     TRANSACTION_SOURCE_TYPES,
 } = require('../wallet/walletTransaction.model');
-const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
-const { Provider } = require('../providers/provider.model');
+const { executeOrder } = require('../orders/orderFulfillment.service');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
@@ -125,8 +124,7 @@ const getOrderById = async (id) => {
  * @param {string} adminId
  */
 const retryOrder = async (orderId, adminId) => {
-    const order = await Order.findById(orderId)
-        .populate({ path: 'productId', populate: { path: 'provider' } });
+    const order = await Order.findById(orderId).populate('productId', 'provider providerProduct');
 
     if (!order) throw new NotFoundError('Order');
 
@@ -137,29 +135,27 @@ const retryOrder = async (orderId, adminId) => {
         );
     }
 
-    const providerDoc = order.productId?.provider;
-    if (!providerDoc) {
+    if (!order.productId?.provider) {
         throw new BusinessRuleError('No provider linked to this order\'s product.', 'NO_PROVIDER');
     }
 
-    const adapter = getProviderAdapter(providerDoc);
-    const externalProductId = order.providerProductId ?? order.externalProductId;
-    if (!externalProductId) {
-        throw new BusinessRuleError('Order has no externalProductId — cannot retry.', 'NO_EXTERNAL_ID');
+    if (!order.productId?.providerProduct) {
+        throw new BusinessRuleError('No provider product linked to this order\'s product.', 'NO_PROVIDER_PRODUCT');
     }
 
-    // Place the order at the provider
-    const providerResult = await adapter.placeOrder({
-        productId: externalProductId,
-        quantity: order.quantity,
-        playerData: order.orderFieldsValues ?? {},
-    });
-
-    // Update order with new provider reference
     order.status = ORDER_STATUS.PROCESSING;
-    order.providerOrderId = providerResult.orderId ?? order.providerOrderId;
+    order.providerOrderId = null;
+    order.providerStatus = null;
+    order.providerRawResponse = null;
+    order.rejectionReason = null;
+    order.failedAt = null;
     order.retryCount = (order.retryCount ?? 0) + 1;
     await order.save();
+
+    const { order: retriedOrder } = await executeOrder(order._id, null, {
+        actorId: adminId,
+        actorRole: ACTOR_ROLES.ADMIN,
+    });
 
     createAuditLog({
         actorId: adminId,
@@ -167,10 +163,10 @@ const retryOrder = async (orderId, adminId) => {
         action: ADMIN_ACTIONS.ORDER_RETRIED,
         entityType: ENTITY_TYPES.ORDER,
         entityId: order._id,
-        metadata: { orderId, providerOrderId: order.providerOrderId, retryCount: order.retryCount },
+        metadata: { orderId, providerOrderId: retriedOrder?.providerOrderId ?? null, retryCount: order.retryCount },
     });
 
-    return order;
+    return retriedOrder ?? await Order.findById(orderId);
 };
 
 // ─── Manual Refund ────────────────────────────────────────────────────────

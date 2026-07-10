@@ -183,8 +183,7 @@ class AlkasrVipAdapter extends BaseProviderAdapter {
      *       &playerId={playerId}
      *       &order_uuid={uuidv4}
      *
-     * A UUIDv4 is generated and appended as `order_uuid` query parameter
-     * to ensure idempotency.
+     * A stable order_uuid is appended to ensure idempotency across retries.
      *
      * Success response: { status: "OK", data: { order_id, status, ... } }
      *
@@ -201,9 +200,64 @@ class AlkasrVipAdapter extends BaseProviderAdapter {
      */
     async placeOrder(params) {
         const productId = params.productId ?? params.externalProductId;
-        const amount = params.amount ?? params.quantity;
-        const playerId = params.playerId ?? '';
-        const orderUuid = crypto.randomUUID();
+        const amount = params.amount ?? params.quantity ?? params.qty;
+        const nestedParams = params.params && typeof params.params === 'object'
+            ? params.params
+            : {};
+        const firstPresent = (...values) => values.find((value) => value !== undefined && value !== null && value !== '');
+        const playerId = firstPresent(
+            params.playerId,
+            nestedParams.playerId,
+            params.player_id,
+            nestedParams.player_id,
+            params.account_id,
+            nestedParams.account_id,
+            params.user_id,
+            nestedParams.user_id,
+            params.uid,
+            nestedParams.uid,
+            params.userId,
+            nestedParams.userId
+        ) ?? '';
+        const orderUuid = firstPresent(
+            params.orderUuid,
+            params.order_uuid,
+            nestedParams.orderUuid,
+            nestedParams.order_uuid,
+            params.referenceId,
+            params.idempotencyKey
+        ) ?? crypto.randomUUID();
+
+        const reservedParamKeys = new Set([
+            'productId',
+            'externalProductId',
+            'amount',
+            'quantity',
+            'qty',
+            'playerId',
+            'player_id',
+            'orderUuid',
+            'order_uuid',
+            'referenceId',
+            'idempotencyKey',
+            'params',
+        ]);
+        const extraParams = {};
+        for (const [key, value] of Object.entries({ ...nestedParams, ...params })) {
+            if (!reservedParamKeys.has(key) && value !== undefined && value !== null && value !== '') {
+                extraParams[key] = value;
+            }
+        }
+
+        if (process.env.NODE_ENV === 'development') {
+            console.log('[AlkasrVip.placeOrder.outbound]', {
+                productId: String(productId),
+                qty: amount,
+                hasPlayerId: Boolean(playerId),
+                orderUuid,
+                extraParamKeys: Object.keys(extraParams),
+            });
+        }
 
         try {
             const { data } = await this._client.get(
@@ -213,6 +267,7 @@ class AlkasrVipAdapter extends BaseProviderAdapter {
                         qty: amount,
                         playerId,
                         order_uuid: orderUuid,
+                        ...extraParams,
                     },
                 }
             );

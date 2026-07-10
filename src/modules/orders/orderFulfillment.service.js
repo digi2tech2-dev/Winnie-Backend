@@ -22,6 +22,7 @@
 const mongoose = require('mongoose');
 const { Order, ORDER_STATUS, MAX_RETRY_COUNT, ORDER_EXECUTION_TYPES } = require('../orders/order.model');
 const { getExternalProductId } = require('../products/product.service');
+const { ProviderProduct } = require('../providers/providerProduct.model');
 const { refundWalletAtomic } = require('../wallet/wallet.service');
 const {
     LEDGER_TRANSACTION_TYPES,
@@ -188,8 +189,58 @@ const refundFailedOrder = async (order, notificationContext = {}) => {
     }
 };
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
-const Provider = require('../providers/provider.model');
+const { Provider } = require('../providers/provider.model');
 const { Product } = require('../products/product.model');
+
+const _firstPresent = (...values) => values.find((value) => value !== undefined && value !== null && value !== '');
+
+const _plainMapping = (mapping) => {
+    if (!mapping) return {};
+    if (mapping instanceof Map) return Object.fromEntries(mapping.entries());
+    if (typeof mapping.toObject === 'function') return mapping.toObject();
+    return mapping;
+};
+
+const _extractSingleProviderParamKey = (providerProduct) => {
+    const rawParams = providerProduct?.rawPayload?.params
+        ?? providerProduct?.rawPayload?.parameters
+        ?? providerProduct?.rawPayload?.fields
+        ?? [];
+    if (!Array.isArray(rawParams) || rawParams.length !== 1) return null;
+    const param = rawParams[0];
+    return typeof param === 'string'
+        ? param
+        : (param?.key ?? param?.name ?? param?.id ?? null);
+};
+
+const buildProviderParams = (order, product, providerProduct) => {
+    const values = order.customerInput?.values ?? {};
+    const mapped = applyProviderMapping(values, _plainMapping(product?.providerMapping));
+
+    const singleParamKey = _extractSingleProviderParamKey(providerProduct);
+    const fallbackPlayerId = _firstPresent(
+        mapped.playerId,
+        mapped.player_id,
+        mapped.account_id,
+        mapped.user_id,
+        mapped.uid,
+        mapped.userId,
+        values.playerId,
+        values.player_id,
+        values.account_id,
+        values.user_id,
+        values.uid,
+        values.userId,
+        singleParamKey ? values[singleParamKey] : undefined,
+        ...Object.values(values)
+    );
+
+    if (_firstPresent(mapped.playerId) === undefined && fallbackPlayerId !== undefined) {
+        mapped.playerId = fallbackPlayerId;
+    }
+
+    return mapped;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EXECUTE ORDER (called immediately after createOrder commits)
@@ -263,7 +314,9 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             await Order.findByIdAndUpdate(orderId, {
                 $set: {
                     status: ORDER_STATUS.FAILED,
+                    providerStatus: 'Cancelled',
                     providerRawResponse: { error: resolveErr.message },
+                    rejectionReason: resolveErr.message,
                     failedAt: now,
                     lastCheckedAt: now,
                 },
@@ -301,29 +354,50 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     // ── Resolve externalProductId via the 3-layer chain ─────────────────────
     // Order → Platform Product → ProviderProduct → externalProductId
     let externalProductId = null;
+    let providerProduct = null;
     try {
+        if (order.productId?.providerProduct) {
+            providerProduct = await ProviderProduct.findById(order.productId.providerProduct)
+                .select('externalProductId rawPayload')
+                .lean();
+            externalProductId = providerProduct?.externalProductId ?? null;
+        }
         if (order.productId?._id) {
-            externalProductId = await getExternalProductId(order.productId._id);
+            externalProductId = externalProductId ?? await getExternalProductId(order.productId._id);
         }
     } catch (_) { /* non-fatal — fallback to productId below */ }
 
     // ── Build provider params from customerInput.values + providerMapping ───────
     // Convert internal field keys → provider-expected parameter names.
     // Falls back to identity mapping when no providerMapping is defined.
-    const rawCustomerValues = order.customerInput?.values ?? {};
-    const mappedCustomerFields = applyProviderMapping(
-        rawCustomerValues,
-        order.productId?.providerMapping ?? null
-    );
+    const mappedCustomerFields = buildProviderParams(order, order.productId, providerProduct);
+    const stableOrderUuid = order.idempotencyKey || order._id.toString();
 
     // ── Call the provider ──────────────────────────────────────────────────────
     console.log(`[Fulfillment] Placing order ${orderId} with provider…`);
 
     let result;
     try {
+        if (!externalProductId) {
+            const missingExternalIdError = new Error('Provider product externalProductId is missing');
+            missingExternalIdError.providerBody = {
+                error: missingExternalIdError.message,
+                productId: order.productId?._id?.toString?.() ?? null,
+                providerProductId: order.productId?.providerProduct?.toString?.() ?? null,
+            };
+            throw missingExternalIdError;
+        }
+
         result = await resolvedProvider.placeOrder({
-            externalProductId: externalProductId ?? String(order.productId._id),
+            productId: String(externalProductId),
+            externalProductId: String(externalProductId),
+            amount: order.quantity,
             quantity: order.quantity,
+            referenceId: stableOrderUuid,
+            idempotencyKey: order.idempotencyKey ?? null,
+            orderUuid: stableOrderUuid,
+            order_uuid: stableOrderUuid,
+            params: mappedCustomerFields,
             ...mappedCustomerFields,   // ← spread translated customer fields onto params
         });
     } catch (err) {
@@ -347,12 +421,13 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             console.warn(`[Fulfillment] Transient error placing order ${orderId} — leaving PROCESSING for cron retry:`, err.message);
             // Return a synthetic "still pending" result — DO NOT refund.
             result = {
-                success: true,
+                success: false,
                 providerOrderId: null,
                 providerStatus: 'Pending',         // → stays PROCESSING
                 rawResponse: { message: err.message, isTransient: true },
-                errorMessage: null,
+                errorMessage: err.message,
             };
+            result.providerStatus = 'Cancelled';
         } else {
             // Hard failure: provider explicitly rejected or gave an unexpected error.
             result = {
@@ -419,6 +494,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 providerStatus: result.providerStatus,
                 providerOrderId: result.providerOrderId,
                 providerRawResponse: result.rawResponse,
+                rejectionReason: result.errorMessage ?? result.rawResponse?.message ?? result.rawResponse?.error ?? 'Provider order failed',
                 failedAt: now,
                 lastCheckedAt: now,
             },
@@ -539,7 +615,9 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             await Order.findByIdAndUpdate(orderId, {
                 $set: {
                     status: ORDER_STATUS.FAILED,
+                    providerStatus: 'Cancelled',
                     providerRawResponse: { fatalError: fatalErr.message, stack: fatalErr.stack },
+                    rejectionReason: fatalErr.message,
                     failedAt: now,
                     lastCheckedAt: now,
                 },
