@@ -513,12 +513,27 @@ const resendVerification = async (email) => {
  *
  * Note: Google OAuth users bypass the email verification gate
  * because Google has already verified the email. They still need
- * admin approval (PENDING → ACTIVE) before accessing the platform.
+ * an active account before accessing the platform.
  *
  * @param {Object} user  — User document from Passport strategy
  * @returns {{ token: string, user: Object, message?: string }}
  */
 const loginWithGoogle = (user) => {
+    if (user.deletedAt) {
+        createAuditLog({
+            actorId: user._id,
+            actorRole: ACTOR_ROLES[user.role] ?? user.role,
+            action: USER_ACTIONS.LOGIN_BLOCKED,
+            entityType: ENTITY_TYPES.USER,
+            entityId: user._id,
+            metadata: { reason: 'DELETED', email: user.email, method: 'google-oauth' },
+        });
+
+        throw new AuthenticationError(
+            'This account is no longer available. Please contact support.'
+        );
+    }
+
     if (user.status === USER_STATUS.PENDING) {
         // Return a token-less response so the frontend can show the approval message.
         // Some frontends prefer a token even for pending users; adjust as needed.
