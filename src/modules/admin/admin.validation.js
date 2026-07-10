@@ -300,8 +300,10 @@ const walletAdjustmentSchema = Joi.object({
 const listAdminWalletAdjustmentsQuery = Joi.object({
     ...pagination,
     search: Joi.string().trim().max(200).allow('', null),
-    type: Joi.string().trim().lowercase().valid('all', 'add', 'deduct').default('all'),
-    currency: Joi.string().trim().uppercase().pattern(/^[A-Z]{3}$/).allow('', null),
+    type: Joi.string().trim().lowercase().valid('all', 'add', 'deduct', 'credit', 'debit').default('all'),
+    currency: Joi.string().trim().uppercase().pattern(/^[A-Z]{3}$/).allow('', null).messages({
+        'string.pattern.base': 'Please choose a valid 3-letter currency code such as USD or EGP',
+    }),
     userId: objectId().allow('', null),
     adminId: objectId().allow('', null),
     actorId: objectId().allow('', null),

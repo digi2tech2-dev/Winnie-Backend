@@ -198,6 +198,45 @@ const buildDateRange = ({ dateFrom, dateTo }) => {
     return Object.keys(range).length ? range : null;
 };
 
+const adminAdjustmentMatch = {
+    $or: [
+        { semanticType: LEDGER_TRANSACTION_TYPES.ADMIN_ADJUSTMENT },
+        { sourceType: TRANSACTION_SOURCE_TYPES.ADMIN_ADJUSTMENT },
+        { 'metadata.semanticType': LEDGER_TRANSACTION_TYPES.ADMIN_ADJUSTMENT },
+        { 'metadata.sourceType': TRANSACTION_SOURCE_TYPES.ADMIN_ADJUSTMENT },
+        { type: LEDGER_TRANSACTION_TYPES.ADMIN_ADJUSTMENT },
+    ],
+};
+
+const normalizedAdminAdjustmentFields = {
+    idString: { $toString: '$_id' },
+    normalizedAmount: { $abs: { $ifNull: ['$amount', 0] } },
+    normalizedOperation: {
+        $let: {
+            vars: {
+                amountValue: { $ifNull: ['$amount', 0] },
+                directionValue: { $toUpper: { $ifNull: ['$direction', ''] } },
+                operationValue: { $toUpper: { $ifNull: ['$metadata.operation', ''] } },
+                typeValue: { $toUpper: { $ifNull: ['$type', ''] } },
+            },
+            in: {
+                $switch: {
+                    branches: [
+                        { case: { $in: ['$$operationValue', ['ADD', 'CREDIT', 'ADMIN_ADD', 'ADD_FUNDS']] }, then: 'ADD' },
+                        { case: { $in: ['$$operationValue', ['DEDUCT', 'DEBIT', 'ADMIN_DEDUCT', 'DEDUCT_FUNDS']] }, then: 'DEDUCT' },
+                        { case: { $eq: ['$$directionValue', TRANSACTION_DIRECTIONS.CREDIT] }, then: 'ADD' },
+                        { case: { $eq: ['$$directionValue', TRANSACTION_DIRECTIONS.DEBIT] }, then: 'DEDUCT' },
+                        { case: { $eq: ['$$typeValue', TRANSACTION_TYPES.CREDIT] }, then: 'ADD' },
+                        { case: { $eq: ['$$typeValue', TRANSACTION_TYPES.DEBIT] }, then: 'DEDUCT' },
+                        { case: { $lt: ['$$amountValue', 0] }, then: 'DEDUCT' },
+                    ],
+                    default: 'ADD',
+                },
+            },
+        },
+    },
+};
+
 const listAdminAdjustments = async (filters = {}) => {
     const page = Math.max(parseInt(filters.page ?? 1, 10), 1);
     const limit = Math.min(Math.max(parseInt(filters.limit ?? 20, 10), 1), 100);
@@ -205,14 +244,7 @@ const listAdminAdjustments = async (filters = {}) => {
     const type = String(filters.type || 'all').toLowerCase();
     const sort = String(filters.sort || 'newest').toLowerCase();
 
-    const match = {
-        semanticType: LEDGER_TRANSACTION_TYPES.ADMIN_ADJUSTMENT,
-        sourceType: TRANSACTION_SOURCE_TYPES.ADMIN_ADJUSTMENT,
-        'metadata.operation': { $in: ['ADD', 'DEDUCT'] },
-    };
-
-    if (type === 'add') match['metadata.operation'] = 'ADD';
-    if (type === 'deduct') match['metadata.operation'] = 'DEDUCT';
+    const match = { ...adminAdjustmentMatch };
 
     if (filters.currency) {
         match.currency = String(filters.currency).trim().toUpperCase();
@@ -244,7 +276,13 @@ const listAdminAdjustments = async (filters = {}) => {
 
     const pipeline = [
         { $match: match },
-        { $addFields: { idString: { $toString: '$_id' } } },
+        { $addFields: normalizedAdminAdjustmentFields },
+    ];
+
+    if (type === 'add' || type === 'credit') pipeline.push({ $match: { normalizedOperation: 'ADD' } });
+    if (type === 'deduct' || type === 'debit') pipeline.push({ $match: { normalizedOperation: 'DEDUCT' } });
+
+    pipeline.push(
         {
             $lookup: {
                 from: 'users',
@@ -263,7 +301,7 @@ const listAdminAdjustments = async (filters = {}) => {
             },
         },
         { $unwind: { path: '$actor', preserveNullAndEmptyArrays: true } },
-    ];
+    );
 
     const search = String(filters.search || '').trim();
     if (search) {
@@ -306,8 +344,8 @@ const listAdminAdjustments = async (filters = {}) => {
                             name: '$actor.name',
                             email: '$actor.email',
                         },
-                        action: '$metadata.operation',
-                        amount: 1,
+                        action: '$normalizedOperation',
+                        amount: '$normalizedAmount',
                         currency: 1,
                         beforeBalance: '$balanceBefore',
                         afterBalance: '$balanceAfter',
@@ -321,12 +359,12 @@ const listAdminAdjustments = async (filters = {}) => {
             summary: [
                 {
                     $group: {
-                        _id: null,
+                        _id: { $ifNull: ['$currency', 'USD'] },
                         totalAdded: {
-                            $sum: { $cond: [{ $eq: ['$metadata.operation', 'ADD'] }, '$amount', 0] },
+                            $sum: { $cond: [{ $eq: ['$normalizedOperation', 'ADD'] }, '$normalizedAmount', 0] },
                         },
                         totalDeducted: {
-                            $sum: { $cond: [{ $eq: ['$metadata.operation', 'DEDUCT'] }, '$amount', 0] },
+                            $sum: { $cond: [{ $eq: ['$normalizedOperation', 'DEDUCT'] }, '$normalizedAmount', 0] },
                         },
                         count: { $sum: 1 },
                     },
@@ -334,24 +372,62 @@ const listAdminAdjustments = async (filters = {}) => {
                 {
                     $project: {
                         _id: 0,
+                        currency: '$_id',
                         totalAdded: { $round: ['$totalAdded', 2] },
+                        totalAdditions: { $round: ['$totalAdded', 2] },
                         totalDeducted: { $round: ['$totalDeducted', 2] },
+                        totalDeductions: { $round: ['$totalDeducted', 2] },
                         net: { $round: [{ $subtract: ['$totalAdded', '$totalDeducted'] }, 2] },
                         count: 1,
                     },
                 },
+                { $sort: { currency: 1 } },
             ],
         },
     });
 
     const [result = {}] = await WalletTransaction.aggregate(pipeline);
     const total = result.total?.[0]?.count || 0;
-    const summary = result.summary?.[0] || {
-        totalAdded: 0,
-        totalDeducted: 0,
-        net: 0,
-        count: 0,
-    };
+    const totalsByCurrency = (result.summary || []).map((item) => ({
+        currency: item.currency || 'USD',
+        totalAdded: safeRound(item.totalAdded || 0),
+        totalAdditions: safeRound(item.totalAdditions || item.totalAdded || 0),
+        totalDeducted: safeRound(item.totalDeducted || 0),
+        totalDeductions: safeRound(item.totalDeductions || item.totalDeducted || 0),
+        net: safeRound(item.net || 0),
+        count: item.count || 0,
+    }));
+    const selectedCurrency = filters.currency ? String(filters.currency).trim().toUpperCase() : '';
+    const singleCurrencySummary = selectedCurrency
+        ? (totalsByCurrency.find((item) => item.currency === selectedCurrency) || {
+            currency: selectedCurrency,
+            totalAdded: 0,
+            totalAdditions: 0,
+            totalDeducted: 0,
+            totalDeductions: 0,
+            net: 0,
+            count: 0,
+        })
+        : (totalsByCurrency.length === 1 ? totalsByCurrency[0] : null);
+
+    const summary = singleCurrencySummary
+        ? {
+            ...singleCurrencySummary,
+            count: total,
+            mode: 'single',
+            totalsByCurrency,
+        }
+        : {
+            currency: null,
+            mode: 'grouped',
+            totalAdded: null,
+            totalAdditions: null,
+            totalDeducted: null,
+            totalDeductions: null,
+            net: 0,
+            count: total,
+            totalsByCurrency,
+        };
 
     return {
         items: result.items || [],

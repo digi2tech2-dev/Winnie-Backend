@@ -117,6 +117,7 @@ router.use(authorizeRoles('ADMIN', 'SUPERVISOR'));
 // DASHBOARD STATISTICS
 // ═══════════════════════════════════════════════════════════════════════════════
 
+router.get('/dashboard/summary', authorizeRoles('ADMIN'), statsCtrl.getDashboardSummary);
 router.get('/dashboard/stats', requirePermission('dashboard.view'), statsCtrl.getDashboardStats);
 router.get('/stats', requirePermission('dashboard.view'), statsCtrl.getDashboardStats);
 

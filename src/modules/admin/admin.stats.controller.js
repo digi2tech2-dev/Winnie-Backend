@@ -7,9 +7,287 @@
 const { Order, ORDER_STATUS } = require('../orders/order.model');
 const { User, USER_STATUS } = require('../users/user.model');
 const { Product } = require('../products/product.model');
+const { WalletTransaction, TRANSACTION_DIRECTIONS, TRANSACTION_STATUS } = require('../wallet/walletTransaction.model');
+const { DepositRequest, DEPOSIT_STATUS } = require('../deposits/deposit.model');
+const { Currency } = require('../currency/currency.model');
+const { AuditLog } = require('../audit/audit.model');
+const { PRODUCT_ACTIONS, ENTITY_TYPES } = require('../audit/audit.constants');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess } = require('../../shared/utils/apiResponse');
 const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
+const { ValidationError } = require('../../shared/errors/AppError');
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_SUMMARY_RANGE_DAYS = 366;
+
+const parseDateOnly = (value, fieldName) => {
+    if (!value) return null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value))) {
+        throw new ValidationError(`${fieldName} must use YYYY-MM-DD format.`);
+    }
+
+    const date = new Date(`${value}T00:00:00.000Z`);
+    if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+        throw new ValidationError(`${fieldName} must be a valid date.`);
+    }
+
+    return date;
+};
+
+const toDateKey = (date) => date.toISOString().slice(0, 10);
+
+const normalizeSummaryRange = (query = {}) => {
+    const today = new Date();
+    const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+    const defaultFrom = new Date(todayUtc.getTime() - 9 * DAY_MS);
+
+    const fromDate = parseDateOnly(query.from || query.startDate, 'from') || defaultFrom;
+    const toDate = parseDateOnly(query.to || query.endDate, 'to') || todayUtc;
+
+    if (fromDate > toDate) {
+        throw new ValidationError('from must be before or equal to to.');
+    }
+
+    const days = Math.round((toDate.getTime() - fromDate.getTime()) / DAY_MS) + 1;
+    if (days > MAX_SUMMARY_RANGE_DAYS) {
+        throw new ValidationError(`Dashboard summary range cannot exceed ${MAX_SUMMARY_RANGE_DAYS} days.`);
+    }
+
+    return {
+        days,
+        from: toDateKey(fromDate),
+        fromDate,
+        to: toDateKey(toDate),
+        toDate,
+        toExclusive: new Date(toDate.getTime() + DAY_MS),
+    };
+};
+
+const previousRangeFor = (range) => {
+    const previousToExclusive = new Date(range.fromDate.getTime());
+    const previousFromDate = new Date(range.fromDate.getTime() - range.days * DAY_MS);
+    const previousToDate = new Date(previousToExclusive.getTime() - DAY_MS);
+
+    return {
+        days: range.days,
+        from: toDateKey(previousFromDate),
+        fromDate: previousFromDate,
+        to: toDateKey(previousToDate),
+        toDate: previousToDate,
+        toExclusive: previousToExclusive,
+    };
+};
+
+const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
+
+const changePercent = (current, previous) => {
+    const currentValue = Number(current) || 0;
+    const previousValue = Number(previous) || 0;
+    if (previousValue === 0) return currentValue === 0 ? 0 : null;
+    return Number((((currentValue - previousValue) / Math.abs(previousValue)) * 100).toFixed(1));
+};
+
+const numberOrZero = (value) => Number(value) || 0;
+
+const countProductMovement = async (range) => {
+    const auditMatch = {
+        entityType: ENTITY_TYPES.PRODUCT,
+        action: { $in: Object.values(PRODUCT_ACTIONS) },
+        createdAt: { $gte: range.fromDate, $lt: range.toExclusive },
+    };
+
+    const auditCount = await AuditLog.countDocuments(auditMatch);
+    if (auditCount > 0) return auditCount;
+
+    return Product.countDocuments({
+        deletedAt: null,
+        $or: [
+            { createdAt: { $gte: range.fromDate, $lt: range.toExclusive } },
+            { updatedAt: { $gte: range.fromDate, $lt: range.toExclusive } },
+        ],
+    });
+};
+
+const getOrderSummary = async (range) => {
+    const completedMatch = {
+        status: ORDER_STATUS.COMPLETED,
+        updatedAt: { $gte: range.fromDate, $lt: range.toExclusive },
+    };
+    const followUpMatch = {
+        status: { $in: [ORDER_STATUS.PENDING, ORDER_STATUS.PROCESSING, ORDER_STATUS.MANUAL_REVIEW] },
+        createdAt: { $gte: range.fromDate, $lt: range.toExclusive },
+    };
+
+    const toNullableDouble = (field) => ({
+        $convert: {
+            input: field,
+            to: 'double',
+            onError: null,
+            onNull: null,
+        },
+    });
+
+    const [completedResult, followUpOrders] = await Promise.all([
+        Order.aggregate([
+            { $match: completedMatch },
+            {
+                $project: {
+                    basePrice: { $ifNull: [toNullableDouble('$basePriceSnapshot'), 0] },
+                    profitSnapshot: toNullableDouble('$profitUsd'),
+                    quantity: { $ifNull: [toNullableDouble('$quantity'), 1] },
+                    rateSnapshot: { $ifNull: [toNullableDouble('$rateSnapshot'), 1] },
+                    revenueLocal: { $ifNull: [toNullableDouble('$totalPrice'), 0] },
+                    revenueUsdSnapshot: toNullableDouble('$usdAmount'),
+                },
+            },
+            {
+                $project: {
+                    profitFallback: {
+                        $subtract: [
+                            {
+                                $ifNull: [
+                                    '$revenueUsdSnapshot',
+                                    {
+                                        $cond: [
+                                            { $gt: ['$rateSnapshot', 0] },
+                                            { $divide: ['$revenueLocal', '$rateSnapshot'] },
+                                            '$revenueLocal',
+                                        ],
+                                    },
+                                ],
+                            },
+                            { $multiply: ['$basePrice', '$quantity'] },
+                        ],
+                    },
+                    revenueUsd: {
+                        $ifNull: [
+                            '$revenueUsdSnapshot',
+                            {
+                                $cond: [
+                                    { $gt: ['$rateSnapshot', 0] },
+                                    { $divide: ['$revenueLocal', '$rateSnapshot'] },
+                                    '$revenueLocal',
+                                ],
+                            },
+                        ],
+                    },
+                    profitSnapshot: 1,
+                },
+            },
+            {
+                $group: {
+                    _id: null,
+                    completedOrders: { $sum: 1 },
+                    netProfitUsd: { $sum: { $ifNull: ['$profitSnapshot', '$profitFallback'] } },
+                    totalRevenueUsd: { $sum: '$revenueUsd' },
+                },
+            },
+        ]),
+        Order.countDocuments(followUpMatch),
+    ]);
+
+    const completed = completedResult[0] || {};
+    return {
+        completedOrders: numberOrZero(completed.completedOrders),
+        followUpOrders,
+        netProfitUsd: roundMoney(completed.netProfitUsd),
+        totalRevenueUsd: roundMoney(completed.totalRevenueUsd),
+    };
+};
+
+const getActiveUsers = async (range) => {
+    // Activity is defined as a customer account with an order or wallet ledger entry
+    // in the selected period because the User schema has no lastLoginAt field.
+    const [orderUsers, walletUsers] = await Promise.all([
+        Order.distinct('userId', {
+            createdAt: { $gte: range.fromDate, $lt: range.toExclusive },
+        }),
+        WalletTransaction.distinct('userId', {
+            createdAt: { $gte: range.fromDate, $lt: range.toExclusive },
+        }),
+    ]);
+
+    return new Set([...orderUsers, ...walletUsers].map((id) => String(id))).size;
+};
+
+const getWalletMovementUsd = async (range) => {
+    const result = await WalletTransaction.aggregate([
+        {
+            $match: {
+                direction: { $in: [TRANSACTION_DIRECTIONS.CREDIT, TRANSACTION_DIRECTIONS.DEBIT] },
+                status: TRANSACTION_STATUS.COMPLETED,
+                createdAt: { $gte: range.fromDate, $lt: range.toExclusive },
+            },
+        },
+        {
+            $lookup: {
+                from: Currency.collection.name,
+                localField: 'currency',
+                foreignField: 'code',
+                as: 'currencyDoc',
+            },
+        },
+        {
+            $project: {
+                amount: { $abs: '$amount' },
+                currency: { $toUpper: { $ifNull: ['$currency', 'USD'] } },
+                rate: { $ifNull: [{ $arrayElemAt: ['$currencyDoc.platformRate', 0] }, null] },
+            },
+        },
+        {
+            $project: {
+                amountUsd: {
+                    $cond: [
+                        { $eq: ['$currency', 'USD'] },
+                        '$amount',
+                        {
+                            $cond: [
+                                { $gt: ['$rate', 0] },
+                                { $divide: ['$amount', '$rate'] },
+                                0,
+                            ],
+                        },
+                    ],
+                },
+            },
+        },
+        { $group: { _id: null, total: { $sum: '$amountUsd' } } },
+    ]);
+
+    return roundMoney(result[0]?.total);
+};
+
+const getDashboardSummaryForRange = async (range) => {
+    const [
+        orderSummary,
+        activeUsers,
+        walletMovementUsd,
+        pendingManualOperations,
+        productMovement,
+    ] = await Promise.all([
+        getOrderSummary(range),
+        getActiveUsers(range),
+        getWalletMovementUsd(range),
+        DepositRequest.countDocuments({
+            status: DEPOSIT_STATUS.PENDING,
+            createdAt: { $gte: range.fromDate, $lt: range.toExclusive },
+        }),
+        countProductMovement(range),
+    ]);
+
+    return {
+        ...orderSummary,
+        activeUsers,
+        pendingManualOperations,
+        productMovement,
+        walletMovementUsd,
+    };
+};
+
+const card = (current, previous, { money = false, compare = true } = {}) => ({
+    value: money ? roundMoney(current) : numberOrZero(current),
+    ...(compare ? { changePercent: changePercent(current, previous) } : {}),
+});
 
 const getDashboardStats = catchAsync(async (req, res) => {
     const parseDate = (value, { endOfDay = false } = {}) => {
@@ -233,4 +511,35 @@ const getDashboardStats = catchAsync(async (req, res) => {
     sendSuccess(res, sanitizePricingForSupervisor(response, req.user), 'Dashboard statistics retrieved.');
 });
 
-module.exports = { getDashboardStats };
+const getDashboardSummary = catchAsync(async (req, res) => {
+    const range = normalizeSummaryRange(req.query);
+    const previousRange = previousRangeFor(range);
+
+    const [current, previous] = await Promise.all([
+        getDashboardSummaryForRange(range),
+        getDashboardSummaryForRange(previousRange),
+    ]);
+
+    const response = {
+        range: {
+            from: range.from,
+            to: range.to,
+        },
+        cards: {
+            totalRevenueUsd: card(current.totalRevenueUsd, previous.totalRevenueUsd, { money: true }),
+            netProfitUsd: card(current.netProfitUsd, previous.netProfitUsd, { money: true }),
+            completedOrders: card(current.completedOrders, previous.completedOrders),
+            followUpOrders: card(current.followUpOrders, previous.followUpOrders),
+            activeUsers: card(current.activeUsers, previous.activeUsers),
+            walletMovementUsd: card(current.walletMovementUsd, previous.walletMovementUsd, { money: true, compare: false }),
+            pendingManualOperations: card(current.pendingManualOperations, previous.pendingManualOperations, { compare: false }),
+            productMovement: card(current.productMovement, previous.productMovement, { compare: false }),
+        },
+        updatedAt: new Date().toISOString(),
+    };
+
+    res.set('Cache-Control', 'no-store');
+    sendSuccess(res, response, 'Dashboard summary retrieved.');
+});
+
+module.exports = { getDashboardStats, getDashboardSummary };

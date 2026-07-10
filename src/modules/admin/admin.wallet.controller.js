@@ -47,7 +47,11 @@ const listAdminAdjustments = catchAsync(async (req, res) => {
     res.status(200).json({
         success: true,
         message: 'Admin wallet adjustments retrieved',
-        data: { items: result.items },
+        data: {
+            items: result.items,
+            pagination: result.pagination,
+            summary: result.summary,
+        },
         pagination: result.pagination,
         summary: result.summary,
     });
