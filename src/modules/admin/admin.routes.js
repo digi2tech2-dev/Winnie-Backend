@@ -259,8 +259,8 @@ router.post('/currencies', authorizeRoles('ADMIN'), validateBody(schemas.createC
 // ═══════════════════════════════════════════════════════════════════════════════
 
 router.get('/groups', requirePermission('groups.manage'), catchAsync(async (req, res) => {
-    const groups = await groupSvc.listGroups({ includeInactive: true });
-    sendSuccess(res, { groups }, 'Groups retrieved');
+    const groups = await groupSvc.listGroupsWithSummary({ includeInactive: true });
+    sendSuccess(res, groups, 'Groups retrieved');
 }));
 
 router.post('/groups', requirePermission('groups.manage'), validateBody(schemas.createGroup), catchAsync(async (req, res) => {

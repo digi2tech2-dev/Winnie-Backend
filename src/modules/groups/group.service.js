@@ -1,19 +1,58 @@
 'use strict';
 
 const Group = require('./group.model');
-const { User } = require('../users/user.model');
-const { ConflictError, NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
+const { User, ROLES } = require('../users/user.model');
+const { AppError, ConflictError, NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Case-insensitive name collision check. */
+const _escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Case-insensitive name collision check among non-deleted groups. */
 const _assertNameUnique = async (name, excludeId = null) => {
-    const query = { name: { $regex: new RegExp(`^${name.trim()}$`, 'i') } };
+    const query = {
+        deletedAt: null,
+        name: { $regex: new RegExp(`^${_escapeRegex(name.trim())}$`, 'i') },
+    };
     if (excludeId) query._id = { $ne: excludeId };
     const existing = await Group.findOne(query);
     if (existing) throw new ConflictError(`A group named '${name}' already exists.`);
+};
+
+const _serializeGroup = (group, membersCount = 0) => ({
+    _id: group._id,
+    name: group.name,
+    percentage: group.percentage,
+    isActive: group.isActive,
+    deletedAt: group.deletedAt ?? null,
+    membersCount,
+    createdAt: group.createdAt,
+    updatedAt: group.updatedAt,
+});
+
+const _customerMemberFilter = (groupId) => ({
+    groupId,
+    role: ROLES.CUSTOMER,
+    deletedAt: null,
+});
+
+const _getMemberCounts = async (groupIds) => {
+    if (!groupIds.length) return new Map();
+
+    const rows = await User.aggregate([
+        {
+            $match: {
+                groupId: { $in: groupIds },
+                role: ROLES.CUSTOMER,
+                deletedAt: null,
+            },
+        },
+        { $group: { _id: '$groupId', count: { $sum: 1 } } },
+    ]);
+
+    return new Map(rows.map((row) => [String(row._id), row.count]));
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -25,9 +64,9 @@ const _assertNameUnique = async (name, excludeId = null) => {
  *
  * @param {{ name: string, percentage: number }} data
  */
-const createGroup = async ({ name, percentage }) => {
+const createGroup = async ({ name, percentage, isActive = true }) => {
     await _assertNameUnique(name);
-    const group = await Group.create({ name: name.trim(), percentage });
+    const group = await Group.create({ name: name.trim(), percentage, isActive });
     return group;
 };
 
@@ -44,6 +83,39 @@ const listGroups = async ({ includeInactive = false } = {}) => {
     const filter = { deletedAt: null };
     if (!includeInactive) filter.isActive = true;
     return Group.find(filter).sort({ percentage: -1, name: 1 });
+};
+
+/**
+ * Admin list shape for the groups management page.
+ * Includes real customer member counts and summary values; never returns seed data.
+ */
+const listGroupsWithSummary = async ({ includeInactive = true } = {}) => {
+    const groups = await listGroups({ includeInactive });
+    const memberCounts = await _getMemberCounts(groups.map((group) => group._id));
+
+    const items = groups.map((group) => {
+        const membersCount = memberCounts.get(String(group._id)) || 0;
+        return _serializeGroup(group, membersCount);
+    });
+
+    const totalMembers = items.reduce((sum, group) => sum + group.membersCount, 0);
+    const unassignedUsers = await User.countDocuments({
+        role: ROLES.CUSTOMER,
+        deletedAt: null,
+        $or: [{ groupId: null }, { groupId: { $exists: false } }],
+    });
+
+    return {
+        items,
+        summary: {
+            totalGroups: items.length,
+            activeGroups: items.filter((group) => group.isActive).length,
+            groupsWithMembers: items.filter((group) => group.membersCount > 0).length,
+            groupsWithoutMembers: items.filter((group) => group.membersCount === 0).length,
+            totalMembers,
+        },
+        unassignedUsers,
+    };
 };
 
 /**
@@ -139,6 +211,15 @@ const deleteGroup = async (id) => {
     if (!group) throw new NotFoundError('Group');
     if (group.deletedAt) throw new BusinessRuleError('Group is already deleted.', 'ALREADY_DELETED');
 
+    const membersCount = await User.countDocuments(_customerMemberFilter(group._id));
+    if (membersCount > 0) {
+        throw new AppError(
+            'Cannot delete a group that has members. Move users to another group first.',
+            400,
+            'GROUP_HAS_MEMBERS'
+        );
+    }
+
     group.deletedAt = new Date();
     group.isActive = false;
     await group.save();
@@ -187,6 +268,7 @@ const changeUserGroup = async (userId, groupId) => {
 module.exports = {
     createGroup,
     listGroups,
+    listGroupsWithSummary,
     getGroupById,
     getHighestPercentageGroup,
     updateGroupPercentage,
