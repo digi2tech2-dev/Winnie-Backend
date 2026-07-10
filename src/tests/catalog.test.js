@@ -46,6 +46,7 @@ const { Order, ORDER_STATUS } = require('../modules/orders/order.model');
 const catalogService = require('../modules/providers/providerCatalog.service');
 const productService = require('../modules/products/product.service');
 const meController = require('../modules/me/me.controller');
+const adminCatalogController = require('../modules/admin/admin.catalog.controller');
 const { createOrder } = require('../modules/orders/order.service');
 const {
     connectTestDB,
@@ -112,6 +113,37 @@ describe('[0] provider link option safety', () => {
         expect(plain.apiKey).toBeUndefined();
         expect(plain.username).toBeUndefined();
         expect(plain.password).toBeUndefined();
+    });
+
+    it('provider product option keeps tiny supplier prices as exact strings', async () => {
+        const provider = await makeProvider({ name: 'mock' });
+        await ProviderProduct.create({
+            provider: provider._id,
+            externalProductId: '7098',
+            rawName: 'Xena live',
+            rawPrice: '0.00010547674294736841',
+            minQty: 10000,
+            maxQty: 10000000,
+            isActive: true,
+            rawPayload: {
+                price: 0.00010547674294736841,
+                qty_values: { min: '10000', max: '10000000' },
+            },
+        });
+
+        const response = await runHandler(adminCatalogController.listProductProviderProductOptions, {
+            params: { providerId: provider._id.toString() },
+            query: { search: 'xe', page: 1, limit: 10 },
+            user: { role: 'ADMIN' },
+        });
+        const option = response.body.data[0];
+
+        expect(option.externalProductId).toBe('7098');
+        expect(option.rawPrice).toBe('0.00010547674294736841');
+        expect(option.supplierPrice).toBe('0.00010547674294736841');
+        expect(option.price).toBe('0.00010547674294736841');
+        expect(option.minQty).toBe(10000);
+        expect(option.maxQty).toBe(10000000);
     });
 });
 
@@ -531,6 +563,52 @@ describe('[3.5] product.service — provider link / unlink updates', () => {
         expect(updated.syncPriceWithProvider).toBe(true);
         expectDecimalString(updated.providerPrice, '7.5');
         expectDecimalString(updated.basePrice, '7.5');
+    });
+
+    it('links tiny provider prices without rounding and copies provider limits', async () => {
+        const tinyProviderProduct = await ProviderProduct.create({
+            provider: provider._id,
+            externalProductId: '7098',
+            rawName: 'Xena live',
+            rawPrice: '0.00010547674294736841',
+            minQty: 10000,
+            maxQty: 10000000,
+            isActive: true,
+            rawPayload: {
+                price: 0.00010547674294736841,
+                qty_values: { min: '10000', max: '10000000' },
+            },
+        });
+        const product = await Product.create({
+            name: 'Tiny Link Target',
+            basePrice: '1.25',
+            finalPrice: '1.25',
+            minQty: 1,
+            maxQty: 10,
+        });
+
+        const linked = await productService.updateProduct(product._id, {
+            provider: provider._id,
+            providerProduct: tinyProviderProduct._id,
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+            pricingMode: PRICING_MODES.MANUAL,
+            syncPriceWithProvider: false,
+            minQty: tinyProviderProduct.minQty,
+            maxQty: tinyProviderProduct.maxQty,
+        });
+        const patched = await productService.updateProduct(linked._id, {
+            name: 'Tiny Link Target Renamed',
+        });
+
+        expect(linked.providerProduct._id.toString()).toBe(tinyProviderProduct._id.toString());
+        expect(linked.providerProduct.externalProductId).toBe('7098');
+        expect(linked.providerProduct.rawPrice).toBe('0.00010547674294736841');
+        expect(linked.providerPrice).toBe('0.00010547674294736841');
+        expect(linked.minQty).toBe(10000);
+        expect(linked.maxQty).toBe(10000000);
+        expectDecimalString(linked.basePrice, '1.25');
+        expect(patched.providerProduct._id.toString()).toBe(tinyProviderProduct._id.toString());
+        expect(patched.providerPrice).toBe('0.00010547674294736841');
     });
 
     it('persists a manual admin price and returns it from the customer product endpoint', async () => {

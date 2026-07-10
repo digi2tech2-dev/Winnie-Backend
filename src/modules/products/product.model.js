@@ -157,7 +157,13 @@ const productSchema = new mongoose.Schema(
             type: Number,
             required: [true, 'Maximum quantity is required'],
             validate: {
-                validator: function (v) { return v >= this.minQty; },
+                validator: function (v) {
+                    const minQty = typeof this.get === 'function'
+                        ? this.get('minQty')
+                        : this.minQty;
+                    if (minQty === undefined || minQty === null) return true;
+                    return Number(v) >= Number(minQty);
+                },
                 message: 'maxQty must be >= minQty',
             },
         },

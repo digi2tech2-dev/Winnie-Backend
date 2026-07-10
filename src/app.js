@@ -107,6 +107,14 @@ app.get('/health', (req, res) => {
 });
 
 // ── API Routes ────────────────────────────────────────────────────────────────
+app.use(API_PREFIX, (_req, res, next) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.set('Surrogate-Control', 'no-store');
+    next();
+});
+
 // Apply general rate limiter to all API routes (500 req / 15 min per IP)
 app.use(API_PREFIX, apiLimiter);
 

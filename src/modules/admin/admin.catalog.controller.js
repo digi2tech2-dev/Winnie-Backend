@@ -300,8 +300,11 @@ const sanitizeProviderProductOption = (providerProduct, user) => {
     };
 
     if (!isSupervisorRole(user)) {
-        option.price = plainProduct.rawPrice == null ? null : String(plainProduct.rawPrice);
-        option.providerPrice = option.price;
+        const rawPrice = plainProduct.rawPrice == null ? null : String(plainProduct.rawPrice);
+        option.rawPrice = rawPrice;
+        option.supplierPrice = rawPrice;
+        option.price = rawPrice;
+        option.providerPrice = rawPrice;
         option.currency = String(plainProduct.currency || 'USD').toUpperCase();
     }
 

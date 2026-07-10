@@ -55,7 +55,7 @@ const listProducts = async ({ activeOnly = true, page = 1, limit = 50 } = {}) =>
             .skip(skip)
             .limit(limit)
             .populate('provider', 'name slug')
-            .populate('providerProduct', 'rawName translatedName externalProductId minQty maxQty isActive'),
+            .populate('providerProduct', 'rawName translatedName externalProductId rawPrice minQty maxQty isActive lastSyncedAt'),
         Product.countDocuments(filter),
     ]);
 
