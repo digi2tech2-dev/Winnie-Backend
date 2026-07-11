@@ -2,6 +2,7 @@
 
 const orderService = require('../modules/orders/order.service');
 const { Currency } = require('../modules/currency/currency.model');
+const { Order } = require('../modules/orders/order.model');
 const { buildCustomerPricingFields, calculateDiscount } = require('../modules/products/customerPricingPresenter');
 const {
     connectTestDB,
@@ -70,6 +71,46 @@ describe('High precision order quote pricing', () => {
         expect(quote.payableAmount).toBe(54.98);
         expect(quote.chargedAmount).toBe(54.98);
         expect(quote.hasEnoughBalance).toBe(true);
+        expect(quote.minQty).toBe(10000);
+        expect(quote.maxQty).toBe(5000000);
+        expect(quote.isQuantityValid).toBe(true);
+        expect(quote.quantityErrorCode).toBeNull();
+        expect(quote.quantityErrorMessage).toBeNull();
+        expect(quote.canSubmit).toBe(true);
+    });
+
+    it('quotes below minQty with price and quantity validity flags', async () => {
+        const customer = await createCustomer({
+            groupId: group._id,
+            currency: 'EGP',
+            walletBalance: 100,
+        });
+        const product = await createProduct({
+            name: 'SoulStar',
+            basePrice: '0.00010780225539945481',
+            finalPrice: '0.00010780225539945481',
+            minQty: 10000,
+            maxQty: 5000000,
+        });
+
+        const quote = await orderService.quoteOrder({
+            userId: customer._id,
+            productId: product._id,
+            quantity: 1000,
+        });
+
+        expect(quote.currency).toBe('EGP');
+        expect(quote.quantity).toBe(1000);
+        expect(quote.minQty).toBe(10000);
+        expect(quote.maxQty).toBe(5000000);
+        expectDecimalString(quote.customerUnitPriceUsd, '0.00010780225539945481');
+        expectDecimalString(quote.totalUsd, '0.10780225539945481');
+        expect(quote.payableAmount).toBe(5.5);
+        expect(quote.chargedAmount).toBe(5.5);
+        expect(quote.isQuantityValid).toBe(false);
+        expect(quote.quantityErrorCode).toBe('QUANTITY_BELOW_MIN');
+        expect(quote.quantityErrorMessage).toBe('Minimum quantity is 10000');
+        expect(quote.canSubmit).toBe(false);
     });
 
     it('creates an order that charges the same amount as the quote', async () => {
@@ -106,6 +147,36 @@ describe('High precision order quote pricing', () => {
 
         const user = await freshUser(customer._id);
         expect(user.walletBalance).toBe(45.02);
+    });
+
+    it('rejects order creation below minQty without charging or creating an order', async () => {
+        const customer = await createCustomer({
+            groupId: group._id,
+            currency: 'EGP',
+            walletBalance: 100,
+        });
+        const product = await createProduct({
+            name: 'SoulStar',
+            basePrice: '0.00010780225539945481',
+            finalPrice: '0.00010780225539945481',
+            minQty: 10000,
+            maxQty: 5000000,
+        });
+        const provider = { createOrder: jest.fn(), addOrder: jest.fn(), placeOrder: jest.fn() };
+
+        await expect(orderService.createOrder({
+            userId: customer._id,
+            productId: product._id,
+            quantity: 1000,
+            provider,
+        })).rejects.toMatchObject({ code: 'QUANTITY_OUT_OF_RANGE' });
+
+        const user = await freshUser(customer._id);
+        expect(user.walletBalance).toBe(100);
+        expect(await Order.countDocuments()).toBe(0);
+        expect(provider.createOrder).not.toHaveBeenCalled();
+        expect(provider.addOrder).not.toHaveBeenCalled();
+        expect(provider.placeOrder).not.toHaveBeenCalled();
     });
 
     it('does not produce a discount when basePrice and finalPrice are equal', () => {

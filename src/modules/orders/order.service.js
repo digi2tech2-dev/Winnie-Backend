@@ -105,9 +105,46 @@ const _normaliseOrderQuantity = (quantity, product) => {
     return qty;
 };
 
-const calculateOrderPricing = async ({ userId, product, quantity, session = null }) => {
+const _normaliseQuoteQuantity = (quantity) => {
+    const qty = parseInt(quantity, 10);
+    if (!Number.isInteger(qty) || qty <= 0) {
+        throw new BusinessRuleError(
+            'Quantity must be a positive integer.',
+            'INVALID_QUANTITY'
+        );
+    }
+    return qty;
+};
+
+const _getQuantityValidation = (qty, product) => {
+    if (qty < product.minQty) {
+        return {
+            isQuantityValid: false,
+            quantityErrorCode: 'QUANTITY_BELOW_MIN',
+            quantityErrorMessage: `Minimum quantity is ${product.minQty}`,
+        };
+    }
+
+    if (qty > product.maxQty) {
+        return {
+            isQuantityValid: false,
+            quantityErrorCode: 'QUANTITY_ABOVE_MAX',
+            quantityErrorMessage: `Maximum quantity is ${product.maxQty}`,
+        };
+    }
+
+    return {
+        isQuantityValid: true,
+        quantityErrorCode: null,
+        quantityErrorMessage: null,
+    };
+};
+
+const calculateOrderPricing = async ({ userId, product, quantity, session = null, enforceQuantityLimits = true }) => {
     _assertProductAvailable(product);
-    const qty = _normaliseOrderQuantity(quantity, product);
+    const qty = enforceQuantityLimits
+        ? _normaliseOrderQuantity(quantity, product)
+        : _normaliseQuoteQuantity(quantity);
 
     const productFinalUnitPriceUsd = getProductFinalUnitPrice(product);
     const providerCostUnitUsd = getProviderCostUnitPrice(product);
@@ -156,11 +193,22 @@ const calculateOrderPricing = async ({ userId, product, quantity, session = null
 
 const quoteOrder = async ({ userId, productId, quantity }) => {
     const product = await Product.findById(productId);
-    const quote = await calculateOrderPricing({ userId, product, quantity });
+    const quote = await calculateOrderPricing({
+        userId,
+        product,
+        quantity,
+        enforceQuantityLimits: false,
+    });
+    const quantityValidation = _getQuantityValidation(quote.qty, product);
 
     return {
         productId: product._id.toString(),
         quantity: quote.qty,
+        minQty: product.minQty,
+        maxQty: product.maxQty,
+        isQuantityValid: quantityValidation.isQuantityValid,
+        quantityErrorCode: quantityValidation.quantityErrorCode,
+        quantityErrorMessage: quantityValidation.quantityErrorMessage,
         currency: quote.userCurrency,
         baseUnitPriceUsd: quote.pricing.baseUnitPriceUsd,
         productFinalUnitPriceUsd: quote.pricing.productFinalUnitPriceUsd,
@@ -173,11 +221,10 @@ const quoteOrder = async ({ userId, productId, quantity }) => {
         rateSnapshot: quote.rateSnapshot,
         payableAmount: quote.chargedAmount,
         chargedAmount: quote.chargedAmount,
-        displayTotal: `${quote.chargedAmount.toFixed(2)} ${quote.userCurrency}`,
+        displayTotal: `${quote.userCurrency} ${quote.chargedAmount.toFixed(2)}`,
         walletBalance: quote.walletBalance,
         hasEnoughBalance: quote.hasEnoughBalance,
-        minQty: product.minQty,
-        maxQty: product.maxQty,
+        canSubmit: quantityValidation.isQuantityValid && quote.hasEnoughBalance,
         basePriceSnapshot: quote.pricing.basePrice,
         markupPercentage: quote.pricing.markupPercentage,
         finalPriceCharged: quote.pricing.customerUnitPriceUsd,
