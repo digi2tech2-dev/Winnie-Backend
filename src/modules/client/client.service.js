@@ -2,11 +2,11 @@
 
 const mongoose = require('mongoose');
 
-const Group = require('../groups/group.model');
 const { Product } = require('../products/product.model');
 const { Order } = require('../orders/order.model');
 const orderService = require('../orders/order.service');
-const { calculateFinalPrice } = require('../orders/pricing.service');
+const { resolveUserPricingGroup } = require('../groups/group.service');
+const { calculateFinalPrice, getProductFinalUnitPrice } = require('../orders/pricing.service');
 const { validateDynamicFields } = require('../orders/orderFields.validator');
 const { BusinessRuleError } = require('../../shared/errors/AppError');
 
@@ -24,29 +24,6 @@ const getProfile = (user) => ({
     currency: user.currency,
     email: user.email,
 });
-
-const getGroupForUser = async (user) => {
-    const populatedGroup = user.groupId && typeof user.groupId === 'object' && user.groupId.percentage !== undefined
-        ? user.groupId
-        : null;
-
-    const group = populatedGroup || await Group.findById(user.groupId).select('name percentage isActive');
-    if (!group) {
-        throw new BusinessRuleError(
-            'User is not assigned to any pricing group. Contact an administrator.',
-            'NO_GROUP_ASSIGNED'
-        );
-    }
-
-    if (group.isActive === false) {
-        throw new BusinessRuleError(
-            `User's pricing group '${group.name}' is inactive. Contact an administrator.`,
-            'GROUP_INACTIVE'
-        );
-    }
-
-    return group;
-};
 
 const mapParamField = (field, source = 'dynamicFields') => {
     const name = source === 'orderFields' ? field.key : field.name;
@@ -83,8 +60,8 @@ const getProductParams = (product) => {
 };
 
 const mapProductForApi = (product, markupPercentage) => {
-    const basePrice = String(product.basePrice || product.finalPrice || '0');
-    const price = calculateFinalPrice(basePrice, markupPercentage);
+    const productFinalUnitPriceUsd = getProductFinalUnitPrice(product);
+    const price = calculateFinalPrice(productFinalUnitPriceUsd, markupPercentage);
 
     return {
         id: product._id.toString(),
@@ -98,8 +75,8 @@ const mapProductForApi = (product, markupPercentage) => {
 };
 
 const listProducts = async (user) => {
-    const group = await getGroupForUser(user);
-    const markupPercentage = Number(group.percentage || 0);
+    const groupPricing = await resolveUserPricingGroup(user);
+    const markupPercentage = groupPricing.percentage;
 
     const products = await Product.find({
         isActive: true,

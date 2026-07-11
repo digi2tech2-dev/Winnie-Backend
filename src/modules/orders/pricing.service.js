@@ -14,9 +14,8 @@
  * a 2 dp Number because wallet balances are standard fiat.
  */
 
-const { User } = require('../users/user.model');
-const Group = require('../groups/group.model');
-const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
+const { BusinessRuleError } = require('../../shared/errors/AppError');
+const { resolveUserPricingGroup } = require('../groups/group.service');
 const { Decimal, toDecimal, toStr, isPositive, multiply, add } = require('../../shared/utils/decimalPrecision');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,6 +68,16 @@ const calculateFinalPrice = (basePrice, percentage) => {
     return add(basePrice, markup);
 };
 
+const getProductFinalUnitPrice = (product) => {
+    const candidate = product?.finalPrice ?? product?.basePrice ?? product?.providerPrice ?? '0';
+    return isPositive(candidate) || toDecimal(candidate).isZero() ? String(candidate) : '0';
+};
+
+const getProviderCostUnitPrice = (product) => {
+    const candidate = product?.providerPrice ?? product?.basePrice ?? product?.finalPrice ?? '0';
+    return isPositive(candidate) || toDecimal(candidate).isZero() ? String(candidate) : '0';
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DB-BACKED CALCULATION
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,55 +87,46 @@ const calculateFinalPrice = (basePrice, percentage) => {
  * group's markup percentage, then applying calculateFinalPrice.
  *
  * @param {string|ObjectId} userId    - The buying user's ID
- * @param {string|number}   basePrice - Product's base price
+ * @param {string|number}   productFinalUnitPriceUsd - Product-level final unit price
  * @param {Object}          [session] - Optional Mongoose session (for transactions)
+ * @param {Object}          [options]
+ * @param {string|number}   [options.baseUnitPriceUsd] - Provider/base cost snapshot
  * @returns {Promise<{
  *   basePrice:        string,
  *   markupPercentage: number,
  *   finalPrice:       string,
- *   groupId:          ObjectId
+ *   groupId:          ObjectId|null
  * }>}
  */
-const calculateUserPrice = async (userId, basePrice, session = null) => {
-    // Load user with groupId populated so we get percentage in one round-trip
-    const query = User.findById(userId).populate('groupId', 'name percentage isActive');
-    if (session) query.session(session);
-    const user = await query;
+const calculateUserPrice = async (userId, productFinalUnitPriceUsd, session = null, options = {}) => {
+    const groupPricing = await resolveUserPricingGroup(userId, { session });
+    const markupPercentage = groupPricing.percentage;
+    const safeProductFinal = isPositive(productFinalUnitPriceUsd) || toDecimal(productFinalUnitPriceUsd).isZero()
+        ? String(productFinalUnitPriceUsd)
+        : '0';
+    const safeBasePrice = options.baseUnitPriceUsd !== undefined
+        && (isPositive(options.baseUnitPriceUsd) || toDecimal(options.baseUnitPriceUsd).isZero())
+        ? String(options.baseUnitPriceUsd)
+        : safeProductFinal;
 
-    if (!user) throw new NotFoundError('User');
-
-    if (!user.groupId) {
-        throw new BusinessRuleError(
-            'User is not assigned to any pricing group. Contact an administrator.',
-            'NO_GROUP_ASSIGNED'
-        );
-    }
-
-    const group = user.groupId; // already populated
-
-    if (!group.isActive) {
-        throw new BusinessRuleError(
-            `User's pricing group '${group.name}' is inactive. Contact an administrator.`,
-            'GROUP_INACTIVE'
-        );
-    }
-
-    // percentage stays as Number — it's a simple integer (e.g. 20 = 20%)
-    const markupPercentage = Number.isFinite(Number(group.percentage))
-        ? Number(group.percentage)
-        : 0;
-
-    // basePrice is a string — ensure it's valid
-    const safeBasePrice = isPositive(basePrice) ? String(basePrice) : '0';
-
-    const finalPrice = calculateFinalPrice(safeBasePrice, markupPercentage);
+    const finalPrice = calculateFinalPrice(safeProductFinal, markupPercentage);
 
     return {
         basePrice: safeBasePrice,
+        baseUnitPriceUsd: safeBasePrice,
+        productFinalUnitPriceUsd: safeProductFinal,
         markupPercentage,
+        groupPercentage: markupPercentage,
         finalPrice,
-        groupId: group._id,
+        customerUnitPriceUsd: finalPrice,
+        groupId: groupPricing.groupId,
+        groupName: groupPricing.groupName,
     };
 };
 
-module.exports = { calculateFinalPrice, calculateUserPrice };
+module.exports = {
+    calculateFinalPrice,
+    calculateUserPrice,
+    getProductFinalUnitPrice,
+    getProviderCostUnitPrice,
+};

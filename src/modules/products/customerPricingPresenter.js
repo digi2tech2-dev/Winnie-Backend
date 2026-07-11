@@ -20,24 +20,37 @@ const calculateDiscount = (basePrice, finalPrice) => {
     };
 };
 
-const buildCustomerPricingFields = ({ product, unitPriceUsd, currency = 'USD', rate = 1 }) => {
+const buildCustomerPricingFields = ({
+    product,
+    unitPriceUsd,
+    productFinalUnitPriceUsd,
+    groupPercentage = 0,
+    customerUnitPriceUsd,
+    currency = 'USD',
+    rate = 1,
+}) => {
     const minQty = Math.max(1, Number(product.minQty) || 1);
     const safeCurrency = String(currency || 'USD').toUpperCase();
-    const minTotalUsd = multiply(unitPriceUsd, String(minQty));
-    const unitPriceCustomerCurrency = toDecimal(unitPriceUsd).times(rate);
+    const safeProductFinalUnitPriceUsd = String(productFinalUnitPriceUsd ?? unitPriceUsd ?? product.finalPrice ?? product.basePrice ?? '0');
+    const safeCustomerUnitPriceUsd = String(customerUnitPriceUsd ?? unitPriceUsd ?? safeProductFinalUnitPriceUsd);
+    const minTotalUsd = multiply(safeCustomerUnitPriceUsd, String(minQty));
+    const unitPriceCustomerCurrency = toDecimal(safeCustomerUnitPriceUsd).times(rate);
     const minTotalCustomerCurrency = toFiat(toDecimal(minTotalUsd).times(rate));
     const unitRounded = toFiat(unitPriceCustomerCurrency);
     const priceDisplayMode = minQty > 1 || unitRounded === 0 ? 'min_total' : 'unit';
     const displayPriceLabel = priceDisplayMode === 'min_total'
         ? `${minQty.toLocaleString('en-US')} = ${formatDisplayMoney(minTotalCustomerCurrency, safeCurrency)}`
         : formatDisplayMoney(unitRounded, safeCurrency);
-    const discount = calculateDiscount(product.basePrice ?? unitPriceUsd, unitPriceUsd);
+    const discount = calculateDiscount(product.basePrice ?? safeProductFinalUnitPriceUsd, safeProductFinalUnitPriceUsd);
 
     return {
         basePrice: String(product.basePrice ?? '0'),
-        finalPrice: String(unitPriceUsd ?? '0'),
-        finalPriceUsd: String(unitPriceUsd ?? '0'),
-        unitPriceUsd: String(unitPriceUsd ?? '0'),
+        finalPrice: safeCustomerUnitPriceUsd,
+        finalPriceUsd: safeCustomerUnitPriceUsd,
+        unitPriceUsd: safeCustomerUnitPriceUsd,
+        productFinalUnitPriceUsd: safeProductFinalUnitPriceUsd,
+        groupPercentage: Number.isFinite(Number(groupPercentage)) ? Number(groupPercentage) : 0,
+        customerUnitPriceUsd: safeCustomerUnitPriceUsd,
         minTotalUsd,
         minTotalCustomerCurrency,
         customerCurrency: safeCurrency,

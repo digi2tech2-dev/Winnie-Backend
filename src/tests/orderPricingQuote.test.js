@@ -58,6 +58,12 @@ describe('High precision order quote pricing', () => {
         });
 
         expect(quote.currency).toBe('EGP');
+        expectDecimalString(quote.baseUnitPriceUsd, '0.00010780225539945481');
+        expectDecimalString(quote.productFinalUnitPriceUsd, '0.00010780225539945481');
+        expect(quote.groupId).toBe(group._id.toString());
+        expect(quote.groupName).toBe('No Markup');
+        expect(quote.groupPercentage).toBe(0);
+        expectDecimalString(quote.customerUnitPriceUsd, '0.00010780225539945481');
         expectDecimalString(quote.unitPriceUsd, '0.00010780225539945481');
         expectDecimalString(quote.totalUsd, '1.0780225539945481');
         expect(quote.rateSnapshot).toBe(51);
@@ -93,6 +99,8 @@ describe('High precision order quote pricing', () => {
 
         expect(order.chargedAmount).toBe(quote.payableAmount);
         expect(order.walletDeducted).toBe(54.98);
+        expect(order.groupNameSnapshot).toBe('No Markup');
+        expect(order.groupPercentageSnapshot).toBe(0);
         expectDecimalString(order.totalPrice, '54.98');
         expectDecimalString(order.usdAmount, '1.0780225539945481');
 

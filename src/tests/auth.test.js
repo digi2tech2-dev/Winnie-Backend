@@ -14,7 +14,9 @@
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const { User, USER_STATUS } = require('../modules/users/user.model');
+const Group = require('../modules/groups/group.model');
 const { register, login, verifyEmail, resendVerification } = require('../modules/auth/auth.service');
+const { findOrCreateGoogleUser } = require('../config/google.strategy');
 const {
     connectTestDB,
     disconnectTestDB,
@@ -136,6 +138,48 @@ describe('[1] Registration', () => {
             password: 'SecurePass@1',
         });
         expect(result.token).toBeUndefined();
+    });
+
+    it('assigns a new email user to the highest-percentage active group', async () => {
+        await createGroup({ name: 'Merchant', percentage: 1 });
+        const normal = await createGroup({ name: 'Normal', percentage: 3 });
+
+        const { user } = await register({
+            name: 'Highest Group',
+            email: `highest-${Date.now()}@example.com`,
+            password: 'SecurePass@1',
+        });
+
+        const dbUser = await User.findById(user._id);
+        expect(dbUser.groupId.toString()).toBe(normal._id.toString());
+    });
+
+    it('allows registration with null group when no active groups exist', async () => {
+        await Group.deleteMany({});
+
+        const { user } = await register({
+            name: 'No Group',
+            email: `nogroup-${Date.now()}@example.com`,
+            password: 'SecurePass@1',
+        });
+
+        const dbUser = await User.findById(user._id);
+        expect(dbUser.groupId).toBeNull();
+    });
+
+    it('assigns a new Google user to the highest-percentage active group', async () => {
+        await createGroup({ name: 'Merchant', percentage: 1 });
+        const normal = await createGroup({ name: 'Normal', percentage: 3 });
+
+        const user = await findOrCreateGoogleUser({
+            id: `google-${Date.now()}`,
+            displayName: 'Google Highest',
+            emails: [{ value: `google-highest-${Date.now()}@example.com` }],
+        });
+
+        expect(user.groupId.toString()).toBe(normal._id.toString());
+        expect(user.status).toBe(USER_STATUS.ACTIVE);
+        expect(user.verified).toBe(true);
     });
 });
 
@@ -359,5 +403,25 @@ describe('[5] Login success', () => {
         expect(typeof result.token).toBe('string');
         expect(result.token.split('.')).toHaveLength(3);   // JWT has 3 parts
         expect(result.user.password).toBeUndefined();
+    });
+
+    it('does not overwrite an existing user group on login', async () => {
+        await createGroup({ name: 'Normal', percentage: 3 });
+        const merchant = await createGroup({ name: 'Merchant', percentage: 1 });
+        const user = await createCustomer({
+            groupId: merchant._id,
+            status: USER_STATUS.ACTIVE,
+            verified: true,
+        });
+
+        const raw = 'ThePassword@1';
+        const fresh = await User.findById(user._id);
+        fresh.password = raw;
+        await fresh.save();
+
+        await login({ email: user.email, password: raw });
+
+        const dbUser = await User.findById(user._id);
+        expect(dbUser.groupId.toString()).toBe(merchant._id.toString());
     });
 });

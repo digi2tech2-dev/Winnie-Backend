@@ -20,8 +20,42 @@
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const { User, ROLES, USER_STATUS } = require('../modules/users/user.model');
-const { getHighestPercentageGroup } = require('../modules/groups/group.service');
+const { getHighestPercentageGroupOrNull } = require('../modules/groups/group.service');
 const config = require('../config/config');
+
+const findOrCreateGoogleUser = async (profile) => {
+    const googleId = profile.id;
+    const email = (profile.emails?.[0]?.value ?? '').toLowerCase();
+    const name = profile.displayName || email.split('@')[0];
+
+    if (!email) {
+        throw new Error('Google account has no accessible email address.');
+    }
+
+    let user = await User.findOne({ googleId });
+    if (user) return user;
+
+    user = await User.findOne({ email });
+    if (user) {
+        if (user.deletedAt) return user;
+        user.googleId = googleId;
+        user.verified = true;
+        await user.save();
+        return user;
+    }
+
+    const group = await getHighestPercentageGroupOrNull();
+
+    return User.create({
+        name,
+        email,
+        googleId,
+        role: ROLES.CUSTOMER,
+        groupId: group?._id ?? null,
+        status: USER_STATUS.ACTIVE,
+        verified: true,
+    });
+};
 
 // ─── Strategy Registration ────────────────────────────────────────────────────
 // Only register if credentials are configured.
@@ -70,14 +104,14 @@ if (config.google.clientId && config.google.clientSecret) {
                     }
 
                     // ── 3. Create brand-new user ───────────────────────────────────
-                    const group = await getHighestPercentageGroup();
+                    const group = await getHighestPercentageGroupOrNull();
 
                     user = await User.create({
                         name,
                         email,
                         googleId,
                         role: ROLES.CUSTOMER,
-                        groupId: group._id,
+                        groupId: group?._id ?? null,
                         status: USER_STATUS.ACTIVE,
                         verified: true,   // Google guarantees email ownership
                         // No password set — comparePassword never called for OAuth users
@@ -108,3 +142,4 @@ if (config.google.clientId && config.google.clientSecret) {
 }   // end: if (config.google.clientId && config.google.clientSecret)
 
 module.exports = passport;
+module.exports.findOrCreateGoogleUser = findOrCreateGoogleUser;

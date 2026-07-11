@@ -174,7 +174,7 @@ describe('calculateUserPrice — DB-backed', () => {
         ).rejects.toMatchObject({ code: 'NOT_FOUND' });
     });
 
-    it('throws GROUP_INACTIVE when user belongs to an inactive group', async () => {
+    it('falls back to 0 percent when user belongs to an inactive group and no active group exists', async () => {
         const inactiveGroup = await Group.create({
             name: 'Dormant',
             percentage: 10,
@@ -182,9 +182,11 @@ describe('calculateUserPrice — DB-backed', () => {
         });
         const customer = await createCustomer({ groupId: inactiveGroup._id });
 
-        await expect(
-            calculateUserPrice(customer._id, 100)
-        ).rejects.toMatchObject({ code: 'GROUP_INACTIVE' });
+        const result = await calculateUserPrice(customer._id, 100);
+
+        expect(result.groupId).toBeNull();
+        expect(result.markupPercentage).toBe(0);
+        expectDecimalString(result.finalPrice, '100');
     });
 });
 

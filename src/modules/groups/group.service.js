@@ -1,5 +1,6 @@
 'use strict';
 
+const mongoose = require('mongoose');
 const Group = require('./group.model');
 const { User, ROLES } = require('../users/user.model');
 const { AppError, ConflictError, NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
@@ -54,6 +55,16 @@ const _getMemberCounts = async (groupIds) => {
 
     return new Map(rows.map((row) => [String(row._id), row.count]));
 };
+
+const _isUsablePricingGroup = (group) => Boolean(
+    group
+    && group.isActive !== false
+    && !group.deletedAt
+);
+
+const _normalisePercentage = (percentage) => (
+    Number.isFinite(Number(percentage)) ? Number(percentage) : 0
+);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CREATE
@@ -134,8 +145,16 @@ const getGroupById = async (id) => {
  * Throws BusinessRuleError (→ 422) when no active groups exist so that
  * the registration route returns a clear, actionable error.
  */
+const getHighestPercentageGroupOrNull = async (session = null) => {
+    const query = Group.findOne({ isActive: true, deletedAt: null })
+        .sort({ percentage: -1, name: 1 })
+        .limit(1);
+    if (session) query.session(session);
+    return query;
+};
+
 const getHighestPercentageGroup = async () => {
-    const group = await Group.findOne({ isActive: true }).sort({ percentage: -1 }).limit(1);
+    const group = await getHighestPercentageGroupOrNull();
     if (!group) {
         throw new BusinessRuleError(
             'No pricing groups are available. Please contact an administrator.',
@@ -143,6 +162,51 @@ const getHighestPercentageGroup = async () => {
         );
     }
     return group;
+};
+
+const resolveUserPricingGroup = async (userOrId, { session = null } = {}) => {
+    let user = userOrId;
+
+    const isObjectId = userOrId instanceof mongoose.Types.ObjectId || userOrId?._bsontype === 'ObjectId';
+    if (!user || typeof userOrId === 'string' || isObjectId) {
+        const query = User.findById(userOrId)
+            .select('groupId')
+            .populate('groupId', 'name percentage isActive deletedAt');
+        if (session) query.session(session);
+        user = await query;
+        if (!user) throw new NotFoundError('User');
+    }
+
+    let group = null;
+    const populatedGroup = user.groupId
+        && typeof user.groupId === 'object'
+        && user.groupId.percentage !== undefined
+        ? user.groupId
+        : null;
+
+    if (_isUsablePricingGroup(populatedGroup)) {
+        group = populatedGroup;
+    } else if (user.groupId) {
+        const groupId = populatedGroup?._id ?? user.groupId;
+        const query = Group.findOne({
+            _id: groupId,
+            isActive: true,
+            deletedAt: null,
+        }).select('name percentage isActive deletedAt');
+        if (session) query.session(session);
+        group = await query;
+    }
+
+    if (!_isUsablePricingGroup(group)) {
+        group = await getHighestPercentageGroupOrNull(session);
+    }
+
+    return {
+        group,
+        groupId: group?._id ?? null,
+        groupName: group?.name ?? null,
+        percentage: _normalisePercentage(group?.percentage),
+    };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -271,6 +335,8 @@ module.exports = {
     listGroupsWithSummary,
     getGroupById,
     getHighestPercentageGroup,
+    getHighestPercentageGroupOrNull,
+    resolveUserPricingGroup,
     updateGroupPercentage,
     updateGroup,
     deleteGroup,

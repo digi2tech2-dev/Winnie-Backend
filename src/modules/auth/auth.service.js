@@ -22,7 +22,7 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
 const { User, ROLES, USER_STATUS } = require('../users/user.model');
-const { getHighestPercentageGroup } = require('../groups/group.service');
+const { getHighestPercentageGroupOrNull } = require('../groups/group.service');
 const referralService = require('../referrals/referral.service');
 const { sendVerificationEmail, sendTwoFactorOtpEmail } = require('../../services/email.service');
 const {
@@ -216,7 +216,7 @@ const register = async ({ name, email, password, currency, country, phone, usern
     }
 
     // ── 2. Pricing group ──────────────────────────────────────────────────────
-    const group = await getHighestPercentageGroup();
+    const group = await getHighestPercentageGroupOrNull();
 
     // ── 3. Verification token ─────────────────────────────────────────────────
     const { rawToken, hashedToken } = _generateVerificationToken();
@@ -228,7 +228,7 @@ const register = async ({ name, email, password, currency, country, phone, usern
         email,
         password,
         role: ROLES.CUSTOMER,
-        groupId: group._id,
+        groupId: group?._id ?? null,
         status: USER_STATUS.PENDING,
         verified: false,
         emailVerificationToken: hashedToken,

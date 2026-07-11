@@ -102,7 +102,19 @@ const orderSchema = new mongoose.Schema(
         groupIdSnapshot: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'Group',
-            required: [true, 'groupIdSnapshot is required'],
+            default: null,
+        },
+
+        groupNameSnapshot: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        groupPercentageSnapshot: {
+            type: Number,
+            default: 0,
+            min: [0, 'groupPercentageSnapshot cannot be negative'],
         },
 
         /**

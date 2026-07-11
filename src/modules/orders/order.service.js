@@ -11,7 +11,7 @@ const {
     LEDGER_TRANSACTION_TYPES,
     TRANSACTION_SOURCE_TYPES,
 } = require('../wallet/walletTransaction.model');
-const { calculateUserPrice } = require('./pricing.service');
+const { calculateUserPrice, getProductFinalUnitPrice, getProviderCostUnitPrice } = require('./pricing.service');
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { validateOrderFields } = require('./orderFields.validator');
 const {
@@ -109,9 +109,15 @@ const calculateOrderPricing = async ({ userId, product, quantity, session = null
     _assertProductAvailable(product);
     const qty = _normaliseOrderQuantity(quantity, product);
 
-    const pricing = await calculateUserPrice(userId, product.basePrice, session);
-    const usdTotalPrice = multiply(pricing.finalPrice, String(qty));
-    const profitUsd = multiply(subtract(pricing.finalPrice, pricing.basePrice), String(qty));
+    const productFinalUnitPriceUsd = getProductFinalUnitPrice(product);
+    const providerCostUnitUsd = getProviderCostUnitPrice(product);
+    const pricing = await calculateUserPrice(userId, productFinalUnitPriceUsd, session, {
+        baseUnitPriceUsd: product.basePrice ?? productFinalUnitPriceUsd,
+    });
+    pricing.providerCostUnitUsd = providerCostUnitUsd;
+
+    const usdTotalPrice = multiply(pricing.customerUnitPriceUsd, String(qty));
+    const profitUsd = multiply(subtract(pricing.customerUnitPriceUsd, providerCostUnitUsd), String(qty));
 
     const userQuery = User.findById(userId).select('currency walletBalance');
     if (session) userQuery.session(session);
@@ -156,7 +162,13 @@ const quoteOrder = async ({ userId, productId, quantity }) => {
         productId: product._id.toString(),
         quantity: quote.qty,
         currency: quote.userCurrency,
-        unitPriceUsd: quote.pricing.finalPrice,
+        baseUnitPriceUsd: quote.pricing.baseUnitPriceUsd,
+        productFinalUnitPriceUsd: quote.pricing.productFinalUnitPriceUsd,
+        groupId: quote.pricing.groupId ? quote.pricing.groupId.toString() : null,
+        groupName: quote.pricing.groupName,
+        groupPercentage: quote.pricing.groupPercentage,
+        customerUnitPriceUsd: quote.pricing.customerUnitPriceUsd,
+        unitPriceUsd: quote.pricing.customerUnitPriceUsd,
         totalUsd: quote.usdTotalPrice,
         rateSnapshot: quote.rateSnapshot,
         payableAmount: quote.chargedAmount,
@@ -168,7 +180,7 @@ const quoteOrder = async ({ userId, productId, quantity }) => {
         maxQty: product.maxQty,
         basePriceSnapshot: quote.pricing.basePrice,
         markupPercentage: quote.pricing.markupPercentage,
-        finalPriceCharged: quote.pricing.finalPrice,
+        finalPriceCharged: quote.pricing.customerUnitPriceUsd,
     };
 };
 
@@ -473,10 +485,12 @@ const _attemptCreateOrder = async (
             quantity: qty,
             basePriceSnapshot: pricing.basePrice,
             markupPercentageSnapshot: pricing.markupPercentage,
-            finalPriceCharged: pricing.finalPrice,
+            groupNameSnapshot: pricing.groupName,
+            groupPercentageSnapshot: pricing.groupPercentage,
+            finalPriceCharged: pricing.customerUnitPriceUsd,
             groupIdSnapshot: pricing.groupId,
             profitUsd: profitUsd,
-            unitPrice: pricing.finalPrice,
+            unitPrice: pricing.customerUnitPriceUsd,
             totalPrice: String(chargedAmount),   // legacy field â€” now equals chargedAmount
             walletDeducted,
             creditUsedAmount,
@@ -535,7 +549,9 @@ const _attemptCreateOrder = async (
                 creditUsedAmount,
                 basePriceSnapshot: pricing.basePrice,
                 markupPercentageSnapshot: pricing.markupPercentage,
-                finalPriceCharged: pricing.finalPrice,
+                groupNameSnapshot: pricing.groupName,
+                groupPercentageSnapshot: pricing.groupPercentage,
+                finalPriceCharged: pricing.customerUnitPriceUsd,
                 status: initialStatus,
             },
         });

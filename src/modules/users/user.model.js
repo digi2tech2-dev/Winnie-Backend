@@ -250,7 +250,6 @@ const userSchema = new mongoose.Schema(
         groupId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'Group',
-            required: [true, 'A user must belong to a pricing group'],
             default: null,
         },
 

@@ -266,27 +266,22 @@ describe('Auto-assign highest percentage group on registration', () => {
         expect(dbUser.groupId.toString()).toBe(g30._id.toString());
     });
 
-    it('throws NO_GROUPS_AVAILABLE when no active groups exist', async () => {
+    it('registers with null group when no active groups exist', async () => {
         // No groups seeded — clearCollections ran in beforeEach
-        await expect(
-            register({ name: 'Ghost', email: uniqueEmail(), password: 'ValidPass@1' })
-        ).rejects.toMatchObject({
-            code: 'NO_GROUPS_AVAILABLE',
-            statusCode: 422,
-        });
+        const { user } = await register({ name: 'Ghost', email: uniqueEmail(), password: 'ValidPass@1' });
 
-        // No user must have been created
-        const count = await User.countDocuments();
-        expect(count).toBe(0);
+        const dbUser = await User.findById(user._id);
+        expect(dbUser.groupId).toBeNull();
     });
 
-    it('does NOT assign user when all groups are inactive', async () => {
+    it('registers with null group when all groups are inactive', async () => {
         // Create a group and deactivate it
         await Group.create({ name: 'Dormant', percentage: 10, isActive: false });
 
-        await expect(
-            register({ name: 'Ghost', email: uniqueEmail(), password: 'ValidPass@1' })
-        ).rejects.toMatchObject({ code: 'NO_GROUPS_AVAILABLE' });
+        const { user } = await register({ name: 'Ghost', email: uniqueEmail(), password: 'ValidPass@1' });
+
+        const dbUser = await User.findById(user._id);
+        expect(dbUser.groupId).toBeNull();
     });
 });
 

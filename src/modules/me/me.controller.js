@@ -234,16 +234,16 @@ const quoteOrder = catchAsync(async (req, res) => {
  * Public product catalogue for authenticated customers.
  * Prices follow the full pipeline:
  *   1. Base Price (USD from provider)
- *   2. Group Markup: markedUpUSD = basePrice × (1 + group.percentage / 100)
+ *   2. Group Markup: markedUpUSD = productFinalUnitPrice × (1 + group.percentage / 100)
  *   3. Currency Conversion: displayPrice = markedUpUSD × userCurrencyRate
  */
 const getProducts = catchAsync(async (req, res) => {
     const page = parsePage(req.query.page);
     const limit = parseLimit(req.query.limit);
     const { Product } = require('../products/product.model');
-    const Group = require('../groups/group.model');
     const { getConversionRate } = require('../../services/currencyConverter.service');
-    const { calculateFinalPrice } = require('../orders/pricing.service');
+    const { resolveUserPricingGroup } = require('../groups/group.service');
+    const { calculateFinalPrice, getProductFinalUnitPrice } = require('../orders/pricing.service');
 
     const filter = { isActive: true, visibleInStore: { $ne: false }, deletedAt: null };
     if (req.query.search) {
@@ -265,11 +265,8 @@ const getProducts = catchAsync(async (req, res) => {
     ]);
 
     // ── 1. Resolve user's group markup ────────────────────────────────────────
-    let markupPercentage = 0;
-    if (req.user.groupId) {
-        const group = await Group.findById(req.user.groupId).select('percentage isActive').lean();
-        if (group?.isActive) markupPercentage = group.percentage ?? 0;
-    }
+    const groupPricing = await resolveUserPricingGroup(req.user);
+    const markupPercentage = groupPricing.percentage;
 
     // ── 2. Resolve user's currency rate ───────────────────────────────────────
     const userCurrency = req.user.currency || 'USD';
@@ -277,10 +274,13 @@ const getProducts = catchAsync(async (req, res) => {
 
     // ── 3. Apply pipeline: Base → Markup → Currency ───────────────────────────
     const converted = products.map((p) => {
-        const markedUpUSD = calculateFinalPrice(p.basePrice, markupPercentage);
+        const productFinalUnitPriceUsd = getProductFinalUnitPrice(p);
+        const markedUpUSD = calculateFinalPrice(productFinalUnitPriceUsd, markupPercentage);
         const pricingFields = buildCustomerPricingFields({
             product: p,
-            unitPriceUsd: markedUpUSD,
+            productFinalUnitPriceUsd,
+            groupPercentage: markupPercentage,
+            customerUnitPriceUsd: markedUpUSD,
             currency: userCurrency,
             rate,
         });
@@ -290,6 +290,9 @@ const getProducts = catchAsync(async (req, res) => {
             finalPrice: markedUpUSD,
             sellingPrice: markedUpUSD,
             markedUpPriceUSD: markedUpUSD,
+            groupId: groupPricing.groupId,
+            groupName: groupPricing.groupName,
+            groupPercentage: markupPercentage,
             displayCurrency: userCurrency,
             isPurchasable: p.isPaused !== true
                 && p.status !== 'unavailable'
@@ -305,9 +308,9 @@ const getProducts = catchAsync(async (req, res) => {
  */
 const getProduct = catchAsync(async (req, res) => {
     const { Product } = require('../products/product.model');
-    const Group = require('../groups/group.model');
     const { getConversionRate } = require('../../services/currencyConverter.service');
-    const { calculateFinalPrice } = require('../orders/pricing.service');
+    const { resolveUserPricingGroup } = require('../groups/group.service');
+    const { calculateFinalPrice, getProductFinalUnitPrice } = require('../orders/pricing.service');
 
     const product = await Product.findOne({
         _id: req.params.id,
@@ -321,21 +324,21 @@ const getProduct = catchAsync(async (req, res) => {
     if (!product) throw new NotFoundError('Product');
 
     // ── 1. Group markup ───────────────────────────────────────────────────────
-    let markupPercentage = 0;
-    if (req.user.groupId) {
-        const group = await Group.findById(req.user.groupId).select('percentage isActive').lean();
-        if (group?.isActive) markupPercentage = group.percentage ?? 0;
-    }
+    const groupPricing = await resolveUserPricingGroup(req.user);
+    const markupPercentage = groupPricing.percentage;
 
     // ── 2. Currency rate ──────────────────────────────────────────────────────
     const userCurrency = req.user.currency || 'USD';
     const rate = await getConversionRate(userCurrency);
 
     // ── 3. Pipeline: Base → Markup → Currency ─────────────────────────────────
-    const markedUpUSD = calculateFinalPrice(product.basePrice, markupPercentage);
+    const productFinalUnitPriceUsd = getProductFinalUnitPrice(product);
+    const markedUpUSD = calculateFinalPrice(productFinalUnitPriceUsd, markupPercentage);
     const pricingFields = buildCustomerPricingFields({
         product,
-        unitPriceUsd: markedUpUSD,
+        productFinalUnitPriceUsd,
+        groupPercentage: markupPercentage,
+        customerUnitPriceUsd: markedUpUSD,
         currency: userCurrency,
         rate,
     });
@@ -346,6 +349,9 @@ const getProduct = catchAsync(async (req, res) => {
         finalPrice: markedUpUSD,
         sellingPrice: markedUpUSD,
         markedUpPriceUSD: markedUpUSD,
+        groupId: groupPricing.groupId,
+        groupName: groupPricing.groupName,
+        groupPercentage: markupPercentage,
         displayCurrency: userCurrency,
         isPurchasable: product.isPaused !== true
             && product.status !== 'unavailable'

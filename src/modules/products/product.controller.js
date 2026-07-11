@@ -4,6 +4,10 @@ const productService = require('./product.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
+const { getConversionRate } = require('../../services/currencyConverter.service');
+const { resolveUserPricingGroup } = require('../groups/group.service');
+const { calculateFinalPrice, getProductFinalUnitPrice } = require('../orders/pricing.service');
+const { buildCustomerPricingFields } = require('./customerPricingPresenter');
 
 // ─── Sensitive fields that must NEVER reach non-admin clients ─────────────────
 
@@ -46,6 +50,41 @@ const sanitizeProductForCustomer = (product) => {
 const sanitizeProductsForCustomer = (products) =>
     (Array.isArray(products) ? products : []).map(sanitizeProductForCustomer);
 
+const applyCustomerGroupPricing = async (products, user) => {
+    const list = Array.isArray(products) ? products : [products];
+    const groupPricing = await resolveUserPricingGroup(user);
+    const userCurrency = user?.currency || 'USD';
+    const rate = await getConversionRate(userCurrency);
+
+    const priced = list.map((product) => {
+        const obj = typeof product.toObject === 'function' ? product.toObject() : { ...product };
+        const productFinalUnitPriceUsd = getProductFinalUnitPrice(obj);
+        const customerUnitPriceUsd = calculateFinalPrice(productFinalUnitPriceUsd, groupPricing.percentage);
+        const pricingFields = buildCustomerPricingFields({
+            product: obj,
+            productFinalUnitPriceUsd,
+            groupPercentage: groupPricing.percentage,
+            customerUnitPriceUsd,
+            currency: userCurrency,
+            rate,
+        });
+
+        return {
+            ...obj,
+            ...pricingFields,
+            finalPrice: customerUnitPriceUsd,
+            sellingPrice: customerUnitPriceUsd,
+            markedUpPriceUSD: customerUnitPriceUsd,
+            groupId: groupPricing.groupId,
+            groupName: groupPricing.groupName,
+            groupPercentage: groupPricing.percentage,
+            displayCurrency: userCurrency,
+        };
+    });
+
+    return Array.isArray(products) ? priced : priced[0];
+};
+
 // ─── User-facing ──────────────────────────────────────────────────────────────
 
 /**
@@ -60,22 +99,8 @@ const listProducts = catchAsync(async (req, res) => {
 
     const { products, pagination } = await productService.listProducts({ activeOnly, page, limit });
 
-    // Apply group markup for non-admin users
-    if (activeOnly && req.user.groupId) {
-        const Group = require('../groups/group.model');
-        const group = await Group.findById(req.user.groupId);
-        const markup = Number(group?.percentage || 0);
-
-        if (markup > 0) {
-            const { computeMarkup } = require('../../shared/utils/decimalPrecision');
-            for (const product of products) {
-                const base = String(product.finalPrice || product.basePrice || '0');
-                product.finalPrice = computeMarkup(base, 'percentage', markup);
-            }
-        }
-    }
-
-    const responseProducts = isAdmin ? products : sanitizeProductsForCustomer(products);
+    const pricedProducts = isAdmin ? products : await applyCustomerGroupPricing(products, req.user);
+    const responseProducts = isAdmin ? pricedProducts : sanitizeProductsForCustomer(pricedProducts);
     const safeResponseProducts = sanitizePricingForSupervisor(responseProducts, req.user);
     sendPaginated(res, safeResponseProducts, pagination, 'Products retrieved successfully.');
 });
@@ -86,7 +111,8 @@ const listProducts = catchAsync(async (req, res) => {
 const getProduct = catchAsync(async (req, res) => {
     const product = await productService.getProductById(req.params.id);
     const isAdmin = req.user?.role === 'ADMIN';
-    const responseProduct = isAdmin ? product : sanitizeProductForCustomer(product);
+    const pricedProduct = isAdmin ? product : await applyCustomerGroupPricing(product, req.user);
+    const responseProduct = isAdmin ? pricedProduct : sanitizeProductForCustomer(pricedProduct);
     sendSuccess(res, sanitizePricingForSupervisor(responseProduct, req.user));
 });
 
