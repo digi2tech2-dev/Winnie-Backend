@@ -94,6 +94,7 @@ const buildHttpClient = (paymentoConfig) => axios.create({
 
 const getRuntimeEnv = () => process.env.NODE_ENV || config.env || 'development';
 const shouldLogDiagnostics = () => DIAGNOSTIC_LOG_ENVS.has(getRuntimeEnv());
+const shouldLogRawCreateResponse = () => getRuntimeEnv() === 'development';
 
 const sanitizePaymentoValue = (value, knownSecrets = []) => {
     if (Array.isArray(value)) return value.map((item) => sanitizePaymentoValue(item, knownSecrets));
@@ -128,7 +129,10 @@ const extractPaymentoErrorMessage = (data, err) => (
 const logPaymentoFailure = (err, operation, knownSecrets = []) => {
     if (!shouldLogDiagnostics()) return;
 
-    const responseBody = sanitizePaymentoValue(err?.response?.data || null, knownSecrets);
+    const responseBody = sanitizePaymentoValue(
+        err?.response?.data ?? err?.providerResponse ?? null,
+        knownSecrets
+    );
     const safeLog = {
         operation,
         httpStatus: err?.response?.status || null,
@@ -181,14 +185,87 @@ const extractCheckoutUrl = (data = {}) => firstPresent(
 
 const extractPaymentoToken = (data = {}) => firstPresent(
     data.token,
-    data.body?.token,
+    data.checkoutToken,
     data.data?.token,
+    data.data?.body,
+    data.body?.token,
+    data.body,
     data.result?.token
 );
 
-const buildPaymentoCheckoutUrl = (token) => (
-    token ? `https://app.paymento.io/gateway?token=${encodeURIComponent(token)}` : null
-);
+const buildPaymentoCheckoutUrl = (token) => {
+    if (!token) return null;
+
+    const checkoutBaseUrl = process.env.PAYMENTO_CHECKOUT_BASE_URL || 'https://app.paymento.io/gateway';
+    return `${checkoutBaseUrl}?token=${encodeURIComponent(token)}`;
+};
+
+const logPaymentoCreateRawResponse = (response, knownSecrets = []) => {
+    if (!shouldLogRawCreateResponse()) return;
+
+    console.log('[Paymento.createPayment.rawResponse]', {
+        responseType: typeof response?.data,
+        data: sanitizePaymentoValue(response?.data, knownSecrets),
+    });
+};
+
+const parsePaymentoCreateResponse = (raw) => {
+    let token = null;
+    let checkoutUrl = null;
+    let data = raw;
+
+    if (typeof raw === 'string') {
+        token = raw.trim();
+        data = token ? { token } : {};
+    }
+
+    if (raw && typeof raw === 'object') {
+        token = raw.body ??
+            raw.token ??
+            raw.checkoutToken ??
+            raw.data?.token ??
+            raw.data?.body ??
+            null;
+
+        checkoutUrl = raw.checkoutUrl ??
+            raw.checkout_url ??
+            raw.data?.checkoutUrl ??
+            raw.data?.checkout_url ??
+            null;
+    }
+
+    if (token && typeof token === 'string') {
+        token = token.trim();
+    } else if (token !== null && token !== undefined) {
+        token = null;
+    }
+
+    if (checkoutUrl && typeof checkoutUrl === 'string') {
+        checkoutUrl = checkoutUrl.trim();
+    } else if (checkoutUrl !== null && checkoutUrl !== undefined) {
+        checkoutUrl = null;
+    }
+
+    if (raw && typeof raw === 'object') {
+        token = token || extractPaymentoToken(raw);
+        checkoutUrl = checkoutUrl || extractCheckoutUrl(raw);
+    }
+
+    checkoutUrl = checkoutUrl || buildPaymentoCheckoutUrl(token);
+
+    return {
+        data,
+        token: token || null,
+        checkoutUrl: checkoutUrl || null,
+    };
+};
+
+const createInvalidPaymentoResponseError = (raw, knownSecrets = []) => {
+    const err = new Error('Paymento create-payment response did not include a token or checkout URL.');
+    err.code = 'PAYMENTO_CREATE_PAYMENT_INVALID_RESPONSE';
+    err.providerResponse = sanitizePaymentoValue(raw, knownSecrets);
+    return err;
+};
 
 const extractProviderPaymentId = (data = {}) => firstPresent(
     data.paymentId,
@@ -367,12 +444,17 @@ class PaymentoGateway extends PaymentGatewayInterface {
             const response = await client.post(paymentoConfig.createPath, payload, {
                 headers: buildAuthHeaders(paymentoConfig),
             });
-            const data = parsePaymentoResponseData(response?.data, { plainStringKey: 'token' });
-            const paymentoToken = extractPaymentoToken(data);
-            const checkoutUrl = extractCheckoutUrl(data) || buildPaymentoCheckoutUrl(paymentoToken);
+            logPaymentoCreateRawResponse(response, [paymentoConfig.apiKey]);
+
+            const raw = response?.data;
+            const {
+                data,
+                token: paymentoToken,
+                checkoutUrl,
+            } = parsePaymentoCreateResponse(raw);
 
             if (!paymentoToken && !checkoutUrl) {
-                throw new Error('Paymento create-payment response did not include a token or checkout URL.');
+                throw createInvalidPaymentoResponseError(raw, [paymentoConfig.apiKey]);
             }
 
             return {
@@ -406,6 +488,11 @@ class PaymentoGateway extends PaymentGatewayInterface {
         } catch (err) {
             if (err instanceof BusinessRuleError) throw err;
             logPaymentoFailure(err, 'createPaymentIntent', [paymentoConfig.apiKey]);
+            if (err.code === 'PAYMENTO_CREATE_PAYMENT_INVALID_RESPONSE') {
+                const invalidResponseError = new BusinessRuleError(err.message, err.code);
+                invalidResponseError.providerResponse = err.providerResponse;
+                throw invalidResponseError;
+            }
             throw new BusinessRuleError(CUSTOMER_UNAVAILABLE_MESSAGE, 'PAYMENTO_CREATE_PAYMENT_FAILED');
         }
     }

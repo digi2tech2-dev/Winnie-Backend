@@ -135,6 +135,10 @@ const mockCreatePaymentoPayment = (client, overrides = {}) => {
     });
 };
 
+const mockCreatePaymentoRawResponse = (client, data) => {
+    client.post.mockResolvedValueOnce({ data });
+};
+
 const mockPaymentoVerify = (client, status = 'Paid', overrides = {}) => {
     client.post.mockResolvedValueOnce({
         data: {
@@ -321,6 +325,81 @@ describe('Paymento USDT hosted payment gateway', () => {
 
         expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(0);
         expect((await User.findById(customer._id)).walletBalance).toBe(500);
+    });
+
+    it('accepts a Paymento create response with the checkout token in body', async () => {
+        enablePaymentoGateway();
+        const customer = await createPaymentoCustomer();
+        const client = makeHttpClient();
+        mockCreatePaymentoRawResponse(client, {
+            body: '15DD8635AB754E598E7E878C448E3271',
+            success: true,
+            message: '',
+        });
+
+        const result = await createPaymentoIntent(customer);
+
+        expect(result.payment.status).toBe(PAYMENT_STATUSES.REQUIRES_ACTION);
+        expect(result.payment.gatewayPaymentId).toBe('15DD8635AB754E598E7E878C448E3271');
+        expect(result.checkout.url)
+            .toBe('https://app.paymento.io/gateway?token=15DD8635AB754E598E7E878C448E3271');
+    });
+
+    it('accepts a plain string Paymento create token response', async () => {
+        enablePaymentoGateway();
+        const customer = await createPaymentoCustomer();
+        const client = makeHttpClient();
+        mockCreatePaymentoRawResponse(client, '15DD8635AB754E598E7E878C448E3271');
+
+        const result = await createPaymentoIntent(customer);
+
+        expect(result.payment.status).toBe(PAYMENT_STATUSES.REQUIRES_ACTION);
+        expect(result.payment.gatewayPaymentId).toBe('15DD8635AB754E598E7E878C448E3271');
+        expect(result.checkout.url)
+            .toBe('https://app.paymento.io/gateway?token=15DD8635AB754E598E7E878C448E3271');
+    });
+
+    it('accepts a Paymento create response with token at the top level', async () => {
+        enablePaymentoGateway();
+        const customer = await createPaymentoCustomer();
+        const client = makeHttpClient();
+        mockCreatePaymentoRawResponse(client, {
+            success: true,
+            token: 'TOKEN',
+        });
+
+        const result = await createPaymentoIntent(customer);
+
+        expect(result.payment.status).toBe(PAYMENT_STATUSES.REQUIRES_ACTION);
+        expect(result.payment.gatewayPaymentId).toBe('TOKEN');
+        expect(result.checkout.url).toBe('https://app.paymento.io/gateway?token=TOKEN');
+    });
+
+    it('fails clearly when a Paymento create response has no token or checkout URL', async () => {
+        enablePaymentoGateway();
+        const customer = await createPaymentoCustomer();
+        const client = makeHttpClient();
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        const providerResponse = {
+            success: true,
+            message: '',
+        };
+        mockCreatePaymentoRawResponse(client, providerResponse);
+
+        await expect(createPaymentoIntent(customer))
+            .rejects.toMatchObject({
+                code: 'PAYMENTO_CREATE_PAYMENT_INVALID_RESPONSE',
+                message: 'Paymento create-payment response did not include a token or checkout URL.',
+                providerResponse,
+            });
+
+        const [, loggedBody] = warnSpy.mock.calls.find(([label]) => label === '[payments.paymento.failed]');
+        expect(JSON.parse(loggedBody)).toMatchObject({
+            operation: 'createPaymentIntent',
+            paymentoErrorMessage: 'Paymento create-payment response did not include a token or checkout URL.',
+            responseBody: providerResponse,
+        });
+        expect(await Payment.countDocuments({ userId: customer._id })).toBe(0);
     });
 
     it('sends Paymento fiatAmount from fee-inclusive payable amount', async () => {
