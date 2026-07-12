@@ -372,6 +372,25 @@ const userSchema = new mongoose.Schema(
             default: null,
         },
 
+        blockedAt: {
+            type: Date,
+            default: null,
+            index: true,
+        },
+
+        blockedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+        },
+
+        blockReason: {
+            type: String,
+            trim: true,
+            maxlength: [500, 'Block reason cannot exceed 500 characters'],
+            default: null,
+        },
+
         // ── Avatar ───────────────────────────────────────────────────────────
         /**
          * URL to the user's profile picture.
@@ -435,6 +454,16 @@ userSchema.index(
  */
 userSchema.virtual('isActive').get(function () {
     return this.status === USER_STATUS.ACTIVE;
+});
+
+userSchema.virtual('isBlocked').get(function () {
+    return Boolean(this.blockedAt);
+});
+
+userSchema.virtual('displayStatus').get(function () {
+    if (this.deletedAt) return 'DELETED';
+    if (this.blockedAt) return 'BLOCKED';
+    return this.status;
 });
 
 /**

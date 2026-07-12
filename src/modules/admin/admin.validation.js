@@ -124,10 +124,12 @@ const updateUserSchema = Joi.object({
 
 const listUsersQuery = Joi.object({
     ...pagination,
-    status: Joi.string().valid('PENDING', 'ACTIVE', 'REJECTED'),
+    status: Joi.string().valid('PENDING', 'ACTIVE', 'REJECTED', 'active', 'blocked', 'deleted', 'all'),
     verified: Joi.boolean(),
     email: Joi.string().max(128),
     role,
+    includeDeleted: Joi.boolean(),
+    includeBlocked: Joi.boolean(),
     from: Joi.date().iso(),
     to: Joi.date().iso().min(Joi.ref('from')),
     sortBy: Joi.string().valid('createdAt', 'email', 'name', 'status', 'walletBalance').default('createdAt'),
@@ -181,11 +183,24 @@ const updateUserGroupSchema = Joi.object({
     }),
 });
 
-const resetUserPasswordSchema = Joi.object({
-    password: Joi.string().min(8).max(128).required().messages({
-        'any.required': 'New password is required',
+const passwordRule = Joi.string()
+    .min(8)
+    .max(128)
+    .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
+    .messages({
         'string.min': 'Password must be at least 8 characters',
-    }),
+        'string.pattern.base': 'Password must contain at least one uppercase letter, one lowercase letter, and one number',
+    });
+
+const resetUserPasswordSchema = Joi.object({
+    newPassword: passwordRule,
+    password: passwordRule,
+}).or('newPassword', 'password').messages({
+    'object.missing': 'New password is required',
+});
+
+const userReasonSchema = Joi.object({
+    reason: Joi.string().trim().max(500).optional().allow('', null),
 });
 
 const updateUserAvatarSchema = Joi.object({
@@ -451,6 +466,7 @@ module.exports = {
         updateCreditLimit: updateCreditLimitSchema,
         updateUserGroup: updateUserGroupSchema,
         resetUserPassword: resetUserPasswordSchema,
+        userReason: userReasonSchema,
         updateUserAvatar: updateUserAvatarSchema,
         // Providers
         createProvider: createProviderSchema,

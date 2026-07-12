@@ -144,6 +144,8 @@ router.delete('/users/:id', requirePermission('users.delete'), usersCtrl.deleteU
 router.patch('/users/:id/approve', requirePermission('users.status'), usersCtrl.approveUser);
 router.patch('/users/:id/reject', requirePermission('users.status'), usersCtrl.rejectUser);
 router.patch('/users/:id/restore', requirePermission('users.status'), usersCtrl.restoreUser);
+router.patch('/users/:id/block', authorizeRoles('ADMIN'), validateBody(schemas.userReason), usersCtrl.blockUser);
+router.patch('/users/:id/unblock', authorizeRoles('ADMIN'), validateBody(schemas.userReason), usersCtrl.unblockUser);
 // Phase 4 gap-bridged routes
 router.patch('/users/:id/role', authorizeRoles('ADMIN'), validateBody(schemas.updateUserRole), usersCtrl.updateUserRole);
 router.patch('/users/:id/currency', authorizeRoles('ADMIN'), validateBody(schemas.updateUserCurrency), usersCtrl.updateUserCurrency);
@@ -155,6 +157,7 @@ router.patch(
 );
 router.patch('/users/:id/credit-limit', authorizeRoles('ADMIN'), validateBody(schemas.updateCreditLimit), usersCtrl.updateUserCreditLimit);
 router.patch('/users/:id/group', authorizeRoles('ADMIN'), validateBody(schemas.updateUserGroup), usersCtrl.updateUserGroup);
+router.patch('/users/:id/password', authorizeRoles('ADMIN'), validateBody(schemas.resetUserPassword), usersCtrl.resetUserPassword);
 router.post('/users/:id/reset-password', authorizeRoles('ADMIN'), validateBody(schemas.resetUserPassword), usersCtrl.resetUserPassword);
 router.patch('/users/:id/avatar', authorizeRoles('ADMIN'), avatarUpload.single('avatar'), usersCtrl.updateUserAvatar);
 

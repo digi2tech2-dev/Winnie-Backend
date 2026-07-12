@@ -1,5 +1,7 @@
 'use strict';
 
+const { toDecimal, toFiat } = require('./decimalPrecision');
+
 /**
  * currencyMath.js — Pure currency conversion utilities.
  *
@@ -31,8 +33,8 @@ const convertBalance = (balance, oldRate, newRate) => {
     if (oldRate <= 0 || newRate <= 0) {
         throw new Error('Currency rates must be positive numbers.');
     }
-    const usdEquivalent = balance / oldRate;
-    return parseFloat((usdEquivalent * newRate).toFixed(2));
+    const usdEquivalent = toDecimal(balance).dividedBy(toDecimal(oldRate));
+    return toFiat(usdEquivalent.times(toDecimal(newRate)));
 };
 
 /**
@@ -47,7 +49,7 @@ const convertBalance = (balance, oldRate, newRate) => {
  *   usdToLocal(10, 1)    // → 10.00  (10 USD = 10 USD)
  */
 const usdToLocal = (usdAmount, rate) => {
-    return parseFloat((usdAmount * rate).toFixed(2));
+    return toFiat(toDecimal(usdAmount).times(toDecimal(rate)));
 };
 
 /**
@@ -64,7 +66,7 @@ const localToUsd = (localAmount, rate) => {
     if (rate <= 0) {
         throw new Error('Currency rate must be a positive number.');
     }
-    return parseFloat((localAmount / rate).toFixed(6));
+    return Number(toDecimal(localAmount).dividedBy(toDecimal(rate)).toDecimalPlaces(6).toNumber());
 };
 
 module.exports = { convertBalance, usdToLocal, localToUsd };

@@ -2,7 +2,7 @@
 
 const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
-const { AuthenticationError } = require('../errors/AppError');
+const { AuthenticationError, UserBlockedError } = require('../errors/AppError');
 const catchAsync = require('../utils/catchAsync');
 const { User, USER_STATUS } = require('../../modules/users/user.model');
 const { ACTOR_ROLES } = require('../../modules/audit/audit.constants');
@@ -38,6 +38,10 @@ const authenticate = catchAsync(async (req, res, next) => {
     const currentUser = await User.findById(decoded.id);
     if (!currentUser) {
         throw new AuthenticationError('The user belonging to this token no longer exists.');
+    }
+
+    if (currentUser.blockedAt) {
+        throw new UserBlockedError();
     }
 
     // 4. Status gate — only ACTIVE users can use authenticated routes

@@ -13,8 +13,18 @@
 const crypto = require('crypto');
 const { User, USER_STATUS, ROLES } = require('../users/user.model');
 const Group = require('../groups/group.model');
+const { Currency } = require('../currency/currency.model');
+const {
+    WalletTransaction,
+    TRANSACTION_TYPES,
+    LEDGER_TRANSACTION_TYPES,
+    TRANSACTION_DIRECTIONS,
+    TRANSACTION_SOURCE_TYPES,
+} = require('../wallet/walletTransaction.model');
 const { NotFoundError, ConflictError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
+const { convertBalance, localToUsd } = require('../../shared/utils/currencyMath');
+const { getConversionRate } = require('../../services/currencyConverter.service');
 const {
     USER_ACTIONS,
     ADMIN_ACTIONS,
@@ -90,6 +100,8 @@ const listUsers = async ({
     verified,
     email,
     role,
+    includeDeleted = false,
+    includeBlocked = true,
     from,
     to,
     page = 1,
@@ -108,8 +120,27 @@ const listUsers = async ({
     const normalizedSortBy = typeof sortBy === 'string' && sortBy.trim() ? sortBy.trim() : 'walletBalance';
     const normalizedSortOrder = String(sortOrder || '').trim().toLowerCase() === 'asc' ? 'asc' : 'desc';
 
-    const filter = { deletedAt: null, verified: true };
-    if (status) filter.status = status;
+    const normalizedDisplayStatus = String(status || '').trim().toLowerCase();
+    const lifecycleStatus = String(status || '').trim().toUpperCase();
+    const filter = { verified: true };
+
+    if (normalizedDisplayStatus === 'deleted') {
+        filter.deletedAt = { $ne: null };
+    } else if (normalizedDisplayStatus === 'blocked') {
+        filter.blockedAt = { $ne: null };
+        if (!includeDeleted) filter.deletedAt = null;
+    } else if (normalizedDisplayStatus === 'active') {
+        filter.deletedAt = null;
+        filter.blockedAt = null;
+        filter.status = USER_STATUS.ACTIVE;
+    } else if (normalizedDisplayStatus === 'all') {
+        // Intentionally include active, blocked, and soft-deleted users.
+    } else {
+        if (!includeDeleted) filter.deletedAt = null;
+        if (!includeBlocked) filter.blockedAt = null;
+        if (status) filter.status = lifecycleStatus;
+    }
+
     if (verified != null) filter.verified = verified;
     if (role) filter.role = role;
     if (email) filter.email = { $regex: email, $options: 'i' };
@@ -297,10 +328,15 @@ const restoreUser = async (id, adminId) => {
     createAuditLog({
         actorId: adminId,
         actorRole: ACTOR_ROLES.ADMIN,
-        action: ADMIN_ACTIONS.USER_UPDATED,
+        action: ADMIN_ACTIONS.USER_RESTORED,
         entityType: ENTITY_TYPES.USER,
         entityId: user._id,
-        metadata: { action: 'restore', email: user.email, restoredAt: new Date() },
+        metadata: {
+            action: 'restore',
+            email: user.email,
+            restoredAt: new Date(),
+            remainsBlocked: Boolean(user.blockedAt),
+        },
     });
 
     return user;
@@ -399,47 +435,144 @@ const updateSupervisorPermissions = async (id, permissions, adminId) => {
 // ─── Update Currency ──────────────────────────────────────────────────────────
 
 /**
- * Change the user's preferred currency for future flows only. Existing wallet
- * balances, ledger entries, orders, and payment snapshots are not converted.
+ * Admin currency changes convert the existing wallet balance using the current
+ * platform rates and write a neutral ledger event for auditability.
  */
 const updateUserCurrency = async (id, currency, adminId, reason = null) => {
     const user = await _findOrFail(id);
     const code = String(currency || '').trim().toUpperCase();
+    const previousCurrency = String(user.currency || 'USD').toUpperCase();
+    const previousBalance = Number(user.walletBalance || 0);
+    const normalizedReason = reason === undefined || reason === null || String(reason).trim() === ''
+        ? null
+        : String(reason).trim();
 
-    // Same currency → no-op
-    if (user.currency === code) return user;
+    if (user.deletedAt) {
+        throw new BusinessRuleError('Cannot change currency for a deleted user.', 'DELETED_USER_CURRENCY_CHANGE');
+    }
 
-    // Validate new currency exists and is active
-    const { Currency } = require('../currency/currency.model');
-    const activeCurrency = await Currency.exists({ code, isActive: true });
+    const activeCurrency = code === 'USD' ? true : await Currency.exists({ code, isActive: true });
     if (!activeCurrency) {
         throw new BusinessRuleError(`Currency '${code}' is not active or does not exist.`, 'INVALID_CURRENCY');
     }
 
-    // Update only the preference; wallet and role/group fields are untouched.
-    const previousCurrency = user.currency;
-    const updated = await User.findByIdAndUpdate(
-        id,
-        { $set: { currency: code } },
-        { new: true }
-    ).populate('groupId', 'name percentage isActive');
+    if (previousCurrency === code) {
+        return {
+            user,
+            wallet: {
+                previousCurrency,
+                currency: code,
+                previousBalance,
+                balance: previousBalance,
+            },
+            conversion: {
+                fromCurrency: previousCurrency,
+                toCurrency: code,
+                fromAmount: previousBalance,
+                toAmount: previousBalance,
+                noOp: true,
+            },
+        };
+    }
+
+    const previousRate = await getConversionRate(previousCurrency);
+    const newRate = await getConversionRate(code);
+    const newBalance = previousBalance === 0
+        ? 0
+        : convertBalance(previousBalance, previousRate, newRate);
+    const amountInUsd = previousBalance === 0 ? 0 : localToUsd(previousBalance, previousRate);
+    const conversionRate = previousRate ? Number((newRate / previousRate).toFixed(10)) : null;
+    const now = new Date();
+
+    user.currency = code;
+    user.walletBalance = newBalance;
+    await user.save();
+
+    let transaction = null;
+    if (previousBalance !== 0) {
+        transaction = await WalletTransaction.create({
+            userId: user._id,
+            type: TRANSACTION_TYPES.DEBT_ADJUSTMENT,
+            semanticType: LEDGER_TRANSACTION_TYPES.ADMIN_CURRENCY_CONVERSION,
+            sourceType: TRANSACTION_SOURCE_TYPES.ADMIN_CURRENCY_CONVERSION,
+            direction: TRANSACTION_DIRECTIONS.NEUTRAL,
+            amount: Math.abs(previousBalance),
+            balanceBefore: previousBalance,
+            balanceAfter: newBalance,
+            reference: null,
+            currency: code,
+            status: 'COMPLETED',
+            description: `Admin currency conversion ${previousCurrency} to ${code}`,
+            reason: normalizedReason || undefined,
+            note: normalizedReason || undefined,
+            metadata: {
+                operation: 'ADMIN_CURRENCY_CONVERSION',
+                previousCurrency,
+                newCurrency: code,
+                previousBalance,
+                newBalance,
+                previousRate,
+                newRate,
+                amountInUsd,
+                conversionRate,
+                adminId,
+                userId: user._id,
+                reason: normalizedReason || undefined,
+                convertedAt: now,
+            },
+            actorId: adminId,
+            actorRole: ACTOR_ROLES.ADMIN,
+        });
+    }
 
     createAuditLog({
         actorId: adminId,
         actorRole: ACTOR_ROLES.ADMIN,
-        action: ADMIN_ACTIONS.USER_UPDATED,
+        action: ADMIN_ACTIONS.USER_CURRENCY_CONVERTED,
         entityType: ENTITY_TYPES.USER,
         entityId: user._id,
         metadata: {
             field: 'currency',
             previousCurrency,
             newCurrency: code,
-            walletUnchanged: true,
-            reason: reason || undefined,
+            previousBalance,
+            newBalance,
+            previousRate,
+            newRate,
+            amountInUsd,
+            conversionRate,
+            transactionId: transaction?._id,
+            reason: normalizedReason || undefined,
+            convertedAt: now,
         },
     });
 
-    return updated;
+    await user.populate('groupId', 'name percentage isActive');
+
+    return {
+        user,
+        wallet: {
+            previousCurrency,
+            currency: code,
+            previousBalance,
+            balance: newBalance,
+        },
+        conversion: {
+            fromCurrency: previousCurrency,
+            toCurrency: code,
+            fromAmount: previousBalance,
+            toAmount: newBalance,
+            rateSnapshot: {
+                [previousCurrency]: previousRate,
+                [code]: newRate,
+            },
+            previousRate,
+            newRate,
+            amountInUsd,
+            conversionRate,
+            transactionId: transaction?._id || null,
+        },
+    };
 };
 
 // ─── Reset Password ───────────────────────────────────────────────────────────
@@ -452,8 +585,21 @@ const resetUserPassword = async (id, newPassword, adminId) => {
     // Need to select password field explicitly since it has select: false
     const user = await User.findById(id).select('+password');
     if (!user) throw new NotFoundError('User');
+    if (user.deletedAt) {
+        throw new BusinessRuleError('Cannot reset password for a deleted user.', 'DELETED_USER_PASSWORD_RESET');
+    }
+    if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,128}$/.test(String(newPassword || ''))) {
+        throw new BusinessRuleError(
+            'Password must be 8-128 characters and contain at least one uppercase letter, one lowercase letter, and one number.',
+            'INVALID_PASSWORD'
+        );
+    }
 
     user.password = newPassword; // pre-save hook will bcrypt hash this
+    user.twoFactorOtp = null;
+    user.twoFactorOtpExpires = null;
+    user.twoFactorTempToken = null;
+    user.twoFactorTempTokenExpires = null;
     await user.save();
 
     createAuditLog({
@@ -467,6 +613,79 @@ const resetUserPassword = async (id, newPassword, adminId) => {
 
     // Re-fetch without password field for clean response
     return _findOrFail(id);
+};
+
+const blockUser = async (id, adminId, reason = null) => {
+    const user = await _findOrFail(id);
+    const normalizedReason = reason === undefined || reason === null || String(reason).trim() === ''
+        ? null
+        : String(reason).trim();
+
+    if (String(user._id) === String(adminId)) {
+        throw new BusinessRuleError('You cannot block your own account.', 'CANNOT_BLOCK_SELF');
+    }
+    if (user.deletedAt) {
+        throw new BusinessRuleError('Cannot block a deleted user. Restore the user first.', 'DELETED_USER_BLOCK');
+    }
+    if (user.blockedAt) {
+        throw new BusinessRuleError('User is already blocked.', 'ALREADY_BLOCKED');
+    }
+
+    user.blockedAt = new Date();
+    user.blockedBy = adminId;
+    user.blockReason = normalizedReason;
+    await user.save();
+    await user.populate('groupId', 'name percentage isActive');
+
+    createAuditLog({
+        actorId: adminId,
+        actorRole: ACTOR_ROLES.ADMIN,
+        action: ADMIN_ACTIONS.USER_BLOCKED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: {
+            reason: normalizedReason || undefined,
+            blockedAt: user.blockedAt,
+            targetUserId: user._id,
+        },
+    });
+
+    return user;
+};
+
+const unblockUser = async (id, adminId, reason = null) => {
+    const user = await _findOrFail(id);
+    const normalizedReason = reason === undefined || reason === null || String(reason).trim() === ''
+        ? null
+        : String(reason).trim();
+
+    if (!user.blockedAt) {
+        throw new BusinessRuleError('User is not blocked.', 'NOT_BLOCKED');
+    }
+
+    const previousBlockedAt = user.blockedAt;
+    const previousBlockReason = user.blockReason;
+    user.blockedAt = null;
+    user.blockedBy = null;
+    user.blockReason = null;
+    await user.save();
+    await user.populate('groupId', 'name percentage isActive');
+
+    createAuditLog({
+        actorId: adminId,
+        actorRole: ACTOR_ROLES.ADMIN,
+        action: ADMIN_ACTIONS.USER_UNBLOCKED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: {
+            reason: normalizedReason || undefined,
+            previousBlockedAt,
+            previousBlockReason,
+            targetUserId: user._id,
+        },
+    });
+
+    return user;
 };
 
 // ─── Update Avatar ────────────────────────────────────────────────────────────
@@ -618,5 +837,7 @@ module.exports = {
     updateUserCreditLimit,
     updateUserGroup,
     resetUserPassword,
+    blockUser,
+    unblockUser,
     updateUserAvatar,
 };

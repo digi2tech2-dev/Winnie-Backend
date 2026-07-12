@@ -30,6 +30,7 @@ const {
     ConflictError,
     BusinessRuleError,
     NotFoundError,
+    UserBlockedError,
 } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { USER_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
@@ -335,6 +336,19 @@ const login = async ({ email, password }) => {
         throw new AuthenticationError('Invalid email or password.');
     }
 
+    if (user.blockedAt) {
+        createAuditLog({
+            actorId: user._id,
+            actorRole: ACTOR_ROLES[user.role] ?? user.role,
+            action: USER_ACTIONS.LOGIN_BLOCKED,
+            entityType: ENTITY_TYPES.USER,
+            entityId: user._id,
+            metadata: { reason: 'BLOCKED', email: user.email },
+        });
+
+        throw new UserBlockedError();
+    }
+
     // ── Gate 1: Email verification ────────────────────────────────────────────
     if (!user.verified) {
         throw new AuthenticationError(
@@ -519,6 +533,19 @@ const resendVerification = async (email) => {
  * @returns {{ token: string, user: Object, message?: string }}
  */
 const loginWithGoogle = (user) => {
+    if (user.blockedAt) {
+        createAuditLog({
+            actorId: user._id,
+            actorRole: ACTOR_ROLES[user.role] ?? user.role,
+            action: USER_ACTIONS.LOGIN_BLOCKED,
+            entityType: ENTITY_TYPES.USER,
+            entityId: user._id,
+            metadata: { reason: 'BLOCKED', email: user.email, method: 'google-oauth' },
+        });
+
+        throw new UserBlockedError();
+    }
+
     if (user.deletedAt) {
         createAuditLog({
             actorId: user._id,

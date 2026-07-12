@@ -73,6 +73,12 @@ class IdentityVerificationRequiredError extends AppError {
     }
 }
 
+class UserBlockedError extends AppError {
+    constructor(message = 'Your account has been blocked. Please contact support.') {
+        super(message, 403, 'USER_BLOCKED');
+    }
+}
+
 class AntiScamConfirmationRequiredError extends AppError {
     constructor(message = 'Please confirm the anti-scam safety warning before continuing.') {
         super(message, 400, 'ANTI_SCAM_CONFIRMATION_REQUIRED');
@@ -89,5 +95,6 @@ module.exports = {
     InsufficientFundsError,
     BusinessRuleError,
     IdentityVerificationRequiredError,
+    UserBlockedError,
     AntiScamConfirmationRequiredError,
 };

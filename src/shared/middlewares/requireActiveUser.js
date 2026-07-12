@@ -1,6 +1,6 @@
 'use strict';
 
-const { AuthorizationError } = require('../errors/AppError');
+const { AuthorizationError, UserBlockedError } = require('../errors/AppError');
 const { USER_STATUS } = require('../../modules/users/user.model');
 
 /**
@@ -32,6 +32,10 @@ const requireActiveUser = (req, res, next) => {
         throw new AuthorizationError(
             'Your account is not active. Admin approval is required to access this resource.'
         );
+    }
+
+    if (req.user.blockedAt) {
+        throw new UserBlockedError();
     }
 
     next();

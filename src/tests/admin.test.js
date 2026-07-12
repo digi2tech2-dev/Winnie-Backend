@@ -59,7 +59,7 @@ const setup = async () => {
 
 describe('[1] Admin Users Service', () => {
 
-    it('changes only the target user currency and creates no wallet transaction', async () => {
+    it('converts the target user wallet currency and creates a conversion transaction', async () => {
         const { admin, customer } = await setup();
         await Currency.create({
             code: 'AED',
@@ -72,18 +72,26 @@ describe('[1] Admin Users Service', () => {
         customer.walletBalance = 125.5;
         await customer.save();
 
-        const updated = await adminUsersService.updateUserCurrency(
+        const result = await adminUsersService.updateUserCurrency(
             customer._id,
             'AED',
             admin._id,
             'QA currency update'
         );
+        const updated = result.user;
 
         expect(updated.currency).toBe('AED');
-        expect(updated.walletBalance).toBe(125.5);
+        expect(updated.walletBalance).toBe(461.84);
         expect(updated.role).toBe(customer.role);
         expect(updated.groupId._id.toString()).toBe(customer.groupId.toString());
-        expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(0);
+        const txn = await WalletTransaction.findOne({ userId: customer._id });
+        expect(txn).toMatchObject({
+            semanticType: LEDGER_TRANSACTION_TYPES.ADMIN_CURRENCY_CONVERSION,
+            direction: TRANSACTION_DIRECTIONS.NEUTRAL,
+            balanceBefore: 125.5,
+            balanceAfter: 461.84,
+            currency: 'AED',
+        });
     });
 
     it('rejects an inactive currency for an admin user update', async () => {

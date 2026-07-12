@@ -12,7 +12,7 @@ const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/
 
 // GET /admin/users
 const listUsers = catchAsync(async (req, res) => {
-    const { status, verified, email, role, from, to, page, limit, sortBy, sortOrder } = req.query;
+    const { status, verified, email, role, includeDeleted, includeBlocked, from, to, page, limit, sortBy, sortOrder } = req.query;
     const normalizedSortBy = typeof sortBy === 'string' && sortBy.trim() ? sortBy.trim() : 'walletBalance';
     const normalizedSortOrder = String(sortOrder || '').trim().toLowerCase() === 'asc' ? 'asc' : 'desc';
     const result = await svc.listUsers({
@@ -20,6 +20,8 @@ const listUsers = catchAsync(async (req, res) => {
         verified: verified !== undefined ? verified === 'true' : undefined,
         email,
         role,
+        includeDeleted: includeDeleted === true || includeDeleted === 'true',
+        includeBlocked: includeBlocked === undefined ? true : (includeBlocked === true || includeBlocked === 'true'),
         from,
         to,
         page: parseInt(page ?? 1, 10),
@@ -116,13 +118,13 @@ const updateSupervisorPermissions = catchAsync(async (req, res) => {
 
 // PATCH /admin/users/:id/currency
 const updateUserCurrency = catchAsync(async (req, res) => {
-    const user = await svc.updateUserCurrency(
+    const result = await svc.updateUserCurrency(
         req.params.id,
         req.body.currency,
         req.user._id,
         req.body.reason
     );
-    sendSuccess(res, { user }, 'User currency updated');
+    sendSuccess(res, result, 'User currency updated');
 });
 
 // PATCH /admin/users/:id/identity-verification
@@ -146,8 +148,24 @@ const updateIdentityVerificationHold = catchAsync(async (req, res) => {
 
 // POST /admin/users/:id/reset-password
 const resetUserPassword = catchAsync(async (req, res) => {
-    const user = await svc.resetUserPassword(req.params.id, req.body.password, req.user._id);
+    const user = await svc.resetUserPassword(
+        req.params.id,
+        req.body.newPassword || req.body.password,
+        req.user._id
+    );
     sendSuccess(res, { user }, 'User password reset');
+});
+
+// PATCH /admin/users/:id/block
+const blockUser = catchAsync(async (req, res) => {
+    const user = await svc.blockUser(req.params.id, req.user._id, req.body.reason);
+    sendSuccess(res, { user }, 'User blocked');
+});
+
+// PATCH /admin/users/:id/unblock
+const unblockUser = catchAsync(async (req, res) => {
+    const user = await svc.unblockUser(req.params.id, req.user._id, req.body.reason);
+    sendSuccess(res, { user }, 'User unblocked');
 });
 
 // PATCH /admin/users/:id/avatar
@@ -198,5 +216,7 @@ module.exports = {
     updateUserCreditLimit,
     updateUserGroup,
     resetUserPassword,
+    blockUser,
+    unblockUser,
     updateUserAvatar,
 };
