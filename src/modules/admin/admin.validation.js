@@ -127,6 +127,7 @@ const listUsersQuery = Joi.object({
     status: Joi.string().valid('PENDING', 'ACTIVE', 'REJECTED', 'active', 'blocked', 'deleted', 'all'),
     verified: Joi.boolean(),
     email: Joi.string().max(128),
+    search: Joi.string().trim().max(128).allow('', null),
     role,
     includeDeleted: Joi.boolean(),
     includeBlocked: Joi.boolean(),
@@ -201,6 +202,22 @@ const resetUserPasswordSchema = Joi.object({
 
 const userReasonSchema = Joi.object({
     reason: Joi.string().trim().max(500).optional().allow('', null),
+});
+
+const createSupervisorSchema = Joi.object({
+    userId: objectId().required().messages({
+        'any.required': 'userId is required',
+    }),
+    permissions: permissions.default([]),
+});
+
+const listSupervisorLogsQuery = Joi.object({
+    ...pagination,
+});
+
+const listEligibleSupervisorUsersQuery = Joi.object({
+    ...pagination,
+    search: Joi.string().trim().max(128).allow('', null),
 });
 
 const updateUserAvatarSchema = Joi.object({
@@ -459,6 +476,9 @@ module.exports = {
         // Users
         updateUser: updateUserSchema,
         listUsersQuery,
+        createSupervisor: createSupervisorSchema,
+        listSupervisorLogsQuery,
+        listEligibleSupervisorUsersQuery,
         updateUserRole: updateUserRoleSchema,
         updateSupervisorPermissions: updateSupervisorPermissionsSchema,
         updateUserCurrency: updateUserCurrencySchema,

@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const { User, USER_STATUS, ROLES } = require('../users/user.model');
 const Group = require('../groups/group.model');
 const { Currency } = require('../currency/currency.model');
+const { AuditLog } = require('../audit/audit.model');
 const {
     WalletTransaction,
     TRANSACTION_TYPES,
@@ -31,6 +32,74 @@ const {
     ENTITY_TYPES,
     ACTOR_ROLES,
 } = require('../audit/audit.constants');
+
+const SUPERVISOR_PERMISSION_GROUPS = Object.freeze([
+    {
+        group: 'dashboard',
+        titleAr: 'لوحة التحكم',
+        titleEn: 'Dashboard',
+        items: [
+            { key: 'dashboard.view', labelAr: 'عرض لوحة التحكم', labelEn: 'View dashboard' },
+        ],
+    },
+    {
+        group: 'users',
+        titleAr: 'المستخدمون',
+        titleEn: 'Users',
+        items: [
+            { key: 'users.view', labelAr: 'عرض المستخدمين', labelEn: 'View users' },
+            { key: 'users.status', labelAr: 'تغيير حالة المستخدمين', labelEn: 'Change user status' },
+            { key: 'users.delete', labelAr: 'حذف المستخدمين', labelEn: 'Delete users' },
+        ],
+    },
+    {
+        group: 'orders',
+        titleAr: 'الطلبات',
+        titleEn: 'Orders',
+        items: [
+            { key: 'orders.view', labelAr: 'عرض الطلبات', labelEn: 'View orders' },
+            { key: 'orders.update', labelAr: 'تحديث الطلبات', labelEn: 'Update orders' },
+            { key: 'orders.refund', labelAr: 'استرداد الطلبات', labelEn: 'Refund orders' },
+        ],
+    },
+    {
+        group: 'catalog',
+        titleAr: 'المنتجات والمجموعات',
+        titleEn: 'Products and groups',
+        items: [
+            { key: 'products.view', labelAr: 'عرض المنتجات', labelEn: 'View products' },
+            { key: 'products.manage', labelAr: 'إدارة المنتجات', labelEn: 'Manage products' },
+            { key: 'products.provider.sync', labelAr: 'ربط ومزامنة الموردين', labelEn: 'Provider product sync' },
+            { key: 'groups.manage', labelAr: 'إدارة المجموعات', labelEn: 'Manage groups' },
+        ],
+    },
+    {
+        group: 'finance',
+        titleAr: 'المالية',
+        titleEn: 'Finance',
+        items: [
+            { key: 'wallet.view', labelAr: 'عرض المحافظ', labelEn: 'View wallets' },
+            { key: 'wallet.adjust', labelAr: 'تعديل الأرصدة', labelEn: 'Adjust wallet balances' },
+            { key: 'payments.view', labelAr: 'عرض المدفوعات', labelEn: 'View payments' },
+            { key: 'topups.review', labelAr: 'مراجعة طلبات الرصيد', labelEn: 'Review top-ups' },
+        ],
+    },
+    {
+        group: 'operations',
+        titleAr: 'أخرى',
+        titleEn: 'Operations',
+        items: [
+            { key: 'suppliers.manage', labelAr: 'إدارة الموردين', labelEn: 'Manage suppliers' },
+            { key: 'groupRequests.view', labelAr: 'عرض طلبات الوكلاء', labelEn: 'View group requests' },
+            { key: 'groupRequests.manage', labelAr: 'إدارة طلبات الوكلاء', labelEn: 'Manage group requests' },
+            { key: 'referrals.view', labelAr: 'عرض الإحالات', labelEn: 'View referrals' },
+        ],
+    },
+]);
+
+const ALLOWED_SUPERVISOR_PERMISSIONS = Object.freeze(
+    SUPERVISOR_PERMISSION_GROUPS.flatMap((group) => group.items.map((item) => item.key))
+);
 
 // ─── Private helper ────────────────────────────────────────────────────────────
 
@@ -51,6 +120,91 @@ const _normalizePermissions = (permissions) => {
             .map((permission) => String(permission || '').trim())
             .filter(Boolean)
     )];
+};
+
+const _validateSupervisorPermissions = (permissions) => {
+    const normalized = _normalizePermissions(permissions) || [];
+    const invalid = normalized.filter((permission) => !ALLOWED_SUPERVISOR_PERMISSIONS.includes(permission));
+
+    if (invalid.length) {
+        throw new BusinessRuleError(
+            `Invalid supervisor permissions: ${invalid.join(', ')}`,
+            'INVALID_SUPERVISOR_PERMISSION'
+        );
+    }
+
+    return normalized;
+};
+
+const _toSupervisorDto = (user, logsCount = 0) => {
+    const raw = typeof user.toSafeObject === 'function'
+        ? user.toSafeObject()
+        : (typeof user.toObject === 'function' ? user.toObject({ virtuals: true }) : { ...user });
+    const permissions = Array.isArray(raw.permissions) ? raw.permissions : [];
+    const id = String(raw._id || raw.id);
+    const deletedAt = raw.deletedAt || null;
+    const blockedAt = raw.blockedAt || null;
+    const isActive = raw.status === USER_STATUS.ACTIVE && !deletedAt && !blockedAt;
+
+    return {
+        ...raw,
+        id,
+        _id: raw._id || id,
+        name: raw.name || raw.username || raw.email,
+        email: raw.email || '',
+        status: deletedAt ? 'deleted' : blockedAt ? 'blocked' : (isActive ? 'active' : String(raw.status || '').toLowerCase()),
+        isActive,
+        isBlocked: Boolean(blockedAt),
+        deletedAt,
+        permissions,
+        permissionsCount: permissions.length,
+        lastSeenAt: raw.lastSeenAt || raw.lastLoginAt || raw.updatedAt || raw.createdAt || null,
+        logsCount,
+        avatarInitial: String(raw.name || raw.email || 'S').trim().slice(0, 1).toUpperCase(),
+        createdAt: raw.createdAt || null,
+        updatedAt: raw.updatedAt || null,
+    };
+};
+
+const _toEligibleSupervisorUserDto = (user) => {
+    const raw = typeof user.toSafeObject === 'function'
+        ? user.toSafeObject()
+        : (typeof user.toObject === 'function' ? user.toObject({ virtuals: true }) : { ...user });
+    const id = String(raw._id || raw.id);
+
+    return {
+        id,
+        _id: raw._id || id,
+        name: raw.name || raw.username || raw.email,
+        email: raw.email || '',
+        role: raw.role,
+        status: raw.status,
+        isBlocked: Boolean(raw.blockedAt),
+        deletedAt: raw.deletedAt || null,
+        avatarInitial: String(raw.name || raw.email || 'U').trim().slice(0, 1).toUpperCase(),
+        currency: raw.currency || 'USD',
+        walletBalance: raw.walletBalance ?? 0,
+    };
+};
+
+const _toAuditLogDto = (log) => {
+    const raw = typeof log.toObject === 'function' ? log.toObject() : { ...log };
+    const id = String(raw._id || raw.id);
+
+    return {
+        id,
+        _id: raw._id || id,
+        action: raw.action,
+        description: raw.metadata?.description || raw.metadata?.note || raw.action,
+        createdAt: raw.createdAt,
+        metadata: raw.metadata || {},
+        actorId: raw.actorId,
+        actorRole: raw.actorRole,
+        entityType: raw.entityType,
+        entityId: raw.entityId,
+        ipAddress: raw.ipAddress || null,
+        userAgent: raw.userAgent || null,
+    };
 };
 
 const _sanitizeUserSnapshot = (snapshot) => {
@@ -143,7 +297,12 @@ const listUsers = async ({
 
     if (verified != null) filter.verified = verified;
     if (role) filter.role = role;
-    if (email) filter.email = { $regex: email, $options: 'i' };
+    if (email) {
+        filter.$or = [
+            { email: { $regex: email, $options: 'i' } },
+            { name: { $regex: email, $options: 'i' } },
+        ];
+    }
     if (from || to) {
         filter.createdAt = {};
         if (from) filter.createdAt.$gte = new Date(from);
@@ -175,10 +334,103 @@ const listUsers = async ({
     };
 };
 
-const listSupervisors = async (opts = {}) => listUsers({
-    ...opts,
-    role: ROLES.SUPERVISOR,
-});
+const listSupervisors = async ({
+    status,
+    verified,
+    email,
+    search,
+    includeDeleted = false,
+    includeBlocked = true,
+    from,
+    to,
+    page = 1,
+    limit = 20,
+    sortBy = 'createdAt',
+    sortOrder = 'desc',
+} = {}) => {
+    const result = await listUsers({
+        status,
+        verified,
+        email: email || search,
+        role: ROLES.SUPERVISOR,
+        includeDeleted: includeDeleted || String(status || '').toLowerCase() === 'all',
+        includeBlocked,
+        from,
+        to,
+        page,
+        limit,
+        sortBy,
+        sortOrder,
+    });
+
+    const supervisorIds = result.users.map((user) => user._id);
+    const logCounts = supervisorIds.length
+        ? await AuditLog.aggregate([
+            { $match: { actorId: { $in: supervisorIds }, actorRole: ACTOR_ROLES.SUPERVISOR } },
+            { $group: { _id: '$actorId', count: { $sum: 1 } } },
+        ])
+        : [];
+    const countByActor = new Map(logCounts.map((item) => [String(item._id), item.count]));
+
+    const [total, active, blocked, deleted] = await Promise.all([
+        User.countDocuments({ role: ROLES.SUPERVISOR }),
+        User.countDocuments({ role: ROLES.SUPERVISOR, status: USER_STATUS.ACTIVE, blockedAt: null, deletedAt: null }),
+        User.countDocuments({ role: ROLES.SUPERVISOR, blockedAt: { $ne: null }, deletedAt: null }),
+        User.countDocuments({ role: ROLES.SUPERVISOR, deletedAt: { $ne: null } }),
+    ]);
+
+    return {
+        items: result.users.map((user) => _toSupervisorDto(user, countByActor.get(String(user._id)) || 0)),
+        pagination: result.pagination,
+        summary: { total, active, blocked, deleted },
+    };
+};
+
+const listEligibleSupervisorUsers = async ({
+    search,
+    page = 1,
+    limit = 10,
+    currentAdminId,
+} = {}) => {
+    const paging = _paginate({ page, limit });
+    const filter = {
+        role: ROLES.CUSTOMER,
+        status: USER_STATUS.ACTIVE,
+        deletedAt: null,
+        blockedAt: null,
+    };
+
+    if (currentAdminId) {
+        filter._id = { $ne: currentAdminId };
+    }
+
+    const normalizedSearch = String(search || '').trim();
+    if (normalizedSearch) {
+        filter.$or = [
+            { name: { $regex: normalizedSearch, $options: 'i' } },
+            { email: { $regex: normalizedSearch, $options: 'i' } },
+        ];
+    }
+
+    const [users, total] = await Promise.all([
+        User.find(filter)
+            .select('-password -emailVerificationToken -emailVerificationExpires')
+            .sort({ createdAt: -1 })
+            .skip(paging.skip)
+            .limit(paging.limit),
+        User.countDocuments(filter),
+    ]);
+
+    return {
+        items: users.map(_toEligibleSupervisorUserDto),
+        pagination: {
+            page: paging.page,
+            limit: paging.limit,
+            total,
+            pages: Math.ceil(total / paging.limit),
+        },
+    };
+};
 
 // ─── Get One ───────────────────────────────────────────────────────────────────
 
@@ -188,6 +440,65 @@ const getUserById = async (id) => {
         .populate('groupId', 'name percentage isActive');
     if (!user) throw new NotFoundError('User');
     return user;
+};
+
+const createSupervisor = async ({ userId, permissions = [] } = {}, adminId) => {
+    const normalizedPermissions = _validateSupervisorPermissions(permissions);
+    const user = await _findOrFail(userId);
+
+    if (String(user._id) === String(adminId)) {
+        throw new BusinessRuleError('You cannot assign yourself as a supervisor.', 'CANNOT_ASSIGN_SELF');
+    }
+    if (user.role === ROLES.SUPERVISOR) {
+        throw new BusinessRuleError('User is already a supervisor.', 'ALREADY_SUPERVISOR');
+    }
+    if (user.role === ROLES.ADMIN) {
+        throw new BusinessRuleError('Admin accounts cannot be assigned as supervisors.', 'INVALID_SUPERVISOR_TARGET');
+    }
+    if (user.deletedAt) {
+        throw new BusinessRuleError('Deleted users cannot be assigned as supervisors.', 'DELETED_USER_SUPERVISOR_ASSIGN');
+    }
+    if (user.blockedAt) {
+        throw new BusinessRuleError('Blocked users cannot be assigned as supervisors.', 'BLOCKED_USER_SUPERVISOR_ASSIGN');
+    }
+    if (user.status !== USER_STATUS.ACTIVE) {
+        throw new BusinessRuleError('Only active users can be assigned as supervisors.', 'INACTIVE_USER_SUPERVISOR_ASSIGN');
+    }
+
+    const previousRole = user.role;
+    const previousPermissions = [...(user.permissions || [])];
+    user.role = ROLES.SUPERVISOR;
+    user.permissions = normalizedPermissions;
+    await user.save();
+
+    await createAuditLog({
+        actorId: adminId,
+        actorRole: ACTOR_ROLES.ADMIN,
+        action: ADMIN_ACTIONS.SUPERVISOR_ASSIGNED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: {
+            email: user.email,
+            previousRole,
+            newRole: user.role,
+            previousPermissions,
+            newPermissions: user.permissions,
+        },
+    });
+
+    return _toSupervisorDto(user, 0);
+};
+
+const listSupervisorPermissions = async () => {
+    const groups = SUPERVISOR_PERMISSION_GROUPS.map((group) => ({
+        ...group,
+        items: group.items.map((item) => ({ ...item, group: group.group })),
+    }));
+
+    return {
+        items: groups.flatMap((group) => group.items),
+        groups,
+    };
 };
 
 // ─── Update ────────────────────────────────────────────────────────────────────
@@ -413,13 +724,13 @@ const updateSupervisorPermissions = async (id, permissions, adminId) => {
     }
 
     const previousPermissions = [...(user.permissions || [])];
-    user.permissions = _normalizePermissions(permissions) || [];
+    user.permissions = _validateSupervisorPermissions(permissions);
     await user.save();
 
-    createAuditLog({
+    await createAuditLog({
         actorId: adminId,
         actorRole: ACTOR_ROLES.ADMIN,
-        action: ADMIN_ACTIONS.USER_UPDATED,
+        action: ADMIN_ACTIONS.SUPERVISOR_PERMISSIONS_UPDATED,
         entityType: ENTITY_TYPES.USER,
         entityId: user._id,
         metadata: {
@@ -650,7 +961,132 @@ const blockUser = async (id, adminId, reason = null) => {
         },
     });
 
-    return user;
+    const logsCount = await AuditLog.countDocuments({ actorId: user._id, actorRole: ACTOR_ROLES.SUPERVISOR });
+    return _toSupervisorDto(user, logsCount);
+};
+
+const _paginate = ({ page = 1, limit = 20 } = {}) => {
+    const normalizedPage = Number.isFinite(Number(page)) && Number(page) > 0
+        ? Math.floor(Number(page))
+        : 1;
+    const requestedLimit = Number.isFinite(Number(limit)) && Number(limit) > 0
+        ? Math.floor(Number(limit))
+        : 20;
+    const normalizedLimit = Math.min(requestedLimit, 100);
+
+    return {
+        limit: normalizedLimit,
+        page: normalizedPage,
+        skip: (normalizedPage - 1) * normalizedLimit,
+    };
+};
+
+const getSupervisorLogs = async (id, { page = 1, limit = 20 } = {}) => {
+    const user = await _findOrFail(id);
+    if (user.role !== ROLES.SUPERVISOR) {
+        throw new BusinessRuleError('Only supervisors have supervisor operation logs.', 'INVALID_SUPERVISOR_TARGET');
+    }
+
+    const paging = _paginate({ page, limit });
+    const filter = { actorId: user._id, actorRole: ACTOR_ROLES.SUPERVISOR };
+
+    const [logs, total] = await Promise.all([
+        AuditLog.find(filter).sort({ createdAt: -1 }).skip(paging.skip).limit(paging.limit),
+        AuditLog.countDocuments(filter),
+    ]);
+
+    return {
+        items: logs.map(_toAuditLogDto),
+        pagination: {
+            page: paging.page,
+            limit: paging.limit,
+            total,
+            pages: Math.ceil(total / paging.limit),
+        },
+    };
+};
+
+const getAllSupervisorLogs = async ({ page = 1, limit = 20 } = {}) => {
+    const paging = _paginate({ page, limit });
+    const filter = { actorRole: ACTOR_ROLES.SUPERVISOR };
+
+    const [logs, total] = await Promise.all([
+        AuditLog.find(filter).sort({ createdAt: -1 }).skip(paging.skip).limit(paging.limit),
+        AuditLog.countDocuments(filter),
+    ]);
+
+    return {
+        items: logs.map(_toAuditLogDto),
+        pagination: {
+            page: paging.page,
+            limit: paging.limit,
+            total,
+            pages: Math.ceil(total / paging.limit),
+        },
+    };
+};
+
+const restoreSupervisor = async (id, adminId) => {
+    const user = await _findOrFail(id);
+
+    if (user.role !== ROLES.SUPERVISOR) {
+        throw new BusinessRuleError('Only supervisors can be restored from this endpoint.', 'INVALID_SUPERVISOR_TARGET');
+    }
+    if (!user.deletedAt) {
+        throw new BusinessRuleError('Supervisor is not deleted.', 'NOT_DELETED');
+    }
+
+    user.deletedAt = null;
+    user.status = USER_STATUS.ACTIVE;
+    await user.save();
+
+    await createAuditLog({
+        actorId: adminId,
+        actorRole: ACTOR_ROLES.ADMIN,
+        action: ADMIN_ACTIONS.SUPERVISOR_RESTORED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: {
+            email: user.email,
+            restoredAt: new Date(),
+        },
+    });
+
+    return _toSupervisorDto(user, 0);
+};
+
+const deleteSupervisor = async (id, adminId) => {
+    const user = await _findOrFail(id);
+
+    if (String(user._id) === String(adminId)) {
+        throw new BusinessRuleError('You cannot remove supervisor access from your own account.', 'CANNOT_REMOVE_SELF_SUPERVISOR');
+    }
+    if (user.role !== ROLES.SUPERVISOR) {
+        throw new BusinessRuleError('Only supervisors can be removed from this endpoint.', 'INVALID_SUPERVISOR_TARGET');
+    }
+
+    const previousRole = user.role;
+    const previousPermissions = [...(user.permissions || [])];
+    user.role = ROLES.CUSTOMER;
+    user.permissions = [];
+    await user.save();
+
+    await createAuditLog({
+        actorId: adminId,
+        actorRole: ACTOR_ROLES.ADMIN,
+        action: ADMIN_ACTIONS.SUPERVISOR_REMOVED,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: {
+            email: user.email,
+            previousRole,
+            newRole: user.role,
+            previousPermissions,
+            newPermissions: user.permissions,
+        },
+    });
+
+    return _toSupervisorDto(user, 0);
 };
 
 const unblockUser = async (id, adminId, reason = null) => {
@@ -823,15 +1259,22 @@ const updateIdentityVerificationHold = async (id, { required, reason } = {}, adm
 module.exports = {
     listUsers,
     listSupervisors,
+    listEligibleSupervisorUsers,
+    listSupervisorPermissions,
     listDeletedUsers,
     getUserById,
+    createSupervisor,
     updateUser,
     deleteUser,
+    deleteSupervisor,
     restoreUser,
+    restoreSupervisor,
     approveUser,
     rejectUser,
     updateUserRole,
     updateSupervisorPermissions,
+    getSupervisorLogs,
+    getAllSupervisorLogs,
     updateUserCurrency,
     updateIdentityVerificationHold,
     updateUserCreditLimit,

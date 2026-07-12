@@ -123,12 +123,19 @@ router.get('/stats', requirePermission('dashboard.view'), statsCtrl.getDashboard
 
 // SUPERVISORS
 router.get('/supervisors', authorizeRoles('ADMIN'), validateQuery(schemas.listUsersQuery), usersCtrl.listSupervisors);
+router.post('/supervisors', authorizeRoles('ADMIN'), validateBody(schemas.createSupervisor), usersCtrl.createSupervisor);
+router.get('/supervisors/permissions', authorizeRoles('ADMIN'), usersCtrl.listSupervisorPermissions);
+router.get('/supervisors/eligible-users', authorizeRoles('ADMIN'), validateQuery(schemas.listEligibleSupervisorUsersQuery), usersCtrl.listEligibleSupervisorUsers);
+router.get('/supervisors/logs', authorizeRoles('ADMIN'), validateQuery(schemas.listSupervisorLogsQuery), usersCtrl.getAllSupervisorLogs);
+router.get('/supervisors/:id/logs', authorizeRoles('ADMIN'), validateQuery(schemas.listSupervisorLogsQuery), usersCtrl.getSupervisorLogs);
 router.patch(
     '/supervisors/:id/permissions',
     authorizeRoles('ADMIN'),
     validateBody(schemas.updateSupervisorPermissions),
     usersCtrl.updateSupervisorPermissions
 );
+router.patch('/supervisors/:id/restore', authorizeRoles('ADMIN'), usersCtrl.restoreSupervisor);
+router.delete('/supervisors/:id', authorizeRoles('ADMIN'), usersCtrl.deleteSupervisor);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // USERS

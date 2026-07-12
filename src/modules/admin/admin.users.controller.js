@@ -40,11 +40,12 @@ const getUserById = catchAsync(async (req, res) => {
 
 // GET /admin/supervisors
 const listSupervisors = catchAsync(async (req, res) => {
-    const { status, verified, email, from, to, page, limit, sortBy, sortOrder } = req.query;
+    const { status, verified, email, search, from, to, page, limit, sortBy, sortOrder } = req.query;
     const result = await svc.listSupervisors({
         status,
         verified: verified !== undefined ? verified === 'true' : undefined,
         email,
+        search,
         from,
         to,
         page: parseInt(page ?? 1, 10),
@@ -52,7 +53,42 @@ const listSupervisors = catchAsync(async (req, res) => {
         sortBy,
         sortOrder,
     });
-    sendPaginated(res, result.users, result.pagination, 'Supervisors retrieved');
+    sendSuccess(res, result, 'Supervisors retrieved');
+});
+
+// GET /admin/supervisors/permissions
+const listSupervisorPermissions = catchAsync(async (_req, res) => {
+    const result = await svc.listSupervisorPermissions();
+    sendSuccess(res, result, 'Supervisor permissions retrieved');
+});
+
+// GET /admin/supervisors/eligible-users
+const listEligibleSupervisorUsers = catchAsync(async (req, res) => {
+    const result = await svc.listEligibleSupervisorUsers({
+        search: req.query.search,
+        page: parseInt(req.query.page ?? 1, 10),
+        limit: parseInt(req.query.limit ?? 10, 10),
+        currentAdminId: req.user._id,
+    });
+    sendSuccess(res, result, 'Eligible supervisor users retrieved');
+});
+
+// POST /admin/supervisors
+const createSupervisor = catchAsync(async (req, res) => {
+    const supervisor = await svc.createSupervisor(req.body, req.user._id);
+    sendCreated(res, { supervisor }, 'Supervisor assigned');
+});
+
+// DELETE /admin/supervisors/:id
+const deleteSupervisor = catchAsync(async (req, res) => {
+    const supervisor = await svc.deleteSupervisor(req.params.id, req.user._id);
+    sendSuccess(res, { supervisor }, 'Supervisor access removed');
+});
+
+// PATCH /admin/supervisors/:id/restore
+const restoreSupervisor = catchAsync(async (req, res) => {
+    const supervisor = await svc.restoreSupervisor(req.params.id, req.user._id);
+    sendSuccess(res, { supervisor }, 'Supervisor restored');
 });
 
 // PATCH /admin/users/:id
@@ -108,12 +144,30 @@ const updateUserRole = catchAsync(async (req, res) => {
 
 // PATCH /admin/supervisors/:id/permissions
 const updateSupervisorPermissions = catchAsync(async (req, res) => {
-    const user = await svc.updateSupervisorPermissions(
+    const supervisor = await svc.updateSupervisorPermissions(
         req.params.id,
         req.body.permissions,
         req.user._id
     );
-    sendSuccess(res, { user }, 'Supervisor permissions updated');
+    sendSuccess(res, { supervisor }, 'Supervisor permissions updated');
+});
+
+// GET /admin/supervisors/:id/logs
+const getSupervisorLogs = catchAsync(async (req, res) => {
+    const result = await svc.getSupervisorLogs(req.params.id, {
+        page: parseInt(req.query.page ?? 1, 10),
+        limit: parseInt(req.query.limit ?? 20, 10),
+    });
+    sendSuccess(res, result, 'Supervisor logs retrieved');
+});
+
+// GET /admin/supervisors/logs
+const getAllSupervisorLogs = catchAsync(async (req, res) => {
+    const result = await svc.getAllSupervisorLogs({
+        page: parseInt(req.query.page ?? 1, 10),
+        limit: parseInt(req.query.limit ?? 20, 10),
+    });
+    sendSuccess(res, result, 'Supervisor logs retrieved');
 });
 
 // PATCH /admin/users/:id/currency
@@ -202,15 +256,22 @@ const updateUserGroup = catchAsync(async (req, res) => {
 module.exports = {
     listUsers,
     listSupervisors,
+    listSupervisorPermissions,
+    listEligibleSupervisorUsers,
     listDeletedUsers,
     getUserById,
+    createSupervisor,
     updateUser,
     deleteUser,
+    deleteSupervisor,
     restoreUser,
+    restoreSupervisor,
     approveUser,
     rejectUser,
     updateUserRole,
     updateSupervisorPermissions,
+    getSupervisorLogs,
+    getAllSupervisorLogs,
     updateUserCurrency,
     updateIdentityVerificationHold,
     updateUserCreditLimit,
