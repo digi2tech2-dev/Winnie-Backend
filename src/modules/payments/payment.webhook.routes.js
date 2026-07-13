@@ -7,5 +7,6 @@ const router = Router();
 
 router.post('/network', webhookController.handleNetworkWebhook);
 router.post('/paymento', webhookController.handlePaymentoWebhook);
+router.post('/ziina', webhookController.handleZiinaWebhook);
 
 module.exports = router;

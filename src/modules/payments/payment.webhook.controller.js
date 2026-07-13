@@ -59,7 +59,33 @@ const handlePaymentoWebhook = catchAsync(async (req, res) => {
     }, 'Payment webhook accepted.');
 });
 
+const handleZiinaWebhook = catchAsync(async (req, res) => {
+    const result = await webhookService.processZiinaWebhook({
+        payload: req.body || {},
+        headers: req.headers || {},
+        rawBody: req.rawBody || null,
+        requestMeta: requestMetaFrom(req),
+    });
+
+    sendSuccess(res, {
+        accepted: true,
+        duplicate: Boolean(result.duplicate),
+        event: {
+            id: result.event?._id?.toString?.() || null,
+            status: result.event?.status || null,
+            processingStatus: result.event?.processingStatus || null,
+        },
+        matched: Boolean(result.payment),
+        unmatched: Boolean(result.unmatched),
+        payment: result.payment ? paymentService.serializePayment(result.payment) : null,
+        alreadyProcessed: Boolean(result.syncResult?.alreadyProcessed),
+        providerStatus: result.syncResult?.providerStatus || null,
+        verificationMode: result.verification?.mode || 'unverified',
+    }, 'Payment webhook accepted.');
+});
+
 module.exports = {
     handleNetworkWebhook,
     handlePaymentoWebhook,
+    handleZiinaWebhook,
 };

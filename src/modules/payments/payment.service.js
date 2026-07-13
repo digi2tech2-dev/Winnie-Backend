@@ -62,6 +62,7 @@ const ANTI_SCAM_CONFIRMATION_REQUIRED_MESSAGE =
 
 const NETWORK_GATEWAY_EXCHANGE_SOURCE = 'PLATFORM_CURRENCY_RATES_VIA_USD';
 const PAYMENTO_GATEWAY_EXCHANGE_SOURCE = 'PLATFORM_CURRENCY_RATES_VIA_USD';
+const ZIINA_GATEWAY_EXCHANGE_SOURCE = 'PLATFORM_CURRENCY_RATES_VIA_USD';
 
 const getRuntimePaymentConfig = () => {
     const allowedGateways = (process.env.PAYMENT_ALLOWED_GATEWAYS || config.payments.allowedGateways.join(','))
@@ -175,6 +176,9 @@ const getNetworkGatewayCurrency = () =>
 
 const getPaymentoFiatCurrency = () =>
     normalizeCurrency(process.env.PAYMENTO_FIAT_CURRENCY || config.payments.paymento?.fiatCurrency || 'USD');
+
+const getZiinaGatewayCurrency = () =>
+    normalizeCurrency(process.env.ZIINA_CURRENCY || config.payments.ziina?.currency || 'AED');
 
 const convertToConfiguredGatewayCurrency = async ({
     requestedAmount,
@@ -362,6 +366,14 @@ const convertToPaymentoFiatCurrency = async ({ requestedAmount, requestedCurrenc
         exchangeRateSource: PAYMENTO_GATEWAY_EXCHANGE_SOURCE,
     });
 
+const convertToZiinaGatewayCurrency = async ({ requestedAmount, requestedCurrency }) =>
+    convertToConfiguredGatewayCurrency({
+        requestedAmount,
+        requestedCurrency,
+        gatewayCurrency: getZiinaGatewayCurrency(),
+        exchangeRateSource: ZIINA_GATEWAY_EXCHANGE_SOURCE,
+    });
+
 const assertPaymentOwnerOrAdmin = (payment, actor) => {
     const actorRole = String(actor?.role || actor?.actorRole || '').toUpperCase();
     if ([
@@ -488,6 +500,7 @@ const metadataModeForGateway = (gateway) => {
     if (gateway === PAYMENT_GATEWAYS.MOCK) return 'mock';
     if (gateway === PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL) return 'network_international';
     if (gateway === PAYMENT_GATEWAYS.PAYMENTO) return 'paymento_usdt';
+    if (gateway === PAYMENT_GATEWAYS.ZIINA) return 'ziina';
     return 'placeholder';
 };
 
@@ -498,10 +511,12 @@ const serializePayment = (payment, { admin = false, webhookEvents = [] } = {}) =
 
     const response = {
         id: doc._id?.toString?.() || doc.id,
+        paymentId: doc._id?.toString?.() || doc.id,
         userId: user?.id || normalizeDocumentId(doc.userId),
         user,
         purpose: doc.purpose,
         gateway: doc.gateway,
+        provider: doc.gateway,
         method: doc.method,
         paymentMethodId: doc.paymentMethodId || null,
         amount: doc.amount,
@@ -627,6 +642,11 @@ const createPaymentIntent = async ({
             requestedAmount: totalAmount,
             requestedCurrency: normalizedCurrency,
         });
+    } else if (normalizedGateway === PAYMENT_GATEWAYS.ZIINA) {
+        gatewayCurrencyConversion = await convertToZiinaGatewayCurrency({
+            requestedAmount: totalAmount,
+            requestedCurrency: normalizedCurrency,
+        });
     }
 
     const gatewayAdapter = getPaymentGateway(normalizedGateway);
@@ -653,7 +673,9 @@ const createPaymentIntent = async ({
         userId,
         purpose: PAYMENT_PURPOSES.WALLET_TOPUP,
         gateway: normalizedGateway,
-        method: normalizedGateway === PAYMENT_GATEWAYS.PAYMENTO ? PAYMENT_METHODS.ONLINE : PAYMENT_METHODS.CARD,
+        method: [PAYMENT_GATEWAYS.PAYMENTO, PAYMENT_GATEWAYS.ZIINA].includes(normalizedGateway)
+            ? PAYMENT_METHODS.ONLINE
+            : PAYMENT_METHODS.CARD,
         amount: parsedAmount,
         paymentMethodId: selectedPaymentMethod?.paymentMethodId || null,
         feePercent,

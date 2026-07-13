@@ -97,6 +97,22 @@ const config = {
             createPath: process.env.PAYMENTO_CREATE_PATH || '/v1/payment/request',
             verifyPath: process.env.PAYMENTO_VERIFY_PATH || '/v1/payment/verify',
         },
+        ziina: {
+            enabled: process.env.ZIINA_ENABLED === 'true',
+            apiBaseUrl: process.env.ZIINA_API_BASE_URL || 'https://api-v2.ziina.com/api',
+            accessToken: process.env.ZIINA_ACCESS_TOKEN,
+            currency: (process.env.ZIINA_CURRENCY || 'AED').toUpperCase(),
+            testMode: process.env.ZIINA_TEST_MODE === 'true',
+            successUrl: process.env.ZIINA_SUCCESS_URL ||
+                `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/success?provider=ziina&payment_intent_id={PAYMENT_INTENT_ID}`,
+            cancelUrl: process.env.ZIINA_CANCEL_URL ||
+                `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/cancel?provider=ziina&payment_intent_id={PAYMENT_INTENT_ID}`,
+            failureUrl: process.env.ZIINA_FAILURE_URL ||
+                `${process.env.FRONTEND_URL || 'http://localhost:5173'}/payment/cancel?provider=ziina&payment_intent_id={PAYMENT_INTENT_ID}`,
+            webhookUrl: process.env.ZIINA_WEBHOOK_URL ||
+                `${process.env.APP_URL || `http://localhost:${process.env.PORT || 5000}`}/api/webhooks/payments/ziina`,
+            webhookSecret: process.env.ZIINA_WEBHOOK_SECRET,
+        },
     },
 
     providerCredentials: {

@@ -27,6 +27,7 @@ const PAYMENTO_SIGNATURE_HEADERS = [
     'x-signature',
     'signature',
 ];
+const ZIINA_SIGNATURE_HEADER = 'x-hmac-signature';
 const SYSTEM_ACTOR_ID = new mongoose.Types.ObjectId('000000000000000000000001');
 const MAX_SUMMARY_STRING_LENGTH = 500;
 const SAFE_HEADER_NAMES = new Set([
@@ -39,6 +40,8 @@ const SAFE_HEADER_NAMES = new Set([
     'x-ngenius-request-id',
     'x-paymento-event-id',
     'x-paymento-request-id',
+    'x-ziina-event-id',
+    'x-ziina-request-id',
 ]);
 const SENSITIVE_KEYS = new Set([
     'access_token',
@@ -82,6 +85,14 @@ const getPaymentoWebhookConfig = () => ({
     secret: trim(
         process.env.PAYMENTO_IPN_SECRET ||
         config.payments.paymento?.ipnSecret ||
+        ''
+    ),
+});
+
+const getZiinaWebhookConfig = () => ({
+    secret: trim(
+        process.env.ZIINA_WEBHOOK_SECRET ||
+        config.payments.ziina?.webhookSecret ||
         ''
     ),
 });
@@ -143,6 +154,29 @@ const verifyPaymentoSignature = ({ headers = {}, rawBody = null, payload = {} } 
 
     if (!matches) {
         throw new AppError('Invalid Paymento webhook signature.', 401, 'PAYMENTO_WEBHOOK_INVALID_SIGNATURE');
+    }
+
+    return { verified: true, mode: 'hmac_sha256' };
+};
+
+const verifyZiinaSignature = ({ headers = {}, rawBody = null } = {}) => {
+    const webhookConfig = getZiinaWebhookConfig();
+    if (!webhookConfig.secret) {
+        return { verified: false, mode: 'unverified' };
+    }
+
+    const providedSignature = normalizeSignatureValue(headers[ZIINA_SIGNATURE_HEADER]);
+    if (!providedSignature || !rawBody || !Buffer.isBuffer(rawBody)) {
+        throw new AppError('Invalid Ziina webhook signature.', 401, 'ZIINA_WEBHOOK_INVALID_SIGNATURE');
+    }
+
+    const expected = crypto
+        .createHmac('sha256', webhookConfig.secret)
+        .update(rawBody)
+        .digest('hex');
+
+    if (!timingSafeEqualString(providedSignature, expected)) {
+        throw new AppError('Invalid Ziina webhook signature.', 401, 'ZIINA_WEBHOOK_INVALID_SIGNATURE');
     }
 
     return { verified: true, mode: 'hmac_sha256' };
@@ -366,6 +400,49 @@ const extractPaymentoWebhookRefs = (payload = {}, headers = {}) => {
     };
 };
 
+const extractZiinaWebhookRefs = (payload = {}, headers = {}) => {
+    const eventId = firstPresent(
+        headers['x-ziina-event-id'],
+        headers['x-ziina-request-id'],
+        payloadAt(payload, 'eventId', 'event_id', 'event.id')
+    );
+    const eventType = firstPresent(
+        payloadAt(payload, 'event', 'eventType', 'event_type', 'type')
+    );
+    const providerStatus = firstPresent(
+        payloadAt(payload, 'data.status', 'data.payment_intent.status', 'payment_intent.status', 'status')
+    );
+    const gatewayPaymentId = firstPresent(
+        payloadAt(
+            payload,
+            'data.id',
+            'data.payment_intent.id',
+            'payment_intent.id',
+            'paymentIntent.id',
+            'payment_intent_id',
+            'paymentIntentId',
+            'id'
+        )
+    );
+    const merchantOrderReference = firstPresent(
+        payloadAt(payload, 'data.metadata.paymentId', 'metadata.paymentId', 'paymentId')
+    );
+    const eventTimestamp = firstPresent(
+        payloadAt(payload, 'timestamp', 'createdAt', 'created_at', 'data.createdAt', 'data.created_at')
+    );
+
+    return {
+        eventId,
+        eventType,
+        providerStatus,
+        gatewayPaymentId,
+        gatewayReference: gatewayPaymentId,
+        orderReference: gatewayPaymentId,
+        merchantOrderReference,
+        eventTimestamp,
+    };
+};
+
 const buildDedupeKey = ({ refs, payloadHash }) => {
     if (refs.eventId) return `${PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL}:event:${refs.eventId}`;
     if (refs.orderReference || refs.gatewayPaymentId || refs.merchantOrderReference) {
@@ -408,6 +485,18 @@ const buildPaymentoPayloadSummary = (payload, refs) => ({
     amount: payloadAt(payload, 'amount', 'fiatAmount', 'data.amount', 'data.fiatAmount', 'payment.amount'),
     currency: payloadAt(payload, 'currency', 'fiatCurrency', 'data.currency', 'data.fiatCurrency', 'payment.currency'),
     cryptoCurrency: payloadAt(payload, 'cryptoCurrency', 'crypto_currency', 'data.cryptoCurrency', 'data.crypto_currency'),
+    payloadKeys: safePayloadKeys(payload),
+});
+
+const buildZiinaPayloadSummary = (payload, refs) => ({
+    eventId: refs.eventId,
+    eventType: refs.eventType,
+    providerStatus: refs.providerStatus,
+    gatewayPaymentId: refs.gatewayPaymentId,
+    gatewayReference: refs.gatewayReference,
+    merchantOrderReference: refs.merchantOrderReference,
+    amount: payloadAt(payload, 'data.amount', 'data.payment_intent.amount', 'amount'),
+    currency: payloadAt(payload, 'data.currency_code', 'data.payment_intent.currency_code', 'currency_code'),
     payloadKeys: safePayloadKeys(payload),
 });
 
@@ -484,6 +573,51 @@ const resolvePaymentoPaymentFromWebhook = async (refs) => {
 
     return Payment.findOne({
         gateway: PAYMENT_GATEWAYS.PAYMENTO,
+        $or: or,
+    });
+};
+
+const buildZiinaDedupeKey = ({ refs, payloadHash }) => {
+    if (refs.eventId) return `${PAYMENT_GATEWAYS.ZIINA}:event:${refs.eventId}`;
+    if (refs.gatewayPaymentId || refs.gatewayReference || refs.merchantOrderReference) {
+        return [
+            PAYMENT_GATEWAYS.ZIINA,
+            'payment_intent',
+            refs.gatewayPaymentId || refs.gatewayReference || refs.merchantOrderReference,
+            refs.eventType || 'event',
+            refs.providerStatus || 'unknown',
+            refs.eventTimestamp || 'no_timestamp',
+        ].join(':');
+    }
+    return `${PAYMENT_GATEWAYS.ZIINA}:hash:${payloadHash}`;
+};
+
+const ziinaPaymentLookupRefs = (refs) => [
+    refs.gatewayPaymentId,
+    refs.gatewayReference,
+    refs.merchantOrderReference,
+].map((ref) => trim(ref)).filter(Boolean);
+
+const resolveZiinaPaymentFromWebhook = async (refs) => {
+    const lookupRefs = ziinaPaymentLookupRefs(refs);
+    if (lookupRefs.length === 0) return null;
+
+    const or = [];
+    lookupRefs.forEach((ref) => {
+        if (mongoose.Types.ObjectId.isValid(ref)) {
+            or.push({ _id: ref });
+        }
+        or.push(
+            { gatewayPaymentId: ref },
+            { gatewayReference: ref },
+            { 'metadata.gatewayMetadata.gatewayPaymentId': ref },
+            { 'metadata.gatewayMetadata.gatewayReference': ref },
+            { 'metadata.gatewayMetadata.paymentId': ref }
+        );
+    });
+
+    return Payment.findOne({
+        gateway: PAYMENT_GATEWAYS.ZIINA,
         $or: or,
     });
 };
@@ -905,13 +1039,210 @@ const processPaymentoWebhook = async ({
     }
 };
 
+const processZiinaWebhook = async ({
+    payload = {},
+    headers = {},
+    rawBody = null,
+    requestMeta = {},
+} = {}) => {
+    const verification = verifyZiinaSignature({ headers, rawBody });
+    const refs = extractZiinaWebhookRefs(payload, headers);
+    const payloadHash = hashPayload(payload);
+    const dedupeKey = buildZiinaDedupeKey({ refs, payloadHash });
+    const now = new Date();
+
+    const duplicateEvent = await PaymentWebhookEvent.findOneAndUpdate(
+        { dedupeKey },
+        {
+            $inc: { attempts: 1 },
+            $set: {
+                lastReceivedAt: now,
+                processingStatus: 'DUPLICATE',
+            },
+        },
+        { new: true }
+    );
+
+    if (duplicateEvent) {
+        auditWebhook({
+            event: duplicateEvent,
+            action: PAYMENT_ACTIONS.WEBHOOK_DUPLICATE,
+            requestMeta,
+            metadata: { duplicate: true },
+            provider: PAYMENT_GATEWAYS.ZIINA,
+        });
+        return {
+            accepted: true,
+            duplicate: true,
+            event: duplicateEvent,
+            payment: duplicateEvent.paymentId ? await Payment.findById(duplicateEvent.paymentId) : null,
+            verification,
+        };
+    }
+
+    let event;
+    try {
+        event = await PaymentWebhookEvent.create({
+            provider: PAYMENT_GATEWAYS.ZIINA,
+            eventId: refs.eventId,
+            dedupeKey,
+            gatewayPaymentId: refs.gatewayPaymentId,
+            gatewayReference: refs.gatewayReference,
+            orderReference: refs.orderReference,
+            eventType: refs.eventType,
+            providerStatus: refs.providerStatus,
+            status: PAYMENT_WEBHOOK_EVENT_STATUSES.RECEIVED,
+            processingStatus: 'RECEIVED',
+            httpHeaders: safeHeaders(headers),
+            payloadHash,
+            payloadSummary: sanitizeValue(buildZiinaPayloadSummary(payload, refs)),
+            attempts: 1,
+            receivedAt: now,
+        });
+    } catch (err) {
+        if (err.code !== 11000) throw err;
+
+        const racedDuplicate = await PaymentWebhookEvent.findOneAndUpdate(
+            { dedupeKey },
+            {
+                $inc: { attempts: 1 },
+                $set: {
+                    lastReceivedAt: now,
+                    processingStatus: 'DUPLICATE',
+                },
+            },
+            { new: true }
+        );
+
+        auditWebhook({
+            event: racedDuplicate,
+            action: PAYMENT_ACTIONS.WEBHOOK_DUPLICATE,
+            requestMeta,
+            metadata: { duplicate: true, source: 'unique_index_race' },
+            provider: PAYMENT_GATEWAYS.ZIINA,
+        });
+
+        return {
+            accepted: true,
+            duplicate: true,
+            event: racedDuplicate,
+            payment: racedDuplicate?.paymentId ? await Payment.findById(racedDuplicate.paymentId) : null,
+            verification,
+        };
+    }
+
+    auditWebhook({
+        event,
+        action: PAYMENT_ACTIONS.WEBHOOK_RECEIVED,
+        requestMeta,
+        metadata: { verificationMode: verification.mode },
+        provider: PAYMENT_GATEWAYS.ZIINA,
+    });
+
+    const payment = await resolveZiinaPaymentFromWebhook(refs);
+    if (!payment) {
+        event = await markEvent(event, {
+            status: PAYMENT_WEBHOOK_EVENT_STATUSES.UNMATCHED,
+            processingStatus: 'UNMATCHED',
+            processedAt: new Date(),
+            errorCode: 'ZIINA_WEBHOOK_UNMATCHED_PAYMENT',
+            errorMessage: 'Ziina webhook accepted but no matching payment was found.',
+        });
+        auditWebhook({
+            event,
+            action: PAYMENT_ACTIONS.WEBHOOK_UNMATCHED,
+            requestMeta,
+            provider: PAYMENT_GATEWAYS.ZIINA,
+        });
+        return {
+            accepted: true,
+            duplicate: false,
+            event,
+            payment: null,
+            verification,
+            unmatched: true,
+        };
+    }
+
+    event = await markEvent(event, {
+        paymentId: payment._id,
+        processingStatus: 'VERIFYING_PROVIDER_STATUS',
+    });
+
+    try {
+        const syncResult = await paymentService.syncPaymentStatus(payment._id, {
+            actor: systemActor(),
+            requestMeta,
+            source: 'ziina_webhook',
+        });
+        event = await markEvent(event, {
+            status: PAYMENT_WEBHOOK_EVENT_STATUSES.PROCESSED,
+            processingStatus: 'PROCESSED',
+            processedAt: new Date(),
+            providerStatus: syncResult.providerStatus || refs.providerStatus || null,
+            errorCode: null,
+            errorMessage: null,
+        });
+        auditWebhook({
+            event,
+            action: PAYMENT_ACTIONS.WEBHOOK_PROCESSED,
+            payment,
+            requestMeta,
+            metadata: {
+                providerStatus: syncResult.providerStatus || null,
+                paymentStatus: syncResult.payment?.status || null,
+                alreadyProcessed: Boolean(syncResult.alreadyProcessed),
+            },
+            provider: PAYMENT_GATEWAYS.ZIINA,
+        });
+        return {
+            accepted: true,
+            duplicate: false,
+            event,
+            payment: syncResult.payment,
+            syncResult,
+            verification,
+        };
+    } catch (err) {
+        event = await markEvent(event, {
+            status: PAYMENT_WEBHOOK_EVENT_STATUSES.FAILED,
+            processingStatus: 'FAILED',
+            processedAt: new Date(),
+            errorCode: err.code || 'ZIINA_WEBHOOK_PROCESSING_FAILED',
+            errorMessage: err.message || 'Ziina webhook could not be processed.',
+        });
+        auditWebhook({
+            event,
+            action: PAYMENT_ACTIONS.WEBHOOK_FAILED,
+            payment,
+            requestMeta,
+            metadata: {
+                errorCode: err.code || 'ZIINA_WEBHOOK_PROCESSING_FAILED',
+                errorMessage: err.message || 'Ziina webhook could not be processed.',
+            },
+            provider: PAYMENT_GATEWAYS.ZIINA,
+        });
+        return {
+            accepted: true,
+            duplicate: false,
+            event,
+            payment,
+            verification,
+            errorCode: err.code || 'ZIINA_WEBHOOK_PROCESSING_FAILED',
+        };
+    }
+};
+
 module.exports = {
     processNetworkWebhook,
     processPaymentoWebhook,
+    processZiinaWebhook,
     verifyWebhookSecret,
     verifyPaymentoSignature,
+    verifyZiinaSignature,
     resolvePaymentFromWebhook,
     resolvePaymentoPaymentFromWebhook,
+    resolveZiinaPaymentFromWebhook,
     sanitizeValue,
     SYSTEM_ACTOR_ID,
 };

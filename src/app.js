@@ -71,7 +71,10 @@ app.use(
 
 // ── Request Parsing ───────────────────────────────────────────────────────────
 const captureRawBody = (req, _res, buf) => {
-    if (req.originalUrl?.startsWith(`${API_PREFIX}/webhooks/payments/paymento`)) {
+    if (
+        req.originalUrl?.startsWith(`${API_PREFIX}/webhooks/payments/paymento`) ||
+        req.originalUrl?.startsWith(`${API_PREFIX}/webhooks/payments/ziina`)
+    ) {
         req.rawBody = Buffer.from(buf || Buffer.alloc(0));
     }
 };
