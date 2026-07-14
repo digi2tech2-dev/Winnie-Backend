@@ -39,11 +39,13 @@ beforeEach(async () => {
     await clearCollections();
     invalidateCurrencyCache('AED');
     invalidateCurrencyCache('EGP');
+    invalidateCurrencyCache('USD');
 });
 afterEach(() => {
     jest.restoreAllMocks();
     invalidateCurrencyCache('AED');
     invalidateCurrencyCache('EGP');
+    invalidateCurrencyCache('USD');
     clearZiinaEnv();
     process.env.NODE_ENV = 'test';
 });
@@ -106,16 +108,17 @@ const createEgpCurrency = () => createCurrency({
     code: 'EGP',
     name: 'Egyptian Pound',
     symbol: 'EGP',
-    platformRate: 50,
+    platformRate: 52,
 });
 
 const createZiinaCustomer = async (overrides = {}) => {
-    await createAedCurrency();
-    if (overrides.currency === 'EGP') await createEgpCurrency();
+    const { createAed = true, ...customerOverrides } = overrides;
+    if (createAed !== false) await createAedCurrency();
+    if (customerOverrides.currency === 'EGP') await createEgpCurrency();
     const { customer } = await createCustomerWithGroup({
         walletBalance: 100,
         currency: 'AED',
-        ...overrides,
+        ...customerOverrides,
     });
     return customer;
 };
@@ -340,7 +343,7 @@ describe('Ziina wallet top-up gateway', () => {
         enableZiinaGateway();
         const customer = await createZiinaCustomer({ currency: 'EGP', walletBalance: 500 });
         const client = makeHttpClient();
-        mockCreateZiinaPayment(client, { amount: 734 });
+        mockCreateZiinaPayment(client, { amount: 706 });
 
         const result = await createZiinaIntent(customer, {
             amount: 100,
@@ -350,7 +353,7 @@ describe('Ziina wallet top-up gateway', () => {
         expect(client.post).toHaveBeenCalledWith(
             '/payment_intent',
             expect.objectContaining({
-                amount: 734,
+                amount: 706,
                 currency_code: 'AED',
             }),
             expect.any(Object)
@@ -360,29 +363,107 @@ describe('Ziina wallet top-up gateway', () => {
         expect(result.payment.metadata.gatewayCurrencyConversion).toMatchObject({
             requestedAmount: 100,
             requestedCurrency: 'EGP',
-            gatewayAmount: 7.34,
+            gatewayAmount: 7.06,
             gatewayCurrency: 'AED',
-            exchangeRate: 0.0734,
+            exchangeRate: 0.0706,
             exchangeRateSource: 'PLATFORM_CURRENCY_RATES_VIA_USD',
         });
         expect(result.checkout).toMatchObject({
             requestedAmount: 100,
             requestedCurrency: 'EGP',
-            gatewayAmount: 7.34,
+            gatewayAmount: 7.06,
             gatewayCurrency: 'AED',
         });
+    });
+
+    it('allows an AED Ziina payment method for an EGP wallet and converts fee-inclusive total to AED', async () => {
+        enableZiinaGateway();
+        const customer = await createZiinaCustomer({ currency: 'EGP', walletBalance: 500 });
+        await savePaymentMethod({ fee: 2, currency: 'AED' });
+        const client = makeHttpClient();
+        mockCreateZiinaPayment(client, { amount: 720 });
+
+        const result = await createZiinaIntent(customer, {
+            amount: 100,
+            currency: 'EGP',
+            paymentMethodId: 'pm-ziina-fee',
+        });
+
+        expect(client.post).toHaveBeenCalledWith(
+            '/payment_intent',
+            expect.objectContaining({
+                amount: 720,
+                currency_code: 'AED',
+            }),
+            expect.any(Object)
+        );
+        expect(result.payment.amount).toBe(100);
+        expect(result.payment.currency).toBe('EGP');
+        expect(result.payment.feePercent).toBe(2);
+        expect(result.payment.feeAmount).toBe(2);
+        expect(result.payment.totalAmount).toBe(102);
+        expect(result.payment.metadata.gatewayCurrencyConversion).toMatchObject({
+            requestedAmount: 100,
+            requestedCurrency: 'EGP',
+            feePercent: 2,
+            feeAmount: 2,
+            payableAmount: 102,
+            payableCurrency: 'EGP',
+            gatewayAmount: 7.2,
+            gatewayCurrency: 'AED',
+        });
+        expect(result.checkout).toMatchObject({
+            requestedAmount: 100,
+            requestedCurrency: 'EGP',
+            feeAmount: 2,
+            payableAmount: 102,
+            gatewayAmount: 7.2,
+            gatewayCurrency: 'AED',
+        });
+    });
+
+    it('returns a clear conversion error when the AED gateway rate is missing', async () => {
+        enableZiinaGateway();
+        const customer = await createZiinaCustomer({ currency: 'EGP', walletBalance: 500, createAed: false });
+        const client = makeHttpClient();
+
+        await expect(createZiinaIntent(customer, {
+            amount: 100,
+            currency: 'EGP',
+        })).rejects.toMatchObject({ code: 'PAYMENT_CURRENCY_CONVERSION_UNAVAILABLE' });
+
+        expect(client.post).not.toHaveBeenCalled();
+        expect(await Payment.countDocuments({ userId: customer._id })).toBe(0);
+    });
+
+    it('returns a clear currency error when the wallet currency rate is missing', async () => {
+        enableZiinaGateway();
+        await createAedCurrency();
+        const { customer } = await createCustomerWithGroup({
+            walletBalance: 500,
+            currency: 'EGP',
+        });
+        const client = makeHttpClient();
+
+        await expect(createZiinaIntent(customer, {
+            amount: 100,
+            currency: 'EGP',
+        })).rejects.toMatchObject({ code: 'PAYMENT_CURRENCY_NOT_SUPPORTED' });
+
+        expect(client.post).not.toHaveBeenCalled();
+        expect(await Payment.countDocuments({ userId: customer._id })).toBe(0);
     });
 
     it('verify completed credits wallet amount once and does not credit gateway amount', async () => {
         enableZiinaGateway();
         const customer = await createZiinaCustomer({ currency: 'EGP', walletBalance: 500 });
         const client = makeHttpClient();
-        mockCreateZiinaPayment(client, { amount: 734 });
+        mockCreateZiinaPayment(client, { amount: 706 });
         const result = await createZiinaIntent(customer, { amount: 100, currency: 'EGP' });
 
         client.post.mockReset();
         client.get.mockReset();
-        mockZiinaVerify(client, 'completed', { amount: 734 });
+        mockZiinaVerify(client, 'completed', { amount: 706 });
 
         const first = await paymentService.syncPaymentStatus(result.payment._id, { actor: customer });
         const second = await paymentService.syncPaymentStatus(result.payment._id, { actor: customer });

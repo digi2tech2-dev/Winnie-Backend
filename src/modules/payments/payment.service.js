@@ -307,6 +307,9 @@ const assertPaymentMethodUsable = (method, group, { gateway, currency }) => {
 
     const currencies = getPaymentMethodCurrencies(method, group);
     if (currencies.length && !currencies.includes(currency)) {
+        if (gateway === PAYMENT_GATEWAYS.ZIINA && currencies.includes(getZiinaGatewayCurrency())) {
+            return;
+        }
         throw new BusinessRuleError('Selected payment method does not support this currency.', 'PAYMENT_METHOD_CURRENCY_MISMATCH');
     }
 };
