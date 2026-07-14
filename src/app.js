@@ -26,6 +26,8 @@ const paymentWebhookRoutes = require('./modules/payments/payment.webhook.routes'
 const referralRoutes = require('./modules/referrals/referral.routes');
 const groupRequestRoutes = require('./modules/groupRequests/groupRequest.routes');
 const notificationRoutes = require('./modules/notifications/notification.routes');
+const whatsappCustomerRoutes = require('./modules/notifications/whatsapp/whatsappCustomer.routes');
+const whatsappAdminRoutes = require('./modules/notifications/whatsapp/whatsappAdmin.routes');
 const providerRoutes = require('./modules/providers/provider.routes');
 const clientRoutes = require('./modules/client/client.routes');
 const adminCatalogRoutes = require('./modules/admin/admin.catalog.routes');
@@ -135,6 +137,7 @@ app.use(`${API_PREFIX}`, referralRoutes);
 app.use(`${API_PREFIX}`, groupRequestRoutes);
 app.use(`${API_PREFIX}/notifications`, notificationRoutes);
 app.use(`${API_PREFIX}/me/notifications`, notificationRoutes);
+app.use(`${API_PREFIX}/me/whatsapp-notifications`, whatsappCustomerRoutes);
 app.use(`${API_PREFIX}/providers`, providerRoutes);
 app.use(`${API_PREFIX}/client`, clientRoutes);
 
@@ -236,6 +239,7 @@ app.get(`${API_PREFIX}/public/catalog`, async (req, res) => {
 });
 
 // ── Admin Routes ──────────────────────────────────────────────────────────────
+app.use(`${API_PREFIX}/admin/whatsapp`, whatsappAdminRoutes);
 app.use(`${API_PREFIX}/admin`, adminRoutes);
 app.use(`${API_PREFIX}/admin`, adminCatalogRoutes);
 app.use(`${API_PREFIX}/admin/currencies`, currencyRoutes);

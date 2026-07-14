@@ -11,6 +11,7 @@ const {
     safeCreateAdminActorNotifications,
 } = require('../notifications/notification.service');
 const {
+    notifyDepositRequested,
     notifyDepositApproved,
     notifyDepositRejected,
 } = require('../notifications/notification.events');
@@ -175,6 +176,8 @@ const createDepositRequest = async ({
             status: deposit.status,
         },
     });
+
+    notifyDepositRequested(deposit);
 
     return deposit;
 };

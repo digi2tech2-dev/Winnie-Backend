@@ -7,6 +7,7 @@ const config = require('./config/config');
 const connectDB = require('./config/database');
 const fulfillmentJob = require('./modules/orders/fulfillmentJob');
 const syncProvidersJob = require('./modules/providers/syncProvidersJob');
+const whatsappNotificationQueue = require('./modules/notifications/whatsapp/whatsappNotification.queue');
 
 
 const startServer = async () => {
@@ -29,6 +30,7 @@ const startServer = async () => {
         // 3. Start background cron jobs (skipped in test env)
         fulfillmentJob.start();    // every minute  — polls PROCESSING order statuses
         syncProvidersJob.start();  // every 6 hours — syncs provider product catalogues
+        whatsappNotificationQueue.start(); // DB-backed WhatsApp notification sender
 
         // ── Graceful Shutdown ─────────────────────────────────────────────────────
         const gracefulShutdown = (signal) => {
@@ -37,6 +39,7 @@ const startServer = async () => {
             // Stop both cron jobs before closing HTTP
             fulfillmentJob.stop();
             syncProvidersJob.stop();
+            whatsappNotificationQueue.stop();
 
             server.close(async () => {
                 console.log('✅ HTTP server closed.');

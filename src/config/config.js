@@ -118,6 +118,18 @@ const config = {
     providerCredentials: {
         key: process.env.PROVIDER_CREDENTIALS_KEY,
     },
+
+    openwa: {
+        enabled: process.env.OPENWA_ENABLED === 'true',
+        baseUrl: process.env.OPENWA_BASE_URL || 'http://127.0.0.1:2785/api',
+        apiKey: process.env.OPENWA_API_KEY,
+        sessionId: process.env.OPENWA_SESSION_ID,
+        defaultCountryCode: process.env.OPENWA_DEFAULT_COUNTRY_CODE || '20',
+        webhookSecret: process.env.OPENWA_WEBHOOK_SECRET,
+        sendTimeoutMs: parseInt(process.env.OPENWA_SEND_TIMEOUT_MS || '15000', 10),
+        maxRetries: parseInt(process.env.OPENWA_MAX_RETRIES || '3', 10),
+        retryDelaySeconds: parseInt(process.env.OPENWA_RETRY_DELAY_SECONDS || '60', 10),
+    },
 };
 
 // Guard: fail fast if critical configs are missing

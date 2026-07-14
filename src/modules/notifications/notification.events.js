@@ -9,6 +9,7 @@ const {
     NOTIFICATION_PRIORITIES,
 } = require('./notification.model');
 const { ROLES } = require('../users/user.model');
+const whatsappService = require('./whatsapp/whatsappNotification.service');
 
 const ADMIN_SUPERVISOR_ROLES = [ROLES.ADMIN, ROLES.SUPERVISOR];
 const ORDER_VIEW_PERMISSIONS = ['orders.view', 'orders.update'];
@@ -39,6 +40,14 @@ const orderIdOf = (order) => toIdString(order?._id || order?.id);
 const userIdOf = (orderOrUserId) => toIdString(orderOrUserId?.userId || orderOrUserId);
 const orderNumberOf = (order) => order?.orderNumber || orderIdOf(order).slice(-6);
 const amountLabel = (amount, currency = 'USD') => `${amount ?? ''} ${currency || 'USD'}`.trim();
+const safeQueueWhatsApp = (promise) => {
+    Promise.resolve(promise).catch((error) => {
+        const msg = error.message || '';
+        if (!msg.includes('client was closed') && !msg.includes('connection was destroyed')) {
+            console.error('[WhatsAppNotifications] Failed to queue notification:', msg);
+        }
+    });
+};
 
 const orderRoute = (order) => `/admin/orders?orderId=${orderIdOf(order)}`;
 const userOrderRoute = () => '/orders';
@@ -177,6 +186,19 @@ const notifyOrderCreated = (order, { manualReview = false } = {}) => {
             metadata: { reason: 'MANUAL_ORDER' },
         });
     }
+
+    safeQueueWhatsApp(whatsappService.queueCustomerEvent({
+        userId: toId(order?.userId),
+        eventType: 'order_created',
+        relatedEntityType: 'order',
+        relatedEntityId: toId(order?._id || order?.id),
+        payload: {
+            orderId: orderIdOf(order),
+            orderNumber: orderNumberOf(order),
+            productName: order?.productId?.name || order?.productName,
+            quantity: order?.quantity,
+        },
+    }));
 };
 
 const notifyOrderCompleted = (order, { source = 'system' } = {}) => {
@@ -191,6 +213,18 @@ const notifyOrderCompleted = (order, { source = 'system' } = {}) => {
         message: 'تم تنفيذ طلبك بنجاح.',
         metadata: { source },
     });
+
+    safeQueueWhatsApp(whatsappService.queueCustomerEvent({
+        userId: toId(order?.userId),
+        eventType: 'order_completed',
+        relatedEntityType: 'order',
+        relatedEntityId: toId(order?._id || order?.id),
+        payload: {
+            orderId: orderIdOf(order),
+            orderNumber: orderNumberOf(order),
+            source,
+        },
+    }));
 };
 
 const notifyOrderFailed = (order, { source = 'system', reason = null, notifyUser = true } = {}) => {
@@ -208,7 +242,33 @@ const notifyOrderFailed = (order, { source = 'system', reason = null, notifyUser
             priority: NOTIFICATION_PRIORITIES.NORMAL,
             metadata: { source },
         });
+
+        safeQueueWhatsApp(whatsappService.queueCustomerEvent({
+            userId: toId(order?.userId),
+            eventType: 'order_failed',
+            relatedEntityType: 'order',
+            relatedEntityId: toId(order?._id || order?.id),
+            payload: {
+                orderId: orderIdOf(order),
+                orderNumber: orderNumberOf(order),
+                reason,
+                source,
+            },
+        }));
     }
+
+    safeQueueWhatsApp(whatsappService.queueAdminEvent({
+        eventType: 'provider_order_failed',
+        relatedEntityType: 'order',
+        relatedEntityId: toId(order?._id || order?.id),
+        payload: {
+            orderId: orderIdOf(order),
+            orderNumber: orderNumberOf(order),
+            provider: order?.providerCode || order?.provider || null,
+            reason,
+            source,
+        },
+    }));
 };
 
 const notifyOrderRefunded = (order, {
@@ -330,6 +390,37 @@ const notifyManualWalletAdjustment = ({
         transactionId,
         metadata: { operation: normalizedOperation, amount, currency, balanceBefore, balanceAfter },
     });
+
+    if (Math.abs(Number(amount || 0)) >= Number(process.env.WHATSAPP_LARGE_WALLET_ADJUSTMENT_THRESHOLD || 1000)) {
+        safeQueueWhatsApp(whatsappService.queueAdminEvent({
+            eventType: 'large_wallet_adjustment',
+            relatedEntityType: 'wallet',
+            relatedEntityId: toId(userId),
+            payload: {
+                userId: toIdString(userId),
+                amount,
+                currency,
+                operation: normalizedOperation,
+                actorRole,
+            },
+        }));
+    }
+};
+
+const notifyDepositRequested = (deposit) => {
+    safeQueueWhatsApp(whatsappService.queueAdminEvent({
+        eventType: 'manual_deposit_pending',
+        relatedEntityType: 'topup',
+        relatedEntityId: toId(deposit?._id || deposit?.id),
+        payload: {
+            customerName: deposit?.userId?.name,
+            email: deposit?.userId?.email,
+            requestedAmount: deposit?.requestedAmount,
+            amount: deposit?.requestedAmount,
+            currency: deposit?.currency,
+            paymentMethod: deposit?.paymentMethodId,
+        },
+    }));
 };
 
 const notifyDepositApproved = (deposit, { walletCreditAmount, walletCurrency = 'USD' } = {}) => {
@@ -356,6 +447,19 @@ const notifyDepositApproved = (deposit, { walletCreditAmount, walletCurrency = '
         message: `تم قبول طلب الشحن رقم ${toIdString(deposit?._id || deposit?.id).slice(-6)} وإضافة الرصيد للمستخدم.`,
         metadata: { walletCreditAmount, walletCurrency },
     });
+
+    safeQueueWhatsApp(whatsappService.queueCustomerEvent({
+        userId: toId(deposit?.userId),
+        eventType: 'manual_deposit_approved',
+        relatedEntityType: 'topup',
+        relatedEntityId: toId(deposit?._id || deposit?.id),
+        payload: {
+            walletCreditAmount,
+            walletCurrency,
+            amount: walletCreditAmount,
+            currency: walletCurrency,
+        },
+    }));
 };
 
 const notifyDepositRejected = (deposit) => {
@@ -368,6 +472,16 @@ const notifyDepositRejected = (deposit) => {
         title: 'تم رفض طلب شحن',
         message: `تم رفض طلب الشحن رقم ${toIdString(deposit?._id || deposit?.id).slice(-6)}.`,
     });
+
+    safeQueueWhatsApp(whatsappService.queueCustomerEvent({
+        userId: toId(deposit?.userId),
+        eventType: 'manual_deposit_rejected',
+        relatedEntityType: 'topup',
+        relatedEntityId: toId(deposit?._id || deposit?.id),
+        payload: {
+            reason: deposit?.adminNotes || null,
+        },
+    }));
 };
 
 const notifyPaymentSucceeded = (payment, { transactionId } = {}) => {
@@ -412,6 +526,35 @@ const notifyPaymentSucceeded = (payment, { transactionId } = {}) => {
             gateway: payment?.gateway,
         },
     });
+
+    const conversion = payment?.metadata?.gatewayCurrencyConversion || {};
+    safeQueueWhatsApp(whatsappService.queueCustomerEvent({
+        userId: toId(payment?.userId),
+        eventType: 'wallet_topup_completed',
+        relatedEntityType: 'payment',
+        relatedEntityId: toId(payment?._id || payment?.id),
+        payload: {
+            paymentId,
+            amount: payment?.amount,
+            currency: payment?.currency,
+            gateway: payment?.gateway,
+        },
+    }));
+
+    safeQueueWhatsApp(whatsappService.queueAdminEvent({
+        eventType: 'successful_payment',
+        relatedEntityType: 'payment',
+        relatedEntityId: toId(payment?._id || payment?.id),
+        payload: {
+            paymentId,
+            userId: userIdOf(payment),
+            amount: payment?.amount,
+            currency: payment?.currency,
+            gateway: payment?.gateway,
+            gatewayAmount: conversion.gatewayAmount,
+            gatewayCurrency: conversion.gatewayCurrency,
+        },
+    }));
 };
 
 module.exports = {
@@ -421,6 +564,7 @@ module.exports = {
     notifyOrderRefunded,
     notifyOrderManualReview,
     notifyManualWalletAdjustment,
+    notifyDepositRequested,
     notifyDepositApproved,
     notifyDepositRejected,
     notifyPaymentSucceeded,
