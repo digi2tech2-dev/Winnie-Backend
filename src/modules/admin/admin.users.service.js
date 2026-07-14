@@ -82,6 +82,8 @@ const SUPERVISOR_PERMISSION_GROUPS = Object.freeze([
             { key: 'wallet.adjust', labelAr: 'تعديل الأرصدة', labelEn: 'Adjust wallet balances' },
             { key: 'payments.view', labelAr: 'عرض المدفوعات', labelEn: 'View payments' },
             { key: 'topups.review', labelAr: 'مراجعة طلبات الرصيد', labelEn: 'Review top-ups' },
+            { key: 'financial_reports.read', labelAr: 'عرض التقارير المالية', labelEn: 'View financial reports' },
+            { key: 'financial_reports.close', labelAr: 'تقفيل اليوم المالي', labelEn: 'Close financial days' },
         ],
     },
     {

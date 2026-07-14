@@ -97,6 +97,7 @@ const ordersCtrl = require('./admin.orders.controller');
 const walletCtrl = require('./admin.wallet.controller');
 const settingsCtrl = require('./admin.settings.controller');
 const statsCtrl = require('./admin.stats.controller');
+const financialReportCtrl = require('./admin.financialReport.controller');
 const paymentsCtrl = require('../payments/payment.controller');
 const categoriesCtrl = require('../categories/category.controller');
 const categoryValidation = require('../categories/category.validation');
@@ -120,6 +121,12 @@ router.use(authorizeRoles('ADMIN', 'SUPERVISOR'));
 router.get('/dashboard/summary', authorizeRoles('ADMIN'), statsCtrl.getDashboardSummary);
 router.get('/dashboard/stats', requirePermission('dashboard.view'), statsCtrl.getDashboardStats);
 router.get('/stats', requirePermission('dashboard.view'), statsCtrl.getDashboardStats);
+
+// FINANCIAL REPORTS
+router.get('/reports/financial/daily', requirePermission('financial_reports.read'), financialReportCtrl.downloadDailyReport);
+router.get('/reports/financial/daily/close', requirePermission('financial_reports.read'), financialReportCtrl.getDailyCloseStatus);
+router.get('/reports/financial/daily/closed-download', requirePermission('financial_reports.read'), financialReportCtrl.downloadClosedDailyReport);
+router.post('/reports/financial/daily/close', requirePermission('financial_reports.close'), financialReportCtrl.closeDailyReport);
 
 // SUPERVISORS
 router.get('/supervisors', authorizeRoles('ADMIN'), validateQuery(schemas.listUsersQuery), usersCtrl.listSupervisors);
