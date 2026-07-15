@@ -2,10 +2,19 @@
 
 const mongoose = require('mongoose');
 const Group = require('../groups/group.model');
-const { User, ROLES, USER_STATUS, SUB_AGENT_STATUS } = require('../users/user.model');
+const {
+    User,
+    ROLES,
+    USER_STATUS,
+    SUB_AGENT_STATUS,
+    AGENT_PROFILE_STATUS,
+    REFERRAL_STOP_REASONS,
+} = require('../users/user.model');
+const referralService = require('../referrals/referral.service');
 const { createAuditLog } = require('../audit/audit.service');
 const {
     GROUP_REQUEST_ACTIONS,
+    REFERRAL_ACTIONS,
     ENTITY_TYPES,
     ACTOR_ROLES,
 } = require('../audit/audit.constants');
@@ -27,7 +36,7 @@ const {
 } = require('./groupRequest.constants');
 
 const GROUP_PROJECTION = 'name percentage isActive deletedAt';
-const USER_PROJECTION = 'name email role status groupId isSubAgent subAgentStatus permissions';
+const USER_PROJECTION = 'name email role status groupId isSubAgent subAgentStatus permissions referralCode referredBy referredByAgentId referralCommissionStoppedAt agentProfile';
 
 const parsePage = (value) => Math.max(1, parseInt(value, 10) || 1);
 const parseLimit = (value) => Math.min(100, Math.max(1, parseInt(value, 10) || 20));
@@ -154,6 +163,7 @@ const formatRequest = (request, { admin = false } = {}) => {
         currentGroup: summarizeGroup(request.currentGroupId, request.currentGroupSnapshot),
         requestedGroup: summarizeGroup(request.requestedGroupId, request.requestedGroupSnapshot),
         approvedGroup: summarizeGroup(request.approvedGroupId, request.approvedGroupSnapshot),
+        approvedCommissionPercent: request.approvedCommissionPercent ?? null,
         reason: request.reason || null,
         adminNote: admin || reviewed ? request.adminNote || null : null,
         reviewedAt: request.reviewedAt || null,
@@ -221,7 +231,9 @@ const emitCreatedSideEffects = ({ request, userId, actor = {} }) => {
     void createAuditLog({
         actorId: actor.actorId || userId,
         actorRole: actor.actorRole || ACTOR_ROLES.CUSTOMER,
-        action: GROUP_REQUEST_ACTIONS.CREATED,
+        action: request.requestType === GROUP_REQUEST_TYPES.SUB_AGENT
+            ? REFERRAL_ACTIONS.SUB_AGENT_REQUEST_CREATED
+            : GROUP_REQUEST_ACTIONS.CREATED,
         entityType: ENTITY_TYPES.GROUP_REQUEST,
         entityId: requestObjectId,
         metadata: {
@@ -311,7 +323,9 @@ const emitReviewSideEffects = ({
     void createAuditLog({
         actorId: actor.actorId || adminId,
         actorRole: actor.actorRole || ACTOR_ROLES.ADMIN,
-        action: approved ? GROUP_REQUEST_ACTIONS.APPROVED : GROUP_REQUEST_ACTIONS.REJECTED,
+        action: request.requestType === GROUP_REQUEST_TYPES.SUB_AGENT
+            ? (approved ? REFERRAL_ACTIONS.SUB_AGENT_REQUEST_APPROVED : REFERRAL_ACTIONS.SUB_AGENT_REQUEST_REJECTED)
+            : (approved ? GROUP_REQUEST_ACTIONS.APPROVED : GROUP_REQUEST_ACTIONS.REJECTED),
         entityType: ENTITY_TYPES.GROUP_REQUEST,
         entityId: requestObjectId,
         metadata: {
@@ -634,6 +648,7 @@ const getRequestById = async (id) => getFormattedRequestById(id, { admin: true }
 
 const approveGroupRequest = async (id, {
     approvedGroupId = null,
+    approvedCommissionPercent = null,
     adminNote = null,
     adminId,
     actor = {},
@@ -693,18 +708,63 @@ const approveGroupRequest = async (id, {
             }
 
             if (request.requestType === GROUP_REQUEST_TYPES.SUB_AGENT) {
-                if (approvedGroupId) {
-                    approvedGroup = await getActiveGroupOrThrow(approvedGroupId, { session });
-                    previousGroupId = user.groupId;
-                    updateUser.groupId = approvedGroup._id;
-                    groupChanged = !sameId(user.groupId, approvedGroup._id);
+                if (!approvedGroupId) {
+                    throw new BusinessRuleError(
+                        'approvedGroupId is required for sub-agent approval.',
+                        'APPROVED_GROUP_REQUIRED'
+                    );
                 }
 
+                if (
+                    approvedCommissionPercent === undefined ||
+                    approvedCommissionPercent === null ||
+                    approvedCommissionPercent === ''
+                ) {
+                    throw new BusinessRuleError(
+                        'approvedCommissionPercent is required and must be between 0 and 100.',
+                        'INVALID_SUB_AGENT_PERCENTAGE'
+                    );
+                }
+
+                const commissionPercent = Number(approvedCommissionPercent);
+                if (!Number.isFinite(commissionPercent) || commissionPercent < 0 || commissionPercent > 100) {
+                    throw new BusinessRuleError(
+                        'approvedCommissionPercent is required and must be between 0 and 100.',
+                        'INVALID_SUB_AGENT_PERCENTAGE'
+                    );
+                }
+
+                approvedGroup = await getActiveGroupOrThrow(approvedGroupId, { session });
+                previousGroupId = user.groupId;
+                updateUser.groupId = approvedGroup._id;
+                groupChanged = !sameId(user.groupId, approvedGroup._id);
+
+                const referralCode = await referralService.ensureReferralCode(user._id, { session });
                 updateUser.isSubAgent = true;
                 updateUser.subAgentStatus = SUB_AGENT_STATUS.ACTIVE;
                 updateUser.subAgentApprovedAt = now;
                 updateUser.subAgentApprovedBy = adminId;
+                updateUser.agentProfile = {
+                    ...(user.agentProfile?.toObject ? user.agentProfile.toObject() : user.agentProfile || {}),
+                    enabled: true,
+                    code: referralCode,
+                    commissionPercent,
+                    approvedAt: now,
+                    approvedBy: adminId,
+                    groupId: approvedGroup._id,
+                    status: AGENT_PROFILE_STATUS.ACTIVE,
+                };
                 subAgentMarked = user.isSubAgent !== true;
+
+                if ((user.referredByAgentId || user.referredBy) && !user.referralCommissionStoppedAt) {
+                    await referralService.stopReferralCommissionForUser({
+                        userId: user._id,
+                        reason: REFERRAL_STOP_REASONS.PROMOTED_TO_SUB_AGENT,
+                        stoppedAt: now,
+                        actor,
+                        session,
+                    });
+                }
             }
 
             const updatedRequest = await GroupChangeRequest.findOneAndUpdate(
@@ -714,6 +774,9 @@ const approveGroupRequest = async (id, {
                         status: GROUP_REQUEST_STATUS.APPROVED,
                         approvedGroupId: approvedGroup?._id || null,
                         approvedGroupSnapshot: snapshotGroup(approvedGroup),
+                        approvedCommissionPercent: request.requestType === GROUP_REQUEST_TYPES.SUB_AGENT
+                            ? Number(approvedCommissionPercent)
+                            : null,
                         reviewedBy: adminId,
                         reviewedAt: now,
                         adminNote: trimOrNull(adminNote),

@@ -7,14 +7,20 @@ const REFERRAL_RELATIONSHIP_STATUS = Object.freeze({
 });
 
 const REFERRAL_COMMISSION_STATUS = Object.freeze({
+    PENDING: 'pending',
+    AVAILABLE: 'available',
+    PAID: 'paid',
+    CANCELLED: 'cancelled',
+
+    // Historical statuses retained so old records remain readable.
     CREDITED: 'CREDITED',
     SKIPPED: 'SKIPPED',
     REVERSED: 'REVERSED',
 });
 
 const REFERRAL_SOURCE_TYPES = Object.freeze({
-    DEPOSIT: 'DEPOSIT',
-    PAYMENT: 'PAYMENT',
+    MANUAL_DEPOSIT: 'manual_deposit',
+    PAYMENT: 'payment',
 });
 
 const REFERRAL_APPLY_TO = Object.freeze({
@@ -32,7 +38,7 @@ const DEFAULT_REFERRAL_SETTINGS = Object.freeze({
 });
 
 const ELIGIBLE_REFERRAL_SEMANTIC_TYPES = Object.freeze({
-    DEPOSIT_APPROVED: REFERRAL_SOURCE_TYPES.DEPOSIT,
+    DEPOSIT_APPROVED: REFERRAL_SOURCE_TYPES.MANUAL_DEPOSIT,
     CARD_PAYMENT_SUCCESS: REFERRAL_SOURCE_TYPES.PAYMENT,
 });
 

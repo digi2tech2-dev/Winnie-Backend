@@ -76,6 +76,7 @@ const adminGetRequest = catchAsync(async (req, res) => {
 const adminApproveRequest = catchAsync(async (req, res) => {
     const result = await groupRequestService.approveGroupRequest(req.params.id, {
         approvedGroupId: req.body.approvedGroupId || null,
+        approvedCommissionPercent: req.body.approvedCommissionPercent,
         adminNote: req.body.adminNote || null,
         adminId: req.user._id,
         actor: actorFrom(req),

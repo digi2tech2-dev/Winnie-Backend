@@ -40,6 +40,18 @@ const SUB_AGENT_STATUS = Object.freeze({
     REJECTED: 'REJECTED',
 });
 
+const AGENT_PROFILE_STATUS = Object.freeze({
+    ACTIVE: 'active',
+    INACTIVE: 'inactive',
+});
+
+const REFERRAL_STOP_REASONS = Object.freeze({
+    PROMOTED_TO_SUB_AGENT: 'promoted_to_sub_agent',
+    EXPIRED: 'expired',
+    ADMIN_REMOVED: 'admin_removed',
+    OTHER: 'other',
+});
+
 const DEFAULT_WHATSAPP_EVENT_PREFERENCES = Object.freeze({
     walletTopupCompleted: true,
     manualDepositApproved: true,
@@ -288,6 +300,39 @@ const userSchema = new mongoose.Schema(
             default: null,
         },
 
+        agentProfile: {
+            enabled: { type: Boolean, default: false, index: true },
+            code: {
+                type: String,
+                uppercase: true,
+                trim: true,
+                default: null,
+            },
+            commissionPercent: {
+                type: Number,
+                default: 0,
+                min: [0, 'Sub-agent commission percent cannot be negative'],
+                max: [100, 'Sub-agent commission percent cannot exceed 100'],
+            },
+            approvedAt: { type: Date, default: null },
+            approvedBy: {
+                type: mongoose.Schema.Types.ObjectId,
+                ref: 'User',
+                default: null,
+            },
+            groupId: {
+                type: mongoose.Schema.Types.ObjectId,
+                ref: 'Group',
+                default: null,
+            },
+            status: {
+                type: String,
+                enum: Object.values(AGENT_PROFILE_STATUS),
+                default: AGENT_PROFILE_STATUS.INACTIVE,
+                index: true,
+            },
+        },
+
         // ── Wallet ───────────────────────────────────────────────────────────
         /**
          * User's wallet balance in their local currency.
@@ -446,10 +491,45 @@ const userSchema = new mongoose.Schema(
             },
         },
 
-        // Placeholder only. Referral commissions are intentionally Phase 2 work.
         referredBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
+            default: null,
+        },
+
+        referredByAgentId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+            index: true,
+        },
+
+        referralCodeUsed: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            default: null,
+        },
+
+        referredAt: {
+            type: Date,
+            default: null,
+        },
+
+        referralCommissionEligibleUntil: {
+            type: Date,
+            default: null,
+            index: true,
+        },
+
+        referralCommissionStoppedAt: {
+            type: Date,
+            default: null,
+        },
+
+        referralCommissionStoppedReason: {
+            type: String,
+            enum: Object.values(REFERRAL_STOP_REASONS),
             default: null,
         },
 
@@ -471,6 +551,11 @@ const userSchema = new mongoose.Schema(
 userSchema.index({ role: 1 });
 userSchema.index({ permissions: 1 });
 userSchema.index({ groupId: 1 });
+userSchema.index({ 'agentProfile.code': 1 }, {
+    unique: true,
+    partialFilterExpression: { 'agentProfile.code': { $type: 'string' } },
+});
+userSchema.index({ 'agentProfile.enabled': 1, 'agentProfile.status': 1 });
 userSchema.index({ deletedAt: 1 }, { sparse: true });  // fast filter for non-deleted users
 userSchema.index(
     { username: 1 },
@@ -582,6 +667,6 @@ userSchema.methods.toSafeObject = function () {
 
 const User = mongoose.model('User', userSchema);
 
-module.exports = { User, ROLES, USER_STATUS, SUB_AGENT_STATUS };
+module.exports = { User, ROLES, USER_STATUS, SUB_AGENT_STATUS, AGENT_PROFILE_STATUS, REFERRAL_STOP_REASONS };
 module.exports.User = User; // CommonJS default export convenience
 module.exports.DEFAULT_WHATSAPP_EVENT_PREFERENCES = DEFAULT_WHATSAPP_EVENT_PREFERENCES;

@@ -310,7 +310,7 @@ const register = async ({ name, email, password, currency, country, phone, usern
             const relationshipResult = await referralService.createReferralRelationship({
                 inviterUserId: inviter._id,
                 invitedUserId: createdUser._id,
-                referralCode: inviter.referralCode,
+                referralCode: submittedInviteCode,
                 metadata: {
                     registrationEmail: createdUser.email,
                     source: 'auth-register',
@@ -646,7 +646,7 @@ const completeGoogleProfile = async (userId, updates = {}, auditContext = null) 
             const relationshipResult = await referralService.createReferralRelationship({
                 inviterUserId: inviter._id,
                 invitedUserId: user._id,
-                referralCode: inviter.referralCode,
+                referralCode: inviteCode,
                 metadata: {
                     registrationEmail: user.email,
                     source: 'google-complete-profile',

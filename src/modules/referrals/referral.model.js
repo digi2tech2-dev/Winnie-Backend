@@ -44,6 +44,24 @@ const referralRelationshipSchema = new mongoose.Schema(
             default: Date.now,
         },
 
+        eligibleUntil: {
+            type: Date,
+            default: null,
+            index: true,
+        },
+
+        stoppedAt: {
+            type: Date,
+            default: null,
+            index: true,
+        },
+
+        stoppedReason: {
+            type: String,
+            enum: ['promoted_to_sub_agent', 'expired', 'admin_removed', 'other', null],
+            default: null,
+        },
+
         metadata: {
             type: mongoose.Schema.Types.Mixed,
             default: undefined,
@@ -63,6 +81,13 @@ const referralCommissionSchema = new mongoose.Schema(
             index: true,
         },
 
+        agentId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+            index: true,
+        },
+
         invitedUserId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
@@ -70,11 +95,17 @@ const referralCommissionSchema = new mongoose.Schema(
             index: true,
         },
 
+        referredUserId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+            index: true,
+        },
+
         sourceWalletTransactionId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'WalletTransaction',
-            required: [true, 'sourceWalletTransactionId is required'],
-            unique: true,
+            default: null,
         },
 
         sourceType: {
@@ -103,6 +134,12 @@ const referralCommissionSchema = new mongoose.Schema(
             min: [0, 'sourceAmount cannot be negative'],
         },
 
+        topupAmount: {
+            type: Number,
+            default: null,
+            min: [0, 'topupAmount cannot be negative'],
+        },
+
         sourceCurrency: {
             type: String,
             required: [true, 'sourceCurrency is required'],
@@ -112,11 +149,27 @@ const referralCommissionSchema = new mongoose.Schema(
             maxlength: 3,
         },
 
+        topupCurrency: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            minlength: 3,
+            maxlength: 3,
+            default: null,
+        },
+
         commissionPercentage: {
             type: Number,
             required: [true, 'commissionPercentage is required'],
             min: [0, 'commissionPercentage cannot be negative'],
             max: [100, 'commissionPercentage cannot exceed 100'],
+        },
+
+        commissionPercent: {
+            type: Number,
+            default: null,
+            min: [0, 'commissionPercent cannot be negative'],
+            max: [100, 'commissionPercent cannot exceed 100'],
         },
 
         commissionAmount: {
@@ -159,6 +212,12 @@ const referralCommissionSchema = new mongoose.Schema(
             default: undefined,
         },
 
+        earnedAt: {
+            type: Date,
+            default: Date.now,
+            index: true,
+        },
+
         creditedAt: {
             type: Date,
             default: null,
@@ -172,9 +231,31 @@ const referralCommissionSchema = new mongoose.Schema(
     { timestamps: true }
 );
 
+referralCommissionSchema.pre('validate', function syncSubAgentCommissionAliases(next) {
+    if (!this.agentId && this.inviterUserId) this.agentId = this.inviterUserId;
+    if (!this.referredUserId && this.invitedUserId) this.referredUserId = this.invitedUserId;
+    if (this.topupAmount === null || this.topupAmount === undefined) this.topupAmount = this.sourceAmount;
+    if (!this.topupCurrency && this.sourceCurrency) this.topupCurrency = this.sourceCurrency;
+    if (this.commissionPercent === null || this.commissionPercent === undefined) {
+        this.commissionPercent = this.commissionPercentage;
+    }
+    if (!this.earnedAt) this.earnedAt = this.createdAt || new Date();
+    next();
+});
+
 referralCommissionSchema.index({ idempotencyKey: 1 }, { unique: true });
+referralCommissionSchema.index({ sourceWalletTransactionId: 1 }, {
+    unique: true,
+    partialFilterExpression: { sourceWalletTransactionId: { $type: 'objectId' } },
+});
+referralCommissionSchema.index({ sourceType: 1, sourceId: 1 }, {
+    unique: true,
+    partialFilterExpression: { sourceId: { $type: 'objectId' } },
+});
 referralCommissionSchema.index({ inviterUserId: 1, createdAt: -1 });
 referralCommissionSchema.index({ invitedUserId: 1, createdAt: -1 });
+referralCommissionSchema.index({ agentId: 1, earnedAt: -1 });
+referralCommissionSchema.index({ referredUserId: 1, earnedAt: -1 });
 referralCommissionSchema.index({ status: 1, createdAt: -1 });
 
 const ReferralRelationship = mongoose.model('ReferralRelationship', referralRelationshipSchema);
@@ -183,4 +264,5 @@ const ReferralCommission = mongoose.model('ReferralCommission', referralCommissi
 module.exports = {
     ReferralRelationship,
     ReferralCommission,
+    SubAgentCommission: ReferralCommission,
 };

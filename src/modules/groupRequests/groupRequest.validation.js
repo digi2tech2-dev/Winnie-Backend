@@ -81,6 +81,9 @@ const adminGroupRequestListValidation = [
 const approveGroupRequestValidation = [
     ...requestIdValidation,
     optionalMongoBody('approvedGroupId'),
+    body('approvedCommissionPercent')
+        .optional({ nullable: true })
+        .isFloat({ min: 0, max: 100 }).withMessage('approvedCommissionPercent must be between 0 and 100'),
     body('adminNote')
         .optional({ nullable: true })
         .isString().withMessage('adminNote must be a string')

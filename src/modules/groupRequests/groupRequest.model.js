@@ -53,6 +53,13 @@ const groupChangeRequestSchema = new mongoose.Schema(
             default: null,
         },
 
+        approvedCommissionPercent: {
+            type: Number,
+            default: null,
+            min: [0, 'approvedCommissionPercent cannot be negative'],
+            max: [100, 'approvedCommissionPercent cannot exceed 100'],
+        },
+
         reason: {
             type: String,
             trim: true,

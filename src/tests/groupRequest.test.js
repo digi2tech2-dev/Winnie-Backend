@@ -353,14 +353,16 @@ describe('Admin group/sub-agent request review', () => {
         expect(fresh.role).toBe(ROLES.CUSTOMER);
     });
 
-    it('admin approves SUB_AGENT without role escalation', async () => {
-        const { customer, admin } = await setupActors();
+    it('admin approves SUB_AGENT with required group and commission percent without role escalation', async () => {
+        const { customer, targetGroup, admin } = await setupActors();
         const request = await groupRequestService.createGroupRequest({
             userId: customer._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
         });
 
         await groupRequestService.approveGroupRequest(request.id, {
+            approvedGroupId: targetGroup._id,
+            approvedCommissionPercent: 1.5,
             adminId: admin._id,
         });
 
@@ -368,6 +370,8 @@ describe('Admin group/sub-agent request review', () => {
         expect(fresh.isSubAgent).toBe(true);
         expect(fresh.subAgentStatus).toBe(SUB_AGENT_STATUS.ACTIVE);
         expect(fresh.subAgentApprovedBy.toString()).toBe(admin._id.toString());
+        expect(fresh.groupId.toString()).toBe(targetGroup._id.toString());
+        expect(fresh.agentProfile.commissionPercent).toBe(1.5);
         expect(fresh.role).toBe(ROLES.CUSTOMER);
         expect(fresh.permissions).toEqual([]);
     });
@@ -381,6 +385,7 @@ describe('Admin group/sub-agent request review', () => {
 
         const result = await groupRequestService.approveGroupRequest(request.id, {
             approvedGroupId: targetGroup._id,
+            approvedCommissionPercent: 2,
             adminId: admin._id,
         });
 
@@ -521,7 +526,11 @@ describe('Group request permissions and side-effect boundaries', () => {
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
         });
 
-        await groupRequestService.approveGroupRequest(request.id, { adminId: admin._id });
+        await groupRequestService.approveGroupRequest(request.id, {
+            approvedGroupId: customer.groupId,
+            approvedCommissionPercent: 1,
+            adminId: admin._id,
+        });
 
         const fresh = await User.findById(customer._id);
         expect(fresh.role).toBe(ROLES.CUSTOMER);
