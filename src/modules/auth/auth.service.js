@@ -22,6 +22,13 @@ const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const config = require('../../config/config');
 const { User, ROLES, USER_STATUS } = require('../users/user.model');
+const { needsGoogleProfileCompletion } = require('../users/googleOnboarding');
+const { Currency } = require('../currency/currency.model');
+const { WalletTransaction } = require('../wallet/walletTransaction.model');
+const { Payment } = require('../payments/payment.model');
+const { PAYMENT_STATUSES } = require('../payments/payment.constants');
+const { Order } = require('../orders/order.model');
+const { DepositRequest, DEPOSIT_STATUS } = require('../deposits/deposit.model');
 const { getHighestPercentageGroupOrNull } = require('../groups/group.service');
 const referralService = require('../referrals/referral.service');
 const { sendVerificationEmail, sendTwoFactorOtpEmail } = require('../../services/email.service');
@@ -30,6 +37,7 @@ const {
     ConflictError,
     BusinessRuleError,
     NotFoundError,
+    ValidationError,
     UserBlockedError,
 } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
@@ -93,6 +101,57 @@ const timingSafeCompareHex = (left, right) => {
         );
     } catch {
         return false;
+    }
+};
+
+const normalizeCurrencyCode = (currency) => String(currency || '').trim().toUpperCase();
+
+const validateActiveCurrencyForOnboarding = async (currency) => {
+    const code = normalizeCurrencyCode(currency);
+    if (!code) {
+        throw new ValidationError('Currency is required during onboarding.', [
+            { field: 'currency', message: 'Currency is required during onboarding.' },
+        ]);
+    }
+
+    if (!/^[A-Z]{3}$/.test(code)) {
+        throw new ValidationError('Currency must be a 3-letter ISO 4217 code.', [
+            { field: 'currency', message: 'Currency must be a 3-letter ISO 4217 code.' },
+        ]);
+    }
+
+    const currencyDoc = await Currency.findOne({ code, isActive: true });
+    if (!currencyDoc) {
+        throw new ValidationError('Choose an active supported currency.', [
+            { field: 'currency', message: 'Choose an active supported currency.' },
+        ]);
+    }
+
+    return code;
+};
+
+const assertNoFinancialActivityForOnboardingCurrency = async (user) => {
+    const userId = user._id;
+    const walletBalance = Number(user.walletBalance || 0);
+    if (walletBalance !== 0) {
+        throw new BusinessRuleError(
+            'Currency cannot be selected after wallet activity has started.',
+            'GOOGLE_ONBOARDING_CURRENCY_LOCKED'
+        );
+    }
+
+    const [walletTransactions, successfulPayments, orders, approvedDeposits] = await Promise.all([
+        WalletTransaction.countDocuments({ userId }),
+        Payment.countDocuments({ userId, status: PAYMENT_STATUSES.SUCCEEDED }),
+        Order.countDocuments({ userId }),
+        DepositRequest.countDocuments({ userId, status: DEPOSIT_STATUS.APPROVED }),
+    ]);
+
+    if (walletTransactions || successfulPayments || orders || approvedDeposits) {
+        throw new BusinessRuleError(
+            'Currency cannot be selected after financial activity has started.',
+            'GOOGLE_ONBOARDING_CURRENCY_LOCKED'
+        );
     }
 };
 
@@ -532,6 +591,95 @@ const resendVerification = async (email) => {
  * @param {Object} user  — User document from Passport strategy
  * @returns {{ token: string, user: Object, message?: string }}
  */
+const completeGoogleProfile = async (userId, updates = {}, auditContext = null) => {
+    const user = await User.findById(userId);
+    if (!user) throw new NotFoundError('User');
+
+    if (user.deletedAt) {
+        throw new AuthenticationError('This account is no longer available. Please contact support.');
+    }
+
+    if (!user.googleId) {
+        throw new BusinessRuleError(
+            'Google profile completion is only available for Google Sign-In accounts.',
+            'GOOGLE_ONBOARDING_REQUIRED'
+        );
+    }
+
+    if (!needsGoogleProfileCompletion(user)) {
+        throw new BusinessRuleError(
+            'This profile has already been completed.',
+            'GOOGLE_PROFILE_ALREADY_COMPLETED'
+        );
+    }
+
+    await assertNoFinancialActivityForOnboardingCurrency(user);
+
+    const submittedCurrency = normalizeCurrencyCode(updates.currency);
+    const fallbackCurrency = user.currency ? normalizeCurrencyCode(user.currency) : 'USD';
+    const currency = await validateActiveCurrencyForOnboarding(submittedCurrency || fallbackCurrency);
+    const country = String(updates.country || '').trim();
+    const phone = String(updates.phone || '').trim();
+    const inviteCode = String(updates.inviteCode || updates.referralCode || '').trim();
+
+    if (!country) {
+        throw new ValidationError('Country is required during onboarding.', [
+            { field: 'country', message: 'Country is required during onboarding.' },
+        ]);
+    }
+
+    const inviter = inviteCode
+        ? await referralService.resolveInviteCodeOrThrow(inviteCode, { email: user.email, userId: user._id })
+        : null;
+
+    user.country = country;
+    user.currency = currency;
+    if (phone) user.phone = phone;
+    user.profileCompletedAt = new Date();
+
+    let referralRelationship = null;
+    if (inviter) {
+        const session = await mongoose.startSession();
+        try {
+            session.startTransaction();
+            await user.save({ session });
+            const relationshipResult = await referralService.createReferralRelationship({
+                inviterUserId: inviter._id,
+                invitedUserId: user._id,
+                referralCode: inviter.referralCode,
+                metadata: {
+                    registrationEmail: user.email,
+                    source: 'google-complete-profile',
+                },
+                session,
+            });
+            referralRelationship = relationshipResult.relationship;
+            await session.commitTransaction();
+        } catch (err) {
+            if (session.inTransaction()) await session.abortTransaction();
+            throw err;
+        } finally {
+            try { session.endSession(); } catch (_) { /* noop */ }
+        }
+    } else {
+        await user.save();
+    }
+
+    if (referralRelationship) {
+        referralService.auditRelationshipCreated(referralRelationship, {
+            actorId: auditContext?.actorId ?? user._id,
+            actorRole: auditContext?.actorRole ?? ACTOR_ROLES.CUSTOMER,
+            ipAddress: auditContext?.ipAddress ?? null,
+            userAgent: auditContext?.userAgent ?? null,
+        });
+    }
+
+    return {
+        user: user.toSafeObject(),
+        needsProfileCompletion: false,
+    };
+};
+
 const loginWithGoogle = (user) => {
     if (user.blockedAt) {
         createAuditLog({
@@ -706,6 +854,7 @@ module.exports = {
     login,
     verifyEmail,
     resendVerification,
+    completeGoogleProfile,
     loginWithGoogle,
     generate2FASecret,
     enable2FA,

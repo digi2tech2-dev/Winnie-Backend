@@ -342,6 +342,11 @@ const userSchema = new mongoose.Schema(
             match: [/^[A-Z]{3}$/, 'currency must be a 3-letter ISO 4217 code (e.g. USD, SAR)'],
         },
 
+        profileCompletedAt: {
+            type: Date,
+            default: null,
+        },
+
         // ── Identity Verification Hold ────────────────────────────────────────
         /**
          * Admin-controlled support hold. Users can still authenticate and view
@@ -496,6 +501,11 @@ userSchema.virtual('displayStatus').get(function () {
     if (this.deletedAt) return 'DELETED';
     if (this.blockedAt) return 'BLOCKED';
     return this.status;
+});
+
+userSchema.virtual('needsProfileCompletion').get(function () {
+    const { needsGoogleProfileCompletion } = require('./googleOnboarding');
+    return needsGoogleProfileCompletion(this);
 });
 
 /**

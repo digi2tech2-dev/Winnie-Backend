@@ -114,10 +114,41 @@ const verify2FAValidation = [
         .withMessage('tempToken or requestId is required'),
 ];
 
+const googleCompleteProfileValidation = [
+    body('country')
+        .trim()
+        .notEmpty().withMessage('country is required')
+        .isLength({ max: 100 }).withMessage('country cannot exceed 100 characters'),
+
+    body('currency')
+        .optional({ nullable: true })
+        .trim()
+        .isString().withMessage('currency must be a string')
+        .matches(/^[A-Za-z]{3}$/).withMessage('currency must be a 3-letter ISO 4217 code'),
+
+    body('phone')
+        .optional({ nullable: true })
+        .trim()
+        .isLength({ max: 30 }).withMessage('phone cannot exceed 30 characters'),
+
+    body('inviteCode')
+        .optional({ nullable: true })
+        .trim()
+        .isString().withMessage('inviteCode must be a string')
+        .isLength({ min: 3, max: 32 }).withMessage('inviteCode must be between 3 and 32 characters'),
+
+    body('referralCode')
+        .optional({ nullable: true })
+        .trim()
+        .isString().withMessage('referralCode must be a string')
+        .isLength({ min: 3, max: 32 }).withMessage('referralCode must be between 3 and 32 characters'),
+];
+
 module.exports = {
     registerValidation,
     loginValidation,
     enable2FAValidation,
     disable2FAValidation,
     verify2FAValidation,
+    googleCompleteProfileValidation,
 };

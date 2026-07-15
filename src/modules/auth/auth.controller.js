@@ -117,6 +117,11 @@ const resendVerification = catchAsync(async (req, res) => {
     sendSuccess(res, null, result.message);
 });
 
+const completeGoogleProfile = catchAsync(async (req, res) => {
+    const result = await authService.completeGoogleProfile(req.user._id, req.body, req.auditContext);
+    sendSuccess(res, result, 'Google profile completed successfully.');
+});
+
 // ─── Google OAuth ─────────────────────────────────────────────────────────────
 
 /**
@@ -152,5 +157,6 @@ module.exports = {
     verify2FA,
     verifyEmail,
     resendVerification,
+    completeGoogleProfile,
     googleCallback,
 };

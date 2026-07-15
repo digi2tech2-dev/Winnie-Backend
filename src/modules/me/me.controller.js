@@ -18,6 +18,7 @@ const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/
 const catchAsync = require('../../shared/utils/catchAsync');
 const { NotFoundError } = require('../../shared/errors/AppError');
 const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
+const { needsGoogleProfileCompletion } = require('../users/googleOnboarding');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -50,6 +51,9 @@ const getProfile = catchAsync(async (req, res) => {
         status: user.status,
         verified: user.verified,
         currency: user.currency,
+        profileCompletedAt: user.profileCompletedAt,
+        needsProfileCompletion: needsGoogleProfileCompletion(user),
+        needsOnboarding: needsGoogleProfileCompletion(user),
         identityVerificationRequired: user.identityVerificationRequired === true,
         identityVerificationReason: user.identityVerificationReason || null,
         walletBalance: user.walletBalance,

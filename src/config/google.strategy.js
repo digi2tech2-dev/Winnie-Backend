@@ -40,6 +40,9 @@ const findOrCreateGoogleUser = async (profile) => {
         if (user.deletedAt) return user;
         user.googleId = googleId;
         user.verified = true;
+        if (!user.profileCompletedAt && user.country) {
+            user.profileCompletedAt = new Date();
+        }
         await user.save();
         return user;
     }
@@ -99,6 +102,9 @@ if (config.google.clientId && config.google.clientSecret) {
                         // Link the Google profile to the existing account
                         user.googleId = googleId;
                         user.verified = true;   // email already confirmed via Google
+                        if (!user.profileCompletedAt && user.country) {
+                            user.profileCompletedAt = new Date();
+                        }
                         await user.save();
                         return done(null, user);
                     }

@@ -15,7 +15,12 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 const { User, USER_STATUS } = require('../modules/users/user.model');
 const Group = require('../modules/groups/group.model');
-const { register, login, verifyEmail, resendVerification } = require('../modules/auth/auth.service');
+const { Currency } = require('../modules/currency/currency.model');
+const {
+    WalletTransaction,
+    TRANSACTION_TYPES,
+} = require('../modules/wallet/walletTransaction.model');
+const { register, login, verifyEmail, resendVerification, completeGoogleProfile } = require('../modules/auth/auth.service');
 const { findOrCreateGoogleUser } = require('../config/google.strategy');
 const {
     connectTestDB,
@@ -64,6 +69,23 @@ const registerUser = async () => {
 
     return { user: dbUser, rawToken: known };
 };
+
+const seedOnboardingCurrencies = () => Currency.create([
+    {
+        code: 'USD',
+        name: 'US Dollar',
+        symbol: '$',
+        platformRate: 1,
+        isActive: true,
+    },
+    {
+        code: 'EGP',
+        name: 'Egyptian Pound',
+        symbol: 'EGP',
+        platformRate: 50,
+        isActive: true,
+    },
+]);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // [1] Registration
@@ -186,6 +208,95 @@ describe('[1] Registration', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // [2] Email Verification
 // ─────────────────────────────────────────────────────────────────────────────
+
+describe('[1.5] Google complete-profile onboarding', () => {
+    beforeEach(async () => {
+        await createGroup({ name: 'Default', percentage: 0 });
+        await seedOnboardingCurrencies();
+    });
+
+    const createIncompleteGoogleUser = () => findOrCreateGoogleUser({
+        id: `google-onboarding-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        displayName: 'Google Onboarding',
+        emails: [{ value: `google-onboarding-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com` }],
+    });
+
+    it('allows an incomplete Google user to select currency once and completes the profile', async () => {
+        const user = await createIncompleteGoogleUser();
+
+        const result = await completeGoogleProfile(user._id, {
+            country: 'Egypt',
+            currency: 'EGP',
+            phone: '+201001002003',
+        });
+
+        expect(result.user.currency).toBe('EGP');
+        expect(result.user.country).toBe('Egypt');
+        expect(result.user.phone).toBe('+201001002003');
+        expect(result.user.profileCompletedAt).toBeTruthy();
+        expect(result.needsProfileCompletion).toBe(false);
+
+        const fresh = await User.findById(user._id);
+        expect(fresh.currency).toBe('EGP');
+        expect(fresh.profileCompletedAt).toBeTruthy();
+    });
+
+    it('does not allow the same Google user to change currency after profile completion', async () => {
+        const user = await createIncompleteGoogleUser();
+        await completeGoogleProfile(user._id, { country: 'Egypt', currency: 'EGP' });
+
+        await expect(completeGoogleProfile(user._id, { country: 'Egypt', currency: 'USD' }))
+            .rejects.toMatchObject({ code: 'GOOGLE_PROFILE_ALREADY_COMPLETED' });
+
+        const fresh = await User.findById(user._id);
+        expect(fresh.currency).toBe('EGP');
+    });
+
+    it('rejects inactive or unknown currencies', async () => {
+        await Currency.findOneAndUpdate({ code: 'EGP' }, { isActive: false });
+        const user = await createIncompleteGoogleUser();
+
+        await expect(completeGoogleProfile(user._id, { country: 'Egypt', currency: 'EGP' }))
+            .rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+
+        const fresh = await User.findById(user._id);
+        expect(fresh.currency).toBe('USD');
+        expect(fresh.profileCompletedAt).toBeNull();
+    });
+
+    it('rejects onboarding currency selection when financial activity exists', async () => {
+        const user = await createIncompleteGoogleUser();
+        await WalletTransaction.create({
+            userId: user._id,
+            type: TRANSACTION_TYPES.CREDIT,
+            amount: 10,
+            balanceBefore: 0,
+            balanceAfter: 10,
+            currency: 'USD',
+            description: 'Existing activity',
+        });
+
+        await expect(completeGoogleProfile(user._id, { country: 'Egypt', currency: 'EGP' }))
+            .rejects.toMatchObject({ code: 'GOOGLE_ONBOARDING_CURRENCY_LOCKED' });
+
+        const fresh = await User.findById(user._id);
+        expect(fresh.currency).toBe('USD');
+        expect(fresh.profileCompletedAt).toBeNull();
+    });
+
+    it('does not overwrite existing user currency unless Google onboarding is still allowed', async () => {
+        const user = await createIncompleteGoogleUser();
+        user.country = 'Egypt';
+        user.profileCompletedAt = new Date();
+        await user.save();
+
+        await expect(completeGoogleProfile(user._id, { country: 'Egypt', currency: 'EGP' }))
+            .rejects.toMatchObject({ code: 'GOOGLE_PROFILE_ALREADY_COMPLETED' });
+
+        const fresh = await User.findById(user._id);
+        expect(fresh.currency).toBe('USD');
+    });
+});
 
 describe('[2] Email Verification', () => {
     it('marks a pending user as verified and active, then clears the token', async () => {
