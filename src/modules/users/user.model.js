@@ -470,6 +470,13 @@ const userSchema = new mongoose.Schema(
             default: null,
         },
 
+        referralCommissionPercentOverride: {
+            type: Number,
+            default: null,
+            min: [0, 'Referral commission percent cannot be negative'],
+            max: [100, 'Referral commission percent cannot exceed 100'],
+        },
+
         whatsappNotifications: {
             enabled: { type: Boolean, default: false },
             phone: { type: String, trim: true, default: null, maxlength: 30 },

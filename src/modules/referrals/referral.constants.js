@@ -28,10 +28,13 @@ const REFERRAL_APPLY_TO = Object.freeze({
 });
 
 const REFERRAL_SETTINGS_KEY = 'referrals';
+const DEFAULT_REFERRAL_COMMISSION_PERCENT = Number(process.env.REFERRAL_DEFAULT_COMMISSION_PERCENT ?? 1);
 
 const DEFAULT_REFERRAL_SETTINGS = Object.freeze({
     enabled: true,
-    depositCommissionPercentage: 0,
+    depositCommissionPercentage: Number.isFinite(DEFAULT_REFERRAL_COMMISSION_PERCENT)
+        ? DEFAULT_REFERRAL_COMMISSION_PERCENT
+        : 1,
     applyTo: REFERRAL_APPLY_TO.EVERY_ELIGIBLE_WALLET_CREDIT,
     minSourceAmount: null,
     maxCommissionAmount: null,

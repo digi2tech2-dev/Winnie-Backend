@@ -72,7 +72,7 @@ const DEFAULT_SETTINGS = [
         key: 'referrals',
         value: {
             enabled: true,
-            depositCommissionPercentage: 0,
+            depositCommissionPercentage: 1,
             applyTo: 'EVERY_ELIGIBLE_WALLET_CREDIT',
             minSourceAmount: null,
             maxCommissionAmount: null,

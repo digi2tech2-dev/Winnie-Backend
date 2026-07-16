@@ -11,6 +11,7 @@ const { ReferralRelationship, ReferralCommission } = require('../modules/referra
 const { GROUP_REQUEST_TYPES, GROUP_REQUEST_STATUS } = require('../modules/groupRequests/groupRequest.constants');
 const { PAYMENT_GATEWAYS } = require('../modules/payments/payment.constants');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
+const { Currency } = require('../modules/currency/currency.model');
 const {
     connectTestDB,
     disconnectTestDB,
@@ -273,6 +274,136 @@ describe('Sub-agent referral and commission rules', () => {
         expect(commission.sourceType).toBe('manual_deposit');
         expect(commission.topupAmount).toBe(500);
         expect(commission.commissionAmount).toBe(5);
+    });
+
+    it('normal user with no override uses default referral commission 1%', async () => {
+        const group = await createGroup();
+        const admin = await createAdmin({ groupId: group._id });
+        const referrer = await createCustomer({ groupId: group._id, walletBalance: 0, currency: 'USD' });
+        const referred = await createReferredCustomer(referrer, group);
+
+        const deposit = await createPendingDeposit(referred._id, { requestedAmount: 500, amountUsd: 500 });
+        await depositService.approveDeposit(deposit._id, admin._id);
+
+        const commission = await ReferralCommission.findOne({ inviterUserId: referrer._id });
+        expect(commission.status).toBe('pending');
+        expect(commission.commissionPercent).toBe(1);
+        expect(commission.commissionAmount).toBe(5);
+        expect(commission.commissionCurrency).toBe('USD');
+    });
+
+    it('admin can set and reset a custom referral commission percent', async () => {
+        const group = await createGroup();
+        const admin = await createAdmin({ groupId: group._id });
+        const referrer = await createCustomer({ groupId: group._id, walletBalance: 0 });
+
+        const custom = await referralService.updateSubAgent(referrer._id, { commissionPercent: 2.25 }, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+        expect(custom.referralCommissionPercentOverride).toBe(2.25);
+        expect(custom.commissionPercentEffective).toBe(2.25);
+        expect(custom.usingDefaultCommission).toBe(false);
+
+        const reset = await referralService.updateSubAgent(referrer._id, { useDefault: true }, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+        expect(reset.referralCommissionPercentOverride).toBeNull();
+        expect(reset.commissionPercentEffective).toBe(1);
+        expect(reset.usingDefaultCommission).toBe(true);
+    });
+
+    it('custom referral commission percent 0 is respected and creates no commission', async () => {
+        const group = await createGroup();
+        const admin = await createAdmin({ groupId: group._id });
+        const referrer = await createCustomer({ groupId: group._id, walletBalance: 0 });
+        const referred = await createReferredCustomer(referrer, group);
+        await referralService.updateSubAgent(referrer._id, { commissionPercent: 0 }, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+
+        const deposit = await createPendingDeposit(referred._id);
+        await depositService.approveDeposit(deposit._id, admin._id);
+
+        expect(await ReferralCommission.countDocuments()).toBe(0);
+    });
+
+    it('admin referrals page includes users with referred signups or custom override before top-up', async () => {
+        const group = await createGroup();
+        const admin = await createAdmin({ groupId: group._id });
+        const referrer = await createCustomer({ groupId: group._id, walletBalance: 0 });
+        const overrideOnly = await createCustomer({ groupId: group._id, walletBalance: 0 });
+        await createReferredCustomer(referrer, group);
+        await referralService.updateSubAgent(overrideOnly._id, { commissionPercent: 3 }, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+
+        const result = await referralService.listSubAgents({ page: 1, limit: 20 });
+        const ids = result.subAgents.map((agent) => agent.userId);
+        expect(ids).toContain(referrer._id.toString());
+        expect(ids).toContain(overrideOnly._id.toString());
+        expect(result.subAgents.find((agent) => agent.userId === referrer._id.toString()).referredUsersCount).toBe(1);
+        expect(await ReferralCommission.countDocuments()).toBe(0);
+    });
+
+    it('changing custom referral percent affects future commissions only', async () => {
+        const group = await createGroup();
+        const admin = await createAdmin({ groupId: group._id });
+        const referrer = await createCustomer({ groupId: group._id, walletBalance: 0 });
+        const referred = await createReferredCustomer(referrer, group);
+
+        await referralService.updateSubAgent(referrer._id, { commissionPercent: 1 }, { actorId: admin._id, actorRole: 'ADMIN' });
+        const first = await createPendingDeposit(referred._id, { requestedAmount: 100, amountUsd: 100 });
+        await depositService.approveDeposit(first._id, admin._id);
+
+        await referralService.updateSubAgent(referrer._id, { commissionPercent: 2 }, { actorId: admin._id, actorRole: 'ADMIN' });
+        const second = await createPendingDeposit(referred._id, { requestedAmount: 100, amountUsd: 100 });
+        await depositService.approveDeposit(second._id, admin._id);
+
+        const commissions = await ReferralCommission.find({ inviterUserId: referrer._id }).sort({ earnedAt: 1 });
+        expect(commissions[0].commissionPercent).toBe(1);
+        expect(commissions[0].commissionAmount).toBe(1);
+        expect(commissions[1].commissionPercent).toBe(2);
+        expect(commissions[1].commissionAmount).toBe(2);
+    });
+
+    it('converts cross-currency commission into referrer account currency', async () => {
+        const group = await createGroup();
+        const admin = await createAdmin({ groupId: group._id });
+        await Currency.create({
+            code: 'EGP',
+            name: 'Egyptian Pound',
+            symbol: 'E£',
+            platformRate: 50,
+            marketRate: 50,
+            isActive: true,
+        });
+        const referrer = await createCustomer({ groupId: group._id, walletBalance: 0, currency: 'USD' });
+        const referred = await createReferredCustomer(referrer, group, { currency: 'EGP' });
+        await referralService.updateSubAgent(referrer._id, { commissionPercent: 2 }, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+
+        const deposit = await createPendingDeposit(referred._id, {
+            requestedAmount: 1000,
+            currency: 'EGP',
+            exchangeRate: 50,
+            amountUsd: 20,
+        });
+        await depositService.approveDeposit(deposit._id, admin._id);
+
+        const commission = await ReferralCommission.findOne({ inviterUserId: referrer._id });
+        expect(commission.sourceTopupAmount).toBe(1000);
+        expect(commission.sourceTopupCurrency).toBe('EGP');
+        expect(commission.commissionOriginalAmount).toBe(20);
+        expect(commission.commissionOriginalCurrency).toBe('EGP');
+        expect(commission.commissionAmount).toBe(0.4);
+        expect(commission.commissionCurrency).toBe('USD');
+        expect(commission.fxRateUsed).toBe(0.02);
     });
 
     it('sub-agent request without proof image is rejected', async () => {

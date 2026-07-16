@@ -173,6 +173,8 @@ router.patch(
     authorizeRoles('ADMIN'),
     param('userId').isMongoId(),
     body('commissionPercent').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
+    body('referralCommissionPercentOverride').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
+    body('useDefault').optional().isBoolean().toBoolean(),
     body('groupId').optional({ nullable: true, checkFalsy: true }).isMongoId(),
     body('status').optional().isIn(['active', 'inactive']),
     body('active').optional().isBoolean(),

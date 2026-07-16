@@ -158,6 +158,21 @@ const referralCommissionSchema = new mongoose.Schema(
             default: null,
         },
 
+        sourceTopupAmount: {
+            type: Number,
+            default: null,
+            min: [0, 'sourceTopupAmount cannot be negative'],
+        },
+
+        sourceTopupCurrency: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            minlength: 3,
+            maxlength: 3,
+            default: null,
+        },
+
         commissionPercentage: {
             type: Number,
             required: [true, 'commissionPercentage is required'],
@@ -178,6 +193,21 @@ const referralCommissionSchema = new mongoose.Schema(
             min: [0, 'commissionAmount cannot be negative'],
         },
 
+        commissionOriginalAmount: {
+            type: Number,
+            default: null,
+            min: [0, 'commissionOriginalAmount cannot be negative'],
+        },
+
+        commissionOriginalCurrency: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            minlength: 3,
+            maxlength: 3,
+            default: null,
+        },
+
         commissionCurrency: {
             type: String,
             required: [true, 'commissionCurrency is required'],
@@ -185,6 +215,40 @@ const referralCommissionSchema = new mongoose.Schema(
             trim: true,
             minlength: 3,
             maxlength: 3,
+        },
+
+        referrerCurrency: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            minlength: 3,
+            maxlength: 3,
+            default: null,
+        },
+
+        agentCurrency: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            minlength: 3,
+            maxlength: 3,
+            default: null,
+        },
+
+        fxRateUsed: {
+            type: Number,
+            default: null,
+            min: [0, 'fxRateUsed cannot be negative'],
+        },
+
+        fxSnapshotAt: {
+            type: Date,
+            default: null,
+        },
+
+        fxMetadata: {
+            type: mongoose.Schema.Types.Mixed,
+            default: undefined,
         },
 
         walletTransactionId: {
@@ -236,9 +300,19 @@ referralCommissionSchema.pre('validate', function syncSubAgentCommissionAliases(
     if (!this.referredUserId && this.invitedUserId) this.referredUserId = this.invitedUserId;
     if (this.topupAmount === null || this.topupAmount === undefined) this.topupAmount = this.sourceAmount;
     if (!this.topupCurrency && this.sourceCurrency) this.topupCurrency = this.sourceCurrency;
+    if (this.sourceTopupAmount === null || this.sourceTopupAmount === undefined) this.sourceTopupAmount = this.sourceAmount;
+    if (!this.sourceTopupCurrency && this.sourceCurrency) this.sourceTopupCurrency = this.sourceCurrency;
     if (this.commissionPercent === null || this.commissionPercent === undefined) {
         this.commissionPercent = this.commissionPercentage;
     }
+    if (this.commissionOriginalAmount === null || this.commissionOriginalAmount === undefined) {
+        this.commissionOriginalAmount = this.commissionAmount;
+    }
+    if (!this.commissionOriginalCurrency && this.sourceCurrency) this.commissionOriginalCurrency = this.sourceCurrency;
+    if (!this.referrerCurrency && this.commissionCurrency) this.referrerCurrency = this.commissionCurrency;
+    if (!this.agentCurrency && this.commissionCurrency) this.agentCurrency = this.commissionCurrency;
+    if (this.fxRateUsed === null || this.fxRateUsed === undefined) this.fxRateUsed = 1;
+    if (!this.fxSnapshotAt) this.fxSnapshotAt = this.earnedAt || this.createdAt || new Date();
     if (!this.earnedAt) this.earnedAt = this.createdAt || new Date();
     next();
 });

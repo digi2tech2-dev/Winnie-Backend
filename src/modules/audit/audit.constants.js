@@ -82,6 +82,9 @@ const REFERRAL_ACTIONS = Object.freeze({
     COMMISSION_CREDITED: 'REFERRAL_COMMISSION_CREDITED',
     COMMISSION_SKIPPED: 'REFERRAL_COMMISSION_SKIPPED',
     SETTINGS_UPDATED: 'REFERRAL_SETTINGS_UPDATED',
+    REFERRAL_COMMISSION_PERCENT_UPDATED: 'referral_commission_percent_updated',
+    REFERRAL_COMMISSION_PERCENT_RESET_TO_DEFAULT: 'referral_commission_percent_reset_to_default',
+    REFERRAL_DEFAULT_COMMISSION_PERCENT_UPDATED: 'referral_default_commission_percent_updated',
     SUB_AGENT_REQUEST_CREATED: 'sub_agent_request_created',
     SUB_AGENT_REQUEST_APPROVED: 'sub_agent_request_approved',
     SUB_AGENT_REQUEST_REJECTED: 'sub_agent_request_rejected',
@@ -89,6 +92,7 @@ const REFERRAL_ACTIONS = Object.freeze({
     SUB_AGENT_GROUP_UPDATED: 'sub_agent_group_updated',
     SUB_AGENT_STATUS_UPDATED: 'sub_agent_status_updated',
     SUB_AGENT_COMMISSION_CREATED: 'sub_agent_commission_created',
+    REFERRAL_COMMISSION_CREATED: 'referral_commission_created',
     REFERRAL_COMMISSION_STOPPED: 'referral_commission_stopped',
 });
 

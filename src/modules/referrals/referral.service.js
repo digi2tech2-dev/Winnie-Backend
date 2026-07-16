@@ -26,6 +26,7 @@ const {
 const { safeCreateNotification } = require('../notifications/notification.service');
 const { NOTIFICATION_TYPES, NOTIFICATION_PRIORITIES } = require('../notifications/notification.model');
 const { toDecimal, toFiat } = require('../../shared/utils/decimalPrecision');
+const { getConversionRate } = require('../../services/currencyConverter.service');
 const {
     NotFoundError,
     BusinessRuleError,
@@ -81,11 +82,20 @@ const getAgentCommissionPercent = (user) => {
     return Number.isFinite(percent) ? percent : 0;
 };
 
-const getReferralCommissionPercent = (user, settings = {}) => {
-    const agentPercent = getAgentCommissionPercent(user);
-    if (agentPercent > 0) return agentPercent;
+const getReferralCommissionOverride = (user) => {
+    if (user?.referralCommissionPercentOverride === null || user?.referralCommissionPercentOverride === undefined) {
+        return null;
+    }
 
-    const settingsPercent = Number(settings.depositCommissionPercentage ?? 0);
+    const percent = Number(user.referralCommissionPercentOverride);
+    return Number.isFinite(percent) ? percent : null;
+};
+
+const getReferralCommissionPercent = (user, settings = {}) => {
+    const overridePercent = getReferralCommissionOverride(user);
+    if (overridePercent !== null) return overridePercent;
+
+    const settingsPercent = Number(settings.depositCommissionPercentage ?? DEFAULT_REFERRAL_SETTINGS.depositCommissionPercentage);
     return Number.isFinite(settingsPercent) ? settingsPercent : 0;
 };
 
@@ -620,7 +630,7 @@ const getReferredUsers = async (agentId, { page = 1, limit = 50 } = {}) => {
 
 const getReferralSummary = async (userId) => {
     const user = await User.findById(userId)
-        .select('_id name email referralCode referredBy referredByAgentId currency isSubAgent subAgentStatus agentProfile')
+        .select('_id name email referralCode referredBy referredByAgentId currency isSubAgent subAgentStatus agentProfile referralCommissionPercentOverride')
         .populate('agentProfile.groupId', 'name percentage isActive')
         .lean();
     if (!user) throw new NotFoundError('User');
@@ -645,13 +655,15 @@ const getReferralSummary = async (userId) => {
             .populate('invitedUserId', 'name email')
             .lean(),
     ]);
+    const effectiveCommissionPercent = getReferralCommissionPercent(user, settings);
+    const overridePercent = getReferralCommissionOverride(user);
 
     return {
         isSubAgent: isAgent,
         agentProfile: {
             enabled: user.agentProfile?.enabled === true,
             code: referralCode,
-            commissionPercent: getAgentCommissionPercent(user),
+            commissionPercent: effectiveCommissionPercent,
             approvedAt: user.agentProfile?.approvedAt || user.subAgentApprovedAt || null,
             approvedBy: toIdString(user.agentProfile?.approvedBy || user.subAgentApprovedBy),
             group: user.agentProfile?.groupId || null,
@@ -673,9 +685,13 @@ const getReferralSummary = async (userId) => {
             count: item.count,
         })),
         recentCommissions,
+        commissionPercentEffective: effectiveCommissionPercent,
+        referralCommissionPercentOverride: overridePercent,
+        usingDefaultCommission: overridePercent === null,
         settings: {
             enabled: settings.enabled,
-            depositCommissionPercentage: getReferralCommissionPercent(user, settings),
+            depositCommissionPercentage: effectiveCommissionPercent,
+            defaultDepositCommissionPercentage: settings.depositCommissionPercentage,
             applyTo: REFERRAL_APPLY_TO.EVERY_ELIGIBLE_WALLET_CREDIT,
             minSourceAmount: settings.minSourceAmount,
             maxCommissionAmount: settings.maxCommissionAmount,
@@ -741,13 +757,74 @@ const calculateCommission = ({ sourceAmount, percentage }) => {
     return commissionAmount;
 };
 
+const convertCommissionToReferrerCurrency = async ({
+    commissionOriginalAmount,
+    sourceCurrency,
+    referrerCurrency,
+} = {}) => {
+    const originalCurrency = normalizeCurrency(sourceCurrency);
+    const targetCurrency = normalizeCurrency(referrerCurrency);
+    const originalAmount = toFiat(commissionOriginalAmount);
+    const snapshotAt = new Date();
+
+    if (originalCurrency === targetCurrency) {
+        return {
+            commissionAmount: originalAmount,
+            commissionCurrency: targetCurrency,
+            commissionOriginalAmount: originalAmount,
+            commissionOriginalCurrency: originalCurrency,
+            referrerCurrency: targetCurrency,
+            agentCurrency: targetCurrency,
+            fxRateUsed: 1,
+            fxSnapshotAt: snapshotAt,
+            fxMetadata: {
+                sourceCurrency: originalCurrency,
+                sourceRate: 1,
+                targetCurrency,
+                targetRate: 1,
+                conversion: 'same_currency',
+            },
+        };
+    }
+
+    const [sourceRate, targetRate] = await Promise.all([
+        getConversionRate(originalCurrency),
+        getConversionRate(targetCurrency),
+    ]);
+
+    if (!sourceRate || sourceRate <= 0 || !targetRate || targetRate <= 0) {
+        throw new BusinessRuleError('Currency conversion rate is unavailable for referral commission.', 'REFERRAL_COMMISSION_FX_UNAVAILABLE');
+    }
+
+    const fxRateUsed = Number(toDecimal(targetRate).dividedBy(toDecimal(sourceRate)).toDecimalPlaces(8).toNumber());
+    const commissionAmount = toFiat(toDecimal(originalAmount).times(toDecimal(fxRateUsed)));
+
+    return {
+        commissionAmount,
+        commissionCurrency: targetCurrency,
+        commissionOriginalAmount: originalAmount,
+        commissionOriginalCurrency: originalCurrency,
+        referrerCurrency: targetCurrency,
+        agentCurrency: targetCurrency,
+        fxRateUsed,
+        fxSnapshotAt: snapshotAt,
+        fxMetadata: {
+            sourceCurrency: originalCurrency,
+            sourceRate,
+            targetCurrency,
+            targetRate,
+            conversion: 'platform_rate',
+        },
+    };
+};
+
 const createPendingCommission = async ({
     sourceTransaction,
     relationship,
     sourceType,
     commissionPercent,
-    commissionAmount,
-    commissionCurrency,
+    commissionOriginalAmount,
+    conversion,
     session,
 }) => {
     const idempotencyKey = `referral:${sourceTransaction._id.toString()}`;
@@ -768,10 +845,19 @@ const createPendingCommission = async ({
         topupAmount: sourceAmount,
         sourceCurrency,
         topupCurrency: sourceCurrency,
+        sourceTopupAmount: sourceAmount,
+        sourceTopupCurrency: sourceCurrency,
         commissionPercentage: commissionPercent,
         commissionPercent,
-        commissionAmount,
-        commissionCurrency,
+        commissionOriginalAmount,
+        commissionOriginalCurrency: sourceCurrency,
+        commissionAmount: conversion.commissionAmount,
+        commissionCurrency: conversion.commissionCurrency,
+        referrerCurrency: conversion.referrerCurrency,
+        agentCurrency: conversion.agentCurrency,
+        fxRateUsed: conversion.fxRateUsed,
+        fxSnapshotAt: conversion.fxSnapshotAt,
+        fxMetadata: conversion.fxMetadata,
         status: REFERRAL_COMMISSION_STATUS.PENDING,
         idempotencyKey,
         earnedAt: now,
@@ -783,6 +869,11 @@ const createPendingCommission = async ({
             topupAmount: sourceAmount,
             topupCurrency: sourceCurrency,
             commissionPercent,
+            commissionOriginalAmount,
+            commissionOriginalCurrency: sourceCurrency,
+            commissionAmount: conversion.commissionAmount,
+            commissionCurrency: conversion.commissionCurrency,
+            fxRateUsed: conversion.fxRateUsed,
             relationshipId: relationship._id.toString(),
         },
     }], { session });
@@ -797,7 +888,7 @@ const emitCommissionSideEffects = (commission) => {
         void createAuditLog({
             actorId: commission.invitedUserId,
             actorRole: ACTOR_ROLES.SYSTEM,
-            action: REFERRAL_ACTIONS.SUB_AGENT_COMMISSION_CREATED,
+            action: REFERRAL_ACTIONS.REFERRAL_COMMISSION_CREATED,
             entityType: ENTITY_TYPES.REFERRAL_COMMISSION,
             entityId: commission._id,
             metadata: {
@@ -938,7 +1029,7 @@ const processWalletCredit = async (walletTransactionOrId) => {
     }
 
     const agent = await User.findById(relationship.inviterUserId)
-        .select('_id currency name email isSubAgent subAgentStatus agentProfile');
+        .select('_id currency name email isSubAgent subAgentStatus agentProfile referralCommissionPercentOverride');
     if (!agent) return { processed: false, reason: 'INVITER_NOT_FOUND' };
 
     const settings = await getReferralSettings({ persistDefault: false });
@@ -952,11 +1043,18 @@ const processWalletCredit = async (walletTransactionOrId) => {
     const commissionPercent = getReferralCommissionPercent(agent, settings);
     if (commissionPercent <= 0) return { processed: false, reason: 'COMMISSION_PERCENTAGE_ZERO' };
 
-    const commissionAmount = calculateCommission({
+    const commissionOriginalAmount = calculateCommission({
         sourceAmount,
         percentage: commissionPercent,
     });
-    if (commissionAmount <= 0) return { processed: false, reason: 'COMMISSION_TOO_SMALL' };
+    if (commissionOriginalAmount <= 0) return { processed: false, reason: 'COMMISSION_TOO_SMALL' };
+
+    const conversion = await convertCommissionToReferrerCurrency({
+        commissionOriginalAmount,
+        sourceCurrency,
+        referrerCurrency: agent.currency || sourceCurrency,
+    });
+    if (conversion.commissionAmount <= 0) return { processed: false, reason: 'COMMISSION_TOO_SMALL_AFTER_FX' };
 
     const session = await mongoose.startSession();
     let commission;
@@ -986,8 +1084,8 @@ const processWalletCredit = async (walletTransactionOrId) => {
             relationship,
             sourceType,
             commissionPercent,
-            commissionAmount,
-            commissionCurrency: sourceCurrency,
+            commissionOriginalAmount,
+            conversion,
             session,
         });
 
@@ -1055,9 +1153,12 @@ const getCommissionTotalsByAgent = async (agentIds = []) => {
     }, {});
 };
 
-const serializeSubAgent = (user, totalsByAgent = {}) => {
+const serializeSubAgent = (user, totalsByAgent = {}, referredCounts = {}, settings = DEFAULT_REFERRAL_SETTINGS) => {
     const id = toIdString(user._id || user.id);
     const profile = user.agentProfile || {};
+    const overridePercent = getReferralCommissionOverride(user);
+    const effectiveCommissionPercent = getReferralCommissionPercent(user, settings);
+    const status = profile.status || (user.isSubAgent ? AGENT_PROFILE_STATUS.ACTIVE : AGENT_PROFILE_STATUS.ACTIVE);
     return {
         id,
         userId: id,
@@ -1066,12 +1167,20 @@ const serializeSubAgent = (user, totalsByAgent = {}) => {
         phone: user.phone || null,
         code: getAgentCode(user),
         referralCode: getAgentCode(user),
-        commissionPercent: getAgentCommissionPercent(user),
+        commissionPercent: effectiveCommissionPercent,
+        commissionPercentEffective: effectiveCommissionPercent,
+        referralCommissionPercentOverride: overridePercent,
+        usingDefaultCommission: overridePercent === null,
+        defaultCommissionPercent: settings.depositCommissionPercentage,
+        legacyAgentCommissionPercent: getAgentCommissionPercent(user),
         group: profile.groupId || user.groupId || null,
-        status: profile.status || (user.isSubAgent ? AGENT_PROFILE_STATUS.ACTIVE : AGENT_PROFILE_STATUS.INACTIVE),
-        active: isActiveSubAgent(user),
+        status,
+        active: status !== AGENT_PROFILE_STATUS.INACTIVE,
+        isSubAgent: user.isSubAgent === true,
+        subAgentStatus: user.subAgentStatus || null,
         approvedAt: profile.approvedAt || user.subAgentApprovedAt || null,
         approvedBy: profile.approvedBy || user.subAgentApprovedBy || null,
+        referredUsersCount: referredCounts[id] || 0,
         totalPendingCommissions: [
             ...(totalsByAgent[id]?.[REFERRAL_COMMISSION_STATUS.PENDING] || []),
             ...(totalsByAgent[id]?.[REFERRAL_COMMISSION_STATUS.AVAILABLE] || []),
@@ -1085,30 +1194,64 @@ const listSubAgents = async ({ status, page = 1, limit = 20 } = {}) => {
     const normalizedPage = parsePage(page);
     const normalizedLimit = parseLimit(limit);
     const skip = (normalizedPage - 1) * normalizedLimit;
-    const filter = {
-        isSubAgent: true,
-        subAgentStatus: SUB_AGENT_STATUS.ACTIVE,
-        deletedAt: null,
-    };
-
-    if (status) filter['agentProfile.status'] = status;
-
-    const [users, total] = await Promise.all([
-        User.find(filter)
-            .select('name email phone referralCode groupId isSubAgent subAgentStatus subAgentApprovedAt subAgentApprovedBy agentProfile')
-            .populate('groupId', 'name percentage isActive')
-            .populate('agentProfile.groupId', 'name percentage isActive')
-            .sort({ 'agentProfile.approvedAt': -1, subAgentApprovedAt: -1, createdAt: -1 })
-            .skip(skip)
-            .limit(normalizedLimit)
-            .lean(),
-        User.countDocuments(filter),
+    const [relationshipAgentIds, commissionAgentIds, overrideUsers, approvedSubAgents, referredCountRows, settings] = await Promise.all([
+        ReferralRelationship.distinct('inviterUserId'),
+        ReferralCommission.distinct('inviterUserId'),
+        User.find({
+            deletedAt: null,
+            referralCommissionPercentOverride: { $ne: null },
+        }).select('_id').lean(),
+        User.find({
+            deletedAt: null,
+            isSubAgent: true,
+            subAgentStatus: SUB_AGENT_STATUS.ACTIVE,
+        }).select('_id').lean(),
+        ReferralRelationship.aggregate([
+            { $group: { _id: '$inviterUserId', count: { $sum: 1 } } },
+        ]),
+        getReferralSettings({ persistDefault: false }),
     ]);
 
-    const totalsByAgent = await getCommissionTotalsByAgent(users.map((user) => user._id));
+    const referredCounts = referredCountRows.reduce((acc, row) => {
+        acc[toIdString(row._id)] = row.count;
+        return acc;
+    }, {});
+
+    const ids = [
+        ...relationshipAgentIds,
+        ...commissionAgentIds,
+        ...overrideUsers.map((user) => user._id),
+        ...approvedSubAgents.map((user) => user._id),
+    ].reduce((acc, id) => {
+        const key = toIdString(id);
+        if (key) acc.set(key, id);
+        return acc;
+    }, new Map());
+
+    let users = await User.find({
+        _id: { $in: [...ids.values()] },
+        deletedAt: null,
+    })
+        .select('name email phone referralCode groupId isSubAgent subAgentStatus subAgentApprovedAt subAgentApprovedBy agentProfile referralCommissionPercentOverride')
+        .populate('groupId', 'name percentage isActive')
+        .populate('agentProfile.groupId', 'name percentage isActive')
+        .sort({ 'agentProfile.approvedAt': -1, subAgentApprovedAt: -1, createdAt: -1 })
+        .lean();
+
+    if (status) {
+        const normalizedStatus = String(status).trim().toLowerCase();
+        users = users.filter((user) => {
+            const profileStatus = user.agentProfile?.status || AGENT_PROFILE_STATUS.ACTIVE;
+            return profileStatus === normalizedStatus;
+        });
+    }
+
+    const total = users.length;
+    const pageUsers = users.slice(skip, skip + normalizedLimit);
+    const totalsByAgent = await getCommissionTotalsByAgent(pageUsers.map((user) => user._id));
 
     return {
-        subAgents: users.map((user) => serializeSubAgent(user, totalsByAgent)),
+        subAgents: pageUsers.map((user) => serializeSubAgent(user, totalsByAgent, referredCounts, settings)),
         pagination: {
             page: normalizedPage,
             limit: normalizedLimit,
@@ -1119,28 +1262,39 @@ const listSubAgents = async ({ status, page = 1, limit = 20 } = {}) => {
 };
 
 const updateSubAgent = async (userId, patch = {}, actor = {}) => {
-    const allowed = new Set(['commissionPercent', 'groupId', 'status', 'active']);
+    const allowed = new Set(['commissionPercent', 'referralCommissionPercentOverride', 'useDefault', 'groupId', 'status', 'active']);
     Object.keys(patch || {}).forEach((key) => {
         if (!allowed.has(key)) {
             throw new BusinessRuleError(`Unknown sub-agent field '${key}'.`, 'INVALID_SUB_AGENT_UPDATE');
         }
     });
 
-    const user = await User.findById(userId).select('_id isSubAgent subAgentStatus agentProfile groupId');
-    if (!user || user.isSubAgent !== true || user.subAgentStatus !== SUB_AGENT_STATUS.ACTIVE) {
-        throw new NotFoundError('Sub-agent');
-    }
+    const user = await User.findById(userId).select('_id isSubAgent subAgentStatus agentProfile groupId referralCommissionPercentOverride');
+    if (!user) throw new NotFoundError('User');
 
     const update = {};
     const auditActions = [];
+    const requiresApprovedSubAgent = patch.groupId !== undefined || patch.status !== undefined || patch.active !== undefined;
+    if (requiresApprovedSubAgent && (user.isSubAgent !== true || user.subAgentStatus !== SUB_AGENT_STATUS.ACTIVE)) {
+        throw new NotFoundError('Sub-agent');
+    }
 
-    if (patch.commissionPercent !== undefined) {
-        const commissionPercent = Number(patch.commissionPercent);
+    if (patch.useDefault === true) {
+        update.referralCommissionPercentOverride = null;
+        auditActions.push(REFERRAL_ACTIONS.REFERRAL_COMMISSION_PERCENT_RESET_TO_DEFAULT);
+    } else if (patch.commissionPercent !== undefined || patch.referralCommissionPercentOverride !== undefined) {
+        const rawPercent = patch.referralCommissionPercentOverride !== undefined
+            ? patch.referralCommissionPercentOverride
+            : patch.commissionPercent;
+        const commissionPercent = Number(rawPercent);
         if (!Number.isFinite(commissionPercent) || commissionPercent < 0 || commissionPercent > 100) {
-            throw new BusinessRuleError('Commission percent must be between 0 and 100.', 'INVALID_SUB_AGENT_PERCENTAGE');
+            throw new BusinessRuleError('Commission percent must be between 0 and 100.', 'INVALID_REFERRAL_PERCENTAGE');
         }
-        update['agentProfile.commissionPercent'] = commissionPercent;
-        auditActions.push(REFERRAL_ACTIONS.SUB_AGENT_COMMISSION_PERCENT_UPDATED);
+        update.referralCommissionPercentOverride = commissionPercent;
+        if (user.isSubAgent === true) {
+            update['agentProfile.commissionPercent'] = commissionPercent;
+        }
+        auditActions.push(REFERRAL_ACTIONS.REFERRAL_COMMISSION_PERCENT_UPDATED);
     }
 
     if (patch.groupId !== undefined) {
@@ -1169,14 +1323,16 @@ const updateSubAgent = async (userId, patch = {}, actor = {}) => {
     }
 
     if (!Object.keys(update).length) {
-        return serializeSubAgent(await User.findById(userId).populate('groupId', 'name percentage isActive').lean());
+        const settings = await getReferralSettings({ persistDefault: false });
+        return serializeSubAgent(await User.findById(userId).populate('groupId', 'name percentage isActive').lean(), {}, {}, settings);
     }
 
     const updated = await User.findByIdAndUpdate(userId, { $set: update }, { new: true })
-        .select('name email phone referralCode groupId isSubAgent subAgentStatus subAgentApprovedAt subAgentApprovedBy agentProfile')
+        .select('name email phone referralCode groupId isSubAgent subAgentStatus subAgentApprovedAt subAgentApprovedBy agentProfile referralCommissionPercentOverride')
         .populate('groupId', 'name percentage isActive')
         .populate('agentProfile.groupId', 'name percentage isActive')
         .lean();
+    const settings = await getReferralSettings({ persistDefault: false });
 
     auditActions.forEach((action) => {
         void createAuditLog({
@@ -1185,13 +1341,18 @@ const updateSubAgent = async (userId, patch = {}, actor = {}) => {
             action,
             entityType: ENTITY_TYPES.USER,
             entityId: updated._id,
-            metadata: { patch: update },
+            metadata: {
+                patch: update,
+                oldPercent: getReferralCommissionOverride(user),
+                newPercent: updated.referralCommissionPercentOverride,
+                usingDefault: updated.referralCommissionPercentOverride === null || updated.referralCommissionPercentOverride === undefined,
+            },
             ipAddress: actor.ipAddress || null,
             userAgent: actor.userAgent || null,
         });
     });
 
-    return serializeSubAgent(updated);
+    return serializeSubAgent(updated, {}, {}, settings);
 };
 
 module.exports = {
