@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const jwt = require('jsonwebtoken');
 const config = require('../config/config');
@@ -69,6 +69,14 @@ const runMiddleware = (middleware, req) => new Promise((resolve, reject) => {
     }
 });
 
+const proofImage = {
+    proofImagePath: 'uploads/sub-agent-requests/group-request-test.jpg',
+    proofImageUrl: '/uploads/sub-agent-requests/group-request-test.jpg',
+    proofImageOriginalName: 'group-request-test.jpg',
+    proofImageMimeType: 'image/jpeg',
+    proofImageSize: 12345,
+};
+
 describe('Customer group/sub-agent request creation', () => {
     it('active customer creates GROUP_CHANGE request', async () => {
         const { customer, targetGroup } = await setupActors();
@@ -95,6 +103,7 @@ describe('Customer group/sub-agent request creation', () => {
             userId: customer._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
             reason: 'I want to become a partner',
+            proofImage,
         });
 
         expect(request.requestType).toBe(GROUP_REQUEST_TYPES.SUB_AGENT);
@@ -172,6 +181,7 @@ describe('Customer group/sub-agent request creation', () => {
         await groupRequestService.createGroupRequest({
             userId: other._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            proofImage,
         });
 
         const result = await groupRequestService.listMyRequests(customer._id);
@@ -199,6 +209,7 @@ describe('Customer group/sub-agent request creation', () => {
         const request = await groupRequestService.createGroupRequest({
             userId: customer._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            proofImage,
         });
 
         const canceled = await groupRequestService.cancelMyRequest(customer._id, request.id);
@@ -353,16 +364,16 @@ describe('Admin group/sub-agent request review', () => {
         expect(fresh.role).toBe(ROLES.CUSTOMER);
     });
 
-    it('admin approves SUB_AGENT with required group and commission percent without role escalation', async () => {
+    it('admin approves SUB_AGENT with required group without role escalation', async () => {
         const { customer, targetGroup, admin } = await setupActors();
         const request = await groupRequestService.createGroupRequest({
             userId: customer._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            proofImage,
         });
 
         await groupRequestService.approveGroupRequest(request.id, {
             approvedGroupId: targetGroup._id,
-            approvedCommissionPercent: 1.5,
             adminId: admin._id,
         });
 
@@ -371,7 +382,7 @@ describe('Admin group/sub-agent request review', () => {
         expect(fresh.subAgentStatus).toBe(SUB_AGENT_STATUS.ACTIVE);
         expect(fresh.subAgentApprovedBy.toString()).toBe(admin._id.toString());
         expect(fresh.groupId.toString()).toBe(targetGroup._id.toString());
-        expect(fresh.agentProfile.commissionPercent).toBe(1.5);
+        expect(fresh.agentProfile.commissionPercent).toBe(0);
         expect(fresh.role).toBe(ROLES.CUSTOMER);
         expect(fresh.permissions).toEqual([]);
     });
@@ -381,11 +392,11 @@ describe('Admin group/sub-agent request review', () => {
         const request = await groupRequestService.createGroupRequest({
             userId: customer._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            proofImage,
         });
 
         const result = await groupRequestService.approveGroupRequest(request.id, {
             approvedGroupId: targetGroup._id,
-            approvedCommissionPercent: 2,
             adminId: admin._id,
         });
 
@@ -418,6 +429,7 @@ describe('Admin group/sub-agent request review', () => {
         const request = await groupRequestService.createGroupRequest({
             userId: customer._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            proofImage,
         });
 
         await groupRequestService.rejectGroupRequest(request.id, {
@@ -464,6 +476,7 @@ describe('Admin group/sub-agent request review', () => {
         const rejected = await groupRequestService.createGroupRequest({
             userId: customer._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            proofImage,
         });
         await groupRequestService.rejectGroupRequest(rejected.id, { adminId: admin._id });
 
@@ -524,11 +537,11 @@ describe('Group request permissions and side-effect boundaries', () => {
         const request = await groupRequestService.createGroupRequest({
             userId: customer._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            proofImage,
         });
 
         await groupRequestService.approveGroupRequest(request.id, {
             approvedGroupId: customer.groupId,
-            approvedCommissionPercent: 1,
             adminId: admin._id,
         });
 
@@ -551,3 +564,4 @@ describe('Group request permissions and side-effect boundaries', () => {
         expect(await ReferralCommission.countDocuments()).toBe(0);
     });
 });
+

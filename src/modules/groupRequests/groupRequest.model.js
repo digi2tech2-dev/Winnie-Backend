@@ -74,6 +74,37 @@ const groupChangeRequestSchema = new mongoose.Schema(
             default: null,
         },
 
+        proofImagePath: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        proofImageUrl: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        proofImageOriginalName: {
+            type: String,
+            trim: true,
+            maxlength: [255, 'proofImageOriginalName cannot exceed 255 characters'],
+            default: null,
+        },
+
+        proofImageMimeType: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        proofImageSize: {
+            type: Number,
+            default: null,
+            min: [0, 'proofImageSize cannot be negative'],
+        },
+
         reviewedBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',

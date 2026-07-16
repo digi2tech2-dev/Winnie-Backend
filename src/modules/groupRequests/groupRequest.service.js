@@ -55,6 +55,21 @@ const trimOrNull = (value) => {
     return normalized || null;
 };
 
+const normalizeProofImage = (proofImage = null) => {
+    if (!proofImage) return null;
+    const proofImagePath = trimOrNull(proofImage.proofImagePath || proofImage.path);
+    const proofImageUrl = trimOrNull(proofImage.proofImageUrl || proofImage.url);
+    if (!proofImagePath && !proofImageUrl) return null;
+
+    return {
+        proofImagePath,
+        proofImageUrl: proofImageUrl || (proofImagePath ? `/${proofImagePath.replace(/^\/+/, '')}` : null),
+        proofImageOriginalName: trimOrNull(proofImage.proofImageOriginalName || proofImage.originalName),
+        proofImageMimeType: trimOrNull(proofImage.proofImageMimeType || proofImage.mimeType),
+        proofImageSize: proofImage.proofImageSize ?? proofImage.size ?? null,
+    };
+};
+
 const runQuery = (query, session = null) => (session ? query.session(session) : query);
 
 const getActiveGroupOrThrow = async (groupId, { session = null } = {}) => {
@@ -166,6 +181,11 @@ const formatRequest = (request, { admin = false } = {}) => {
         approvedCommissionPercent: request.approvedCommissionPercent ?? null,
         reason: request.reason || null,
         adminNote: admin || reviewed ? request.adminNote || null : null,
+        proofImagePath: request.proofImagePath || null,
+        proofImageUrl: request.proofImageUrl || null,
+        proofImageOriginalName: request.proofImageOriginalName || null,
+        proofImageMimeType: request.proofImageMimeType || null,
+        proofImageSize: request.proofImageSize ?? null,
         reviewedAt: request.reviewedAt || null,
         reviewedBy: admin ? summarizeUser(request.reviewedBy, { admin: true }) : undefined,
         canceledAt: request.canceledAt || null,
@@ -400,6 +420,7 @@ const createGroupRequest = async ({
     requestType,
     requestedGroupId = null,
     reason = null,
+    proofImage = null,
     metadata = {},
     actor = {},
 } = {}) => {
@@ -428,6 +449,7 @@ const createGroupRequest = async ({
             );
         }
 
+        const normalizedProofImage = normalizeProofImage(proofImage);
         let requestedGroup = null;
         if (requestType === GROUP_REQUEST_TYPES.GROUP_CHANGE) {
             if (!requestedGroupId) {
@@ -443,8 +465,16 @@ const createGroupRequest = async ({
                     'GROUP_REQUEST_SAME_GROUP'
                 );
             }
-        } else if (requestType === GROUP_REQUEST_TYPES.SUB_AGENT && requestedGroupId) {
-            requestedGroup = await getActiveGroupOrThrow(requestedGroupId, { session });
+        } else if (requestType === GROUP_REQUEST_TYPES.SUB_AGENT) {
+            if (!normalizedProofImage) {
+                throw new BusinessRuleError(
+                    'Proof image is required for sub-agent requests.',
+                    'PROOF_IMAGE_REQUIRED'
+                );
+            }
+            if (requestedGroupId) {
+                requestedGroup = await getActiveGroupOrThrow(requestedGroupId, { session });
+            }
         } else if (!Object.values(GROUP_REQUEST_TYPES).includes(requestType)) {
             throw new BusinessRuleError('Invalid request type.', 'INVALID_GROUP_REQUEST_TYPE');
         }
@@ -460,6 +490,11 @@ const createGroupRequest = async ({
             currentGroupId: user.groupId || null,
             requestedGroupId: requestedGroup?._id || null,
             reason: trimOrNull(reason),
+            proofImagePath: normalizedProofImage?.proofImagePath || null,
+            proofImageUrl: normalizedProofImage?.proofImageUrl || null,
+            proofImageOriginalName: normalizedProofImage?.proofImageOriginalName || null,
+            proofImageMimeType: normalizedProofImage?.proofImageMimeType || null,
+            proofImageSize: normalizedProofImage?.proofImageSize || null,
             userSnapshot: snapshotUser(user),
             currentGroupSnapshot: snapshotGroup(currentGroup),
             requestedGroupSnapshot: snapshotGroup(requestedGroup),
@@ -648,7 +683,6 @@ const getRequestById = async (id) => getFormattedRequestById(id, { admin: true }
 
 const approveGroupRequest = async (id, {
     approvedGroupId = null,
-    approvedCommissionPercent = null,
     adminNote = null,
     adminId,
     actor = {},
@@ -715,31 +749,12 @@ const approveGroupRequest = async (id, {
                     );
                 }
 
-                if (
-                    approvedCommissionPercent === undefined ||
-                    approvedCommissionPercent === null ||
-                    approvedCommissionPercent === ''
-                ) {
-                    throw new BusinessRuleError(
-                        'approvedCommissionPercent is required and must be between 0 and 100.',
-                        'INVALID_SUB_AGENT_PERCENTAGE'
-                    );
-                }
-
-                const commissionPercent = Number(approvedCommissionPercent);
-                if (!Number.isFinite(commissionPercent) || commissionPercent < 0 || commissionPercent > 100) {
-                    throw new BusinessRuleError(
-                        'approvedCommissionPercent is required and must be between 0 and 100.',
-                        'INVALID_SUB_AGENT_PERCENTAGE'
-                    );
-                }
-
                 approvedGroup = await getActiveGroupOrThrow(approvedGroupId, { session });
                 previousGroupId = user.groupId;
                 updateUser.groupId = approvedGroup._id;
                 groupChanged = !sameId(user.groupId, approvedGroup._id);
 
-                const referralCode = await referralService.ensureReferralCode(user._id, { session });
+                const referralCode = user.referralCode || await referralService.ensureReferralCode(user._id, { session });
                 updateUser.isSubAgent = true;
                 updateUser.subAgentStatus = SUB_AGENT_STATUS.ACTIVE;
                 updateUser.subAgentApprovedAt = now;
@@ -748,7 +763,6 @@ const approveGroupRequest = async (id, {
                     ...(user.agentProfile?.toObject ? user.agentProfile.toObject() : user.agentProfile || {}),
                     enabled: true,
                     code: referralCode,
-                    commissionPercent,
                     approvedAt: now,
                     approvedBy: adminId,
                     groupId: approvedGroup._id,
@@ -774,9 +788,7 @@ const approveGroupRequest = async (id, {
                         status: GROUP_REQUEST_STATUS.APPROVED,
                         approvedGroupId: approvedGroup?._id || null,
                         approvedGroupSnapshot: snapshotGroup(approvedGroup),
-                        approvedCommissionPercent: request.requestType === GROUP_REQUEST_TYPES.SUB_AGENT
-                            ? Number(approvedCommissionPercent)
-                            : null,
+                        approvedCommissionPercent: null,
                         reviewedBy: adminId,
                         reviewedAt: now,
                         adminNote: trimOrNull(adminNote),

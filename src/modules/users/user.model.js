@@ -328,7 +328,7 @@ const userSchema = new mongoose.Schema(
             status: {
                 type: String,
                 enum: Object.values(AGENT_PROFILE_STATUS),
-                default: AGENT_PROFILE_STATUS.INACTIVE,
+                default: AGENT_PROFILE_STATUS.ACTIVE,
                 index: true,
             },
         },

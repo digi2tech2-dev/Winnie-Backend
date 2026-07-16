@@ -7,6 +7,7 @@ const authorize = require('../../shared/middlewares/authorize');
 const { authorizeRoles, requirePermission, requireAnyPermission } = authorize;
 const validate = require('../../shared/middlewares/validate');
 const groupRequestController = require('./groupRequest.controller');
+const { createUpload } = require('../../shared/middlewares/upload');
 const {
     createGroupRequestValidation,
     myGroupRequestListValidation,
@@ -18,12 +19,19 @@ const {
 const { GROUP_REQUEST_PERMISSIONS } = require('./groupRequest.constants');
 
 const router = Router();
+const subAgentProofUpload = createUpload('sub-agent-requests', {
+    allowedMimes: new Set(['image/jpeg', 'image/png', 'image/webp']),
+    allowedExts: new Set(['.jpg', '.jpeg', '.png', '.webp']),
+    acceptedLabel: 'JPG, JPEG, PNG, and WebP',
+    maxFileSize: 5 * 1024 * 1024,
+});
 
 router.post(
     '/me/group-change-requests',
     authenticate,
     requireActiveUser,
     authorizeRoles('CUSTOMER'),
+    subAgentProofUpload.single('proofImage'),
     createGroupRequestValidation,
     validate,
     groupRequestController.createMyRequest

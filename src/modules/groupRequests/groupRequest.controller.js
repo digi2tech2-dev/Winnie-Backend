@@ -11,12 +11,25 @@ const actorFrom = (req) => ({
     userAgent: req.get('User-Agent') || null,
 });
 
+const proofImageFromFile = (file) => {
+    if (!file) return null;
+    const relativePath = `uploads/sub-agent-requests/${file.filename}`;
+    return {
+        proofImagePath: relativePath,
+        proofImageUrl: `/${relativePath}`,
+        proofImageOriginalName: file.originalname || null,
+        proofImageMimeType: file.mimetype || null,
+        proofImageSize: file.size || null,
+    };
+};
+
 const createMyRequest = catchAsync(async (req, res) => {
     const request = await groupRequestService.createGroupRequest({
         userId: req.user._id,
         requestType: req.body.requestType,
         requestedGroupId: req.body.requestedGroupId || null,
         reason: req.body.reason || null,
+        proofImage: proofImageFromFile(req.file),
         metadata: { source: 'customer-api' },
         actor: actorFrom(req),
     });
@@ -76,7 +89,6 @@ const adminGetRequest = catchAsync(async (req, res) => {
 const adminApproveRequest = catchAsync(async (req, res) => {
     const result = await groupRequestService.approveGroupRequest(req.params.id, {
         approvedGroupId: req.body.approvedGroupId || null,
-        approvedCommissionPercent: req.body.approvedCommissionPercent,
         adminNote: req.body.adminNote || null,
         adminId: req.user._id,
         actor: actorFrom(req),

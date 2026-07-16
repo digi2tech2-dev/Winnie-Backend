@@ -81,6 +81,14 @@ const getAgentCommissionPercent = (user) => {
     return Number.isFinite(percent) ? percent : 0;
 };
 
+const getReferralCommissionPercent = (user, settings = {}) => {
+    const agentPercent = getAgentCommissionPercent(user);
+    if (agentPercent > 0) return agentPercent;
+
+    const settingsPercent = Number(settings.depositCommissionPercentage ?? 0);
+    return Number.isFinite(settingsPercent) ? settingsPercent : 0;
+};
+
 const generateReferralCodeCandidate = () => {
     let code = 'K';
     for (let i = 0; i < REFERRAL_CODE_LENGTH - 1; i += 1) {
@@ -271,7 +279,7 @@ const resolveInviteCodeOrThrow = async (code, { email = null, userId = null } = 
     if (!referralCode) return null;
 
     const inviter = await getInviterByCode(referralCode);
-    if (!inviter || !isActiveSubAgent(inviter)) {
+    if (!inviter) {
         throw new BusinessRuleError('Invalid referral code.', 'INVALID_REFERRAL_CODE');
     }
 
@@ -293,7 +301,7 @@ const validateReferralCode = async (code, options = {}) => {
     }
 
     const inviter = await getInviterByCode(referralCode);
-    if (!inviter || !isActiveSubAgent(inviter)) {
+    if (!inviter) {
         return { valid: false, reason: 'INVALID_REFERRAL_CODE' };
     }
 
@@ -334,9 +342,9 @@ const createReferralRelationship = async ({
         throw new BusinessRuleError('This user already has an inviter.', 'INVITER_ALREADY_SET');
     }
 
-    const inviterQuery = User.findById(inviterUserId).select('_id referralCode agentProfile isSubAgent subAgentStatus deletedAt');
+    const inviterQuery = User.findById(inviterUserId).select('_id referralCode agentProfile deletedAt');
     const inviter = session ? await inviterQuery.session(session) : await inviterQuery;
-    if (!inviter || !isActiveSubAgent(inviter)) {
+    if (!inviter || inviter.deletedAt) {
         throw new BusinessRuleError('Invalid referral code.', 'INVALID_REFERRAL_CODE');
     }
 
@@ -506,7 +514,7 @@ const listCommissions = async ({
 const getReferralLink = (referralCode) => {
     const baseUrl = (process.env.FRONTEND_URL || config.frontend.url || '').replace(/\/+$/, '');
     if (!baseUrl || !referralCode) return null;
-    return `${baseUrl}/register?inviteCode=${encodeURIComponent(referralCode)}`;
+    return `${baseUrl}/register?ref=${encodeURIComponent(referralCode)}`;
 };
 
 const commissionActiveStatuses = [
@@ -617,23 +625,25 @@ const getReferralSummary = async (userId) => {
         .lean();
     if (!user) throw new NotFoundError('User');
 
+    const referralCode = normalizeCode(await ensureReferralCode(userId));
+    user.referralCode = referralCode;
     const isAgent = isActiveSubAgent(user);
-    const referralCode = isAgent ? getAgentCode(user) : '';
 
-    const [relationship, invitedUsersCount, totals, recentCommissions] = await Promise.all([
+    const [settings, relationship, invitedUsersCount, totals, recentCommissions] = await Promise.all([
+        getReferralSettings({ persistDefault: false }),
         ReferralRelationship.findOne({
             invitedUserId: user._id,
         }).populate('inviterUserId', 'name referralCode agentProfile').lean(),
-        isAgent ? ReferralRelationship.countDocuments({ inviterUserId: user._id }) : 0,
-        isAgent ? ReferralCommission.aggregate([
+        ReferralRelationship.countDocuments({ inviterUserId: user._id }),
+        ReferralCommission.aggregate([
             { $match: { inviterUserId: user._id, status: { $in: commissionActiveStatuses } } },
             { $group: { _id: '$commissionCurrency', total: { $sum: '$commissionAmount' }, count: { $sum: 1 } } },
-        ]) : [],
-        isAgent ? ReferralCommission.find({ inviterUserId: user._id })
+        ]),
+        ReferralCommission.find({ inviterUserId: user._id })
             .sort({ earnedAt: -1, createdAt: -1 })
             .limit(5)
             .populate('invitedUserId', 'name email')
-            .lean() : [],
+            .lean(),
     ]);
 
     return {
@@ -648,7 +658,7 @@ const getReferralSummary = async (userId) => {
             status: user.agentProfile?.status || AGENT_PROFILE_STATUS.INACTIVE,
         },
         referralCode,
-        referralLink: isAgent ? getReferralLink(referralCode) : null,
+        referralLink: getReferralLink(referralCode),
         inviter: relationship?.inviterUserId
             ? {
                 id: relationship.inviterUserId._id.toString(),
@@ -664,11 +674,11 @@ const getReferralSummary = async (userId) => {
         })),
         recentCommissions,
         settings: {
-            enabled: isAgent,
-            depositCommissionPercentage: getAgentCommissionPercent(user),
+            enabled: settings.enabled,
+            depositCommissionPercentage: getReferralCommissionPercent(user, settings),
             applyTo: REFERRAL_APPLY_TO.EVERY_ELIGIBLE_WALLET_CREDIT,
-            minSourceAmount: null,
-            maxCommissionAmount: null,
+            minSourceAmount: settings.minSourceAmount,
+            maxCommissionAmount: settings.maxCommissionAmount,
         },
     };
 };
@@ -687,9 +697,9 @@ const getActiveRelationshipForInvitedUser = async (invitedUser, { session = null
     if (relationship) return relationship;
 
     const inviterQuery = User.findById(referrerId)
-        .select('_id referralCode agentProfile isSubAgent subAgentStatus deletedAt');
+        .select('_id referralCode agentProfile deletedAt');
     const inviter = session ? await inviterQuery.session(session) : await inviterQuery;
-    if (!inviter || !isActiveSubAgent(inviter) || sameId(inviter._id, invitedUser._id)) return null;
+    if (!inviter || inviter.deletedAt || sameId(inviter._id, invitedUser._id)) return null;
 
     try {
         const result = await createReferralRelationship({
@@ -734,15 +744,14 @@ const calculateCommission = ({ sourceAmount, percentage }) => {
 const createPendingCommission = async ({
     sourceTransaction,
     relationship,
-    agent,
     sourceType,
+    commissionPercent,
     commissionAmount,
     commissionCurrency,
     session,
 }) => {
     const idempotencyKey = `referral:${sourceTransaction._id.toString()}`;
     const now = new Date();
-    const commissionPercent = getAgentCommissionPercent(agent);
     const sourceAmount = Number(sourceTransaction.amount);
     const sourceCurrency = normalizeCurrency(sourceTransaction.currency);
 
@@ -931,11 +940,16 @@ const processWalletCredit = async (walletTransactionOrId) => {
     const agent = await User.findById(relationship.inviterUserId)
         .select('_id currency name email isSubAgent subAgentStatus agentProfile');
     if (!agent) return { processed: false, reason: 'INVITER_NOT_FOUND' };
-    if (!isActiveSubAgent(agent)) return { processed: false, reason: 'AGENT_INACTIVE' };
+
+    const settings = await getReferralSettings({ persistDefault: false });
+    if (!settings.enabled) return { processed: false, reason: 'REFERRAL_SETTINGS_DISABLED' };
+    if (agent.agentProfile?.status === AGENT_PROFILE_STATUS.INACTIVE) {
+        return { processed: false, reason: 'AGENT_INACTIVE' };
+    }
 
     const sourceAmount = Number(sourceTransaction.amount);
     const sourceCurrency = normalizeCurrency(sourceTransaction.currency);
-    const commissionPercent = getAgentCommissionPercent(agent);
+    const commissionPercent = getReferralCommissionPercent(agent, settings);
     if (commissionPercent <= 0) return { processed: false, reason: 'COMMISSION_PERCENTAGE_ZERO' };
 
     const commissionAmount = calculateCommission({
@@ -970,8 +984,8 @@ const processWalletCredit = async (walletTransactionOrId) => {
         commission = await createPendingCommission({
             sourceTransaction,
             relationship,
-            agent,
             sourceType,
+            commissionPercent,
             commissionAmount,
             commissionCurrency: sourceCurrency,
             session,

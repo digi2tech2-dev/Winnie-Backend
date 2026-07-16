@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const groupRequestService = require('../modules/groupRequests/groupRequest.service');
 const referralService = require('../modules/referrals/referral.service');
@@ -46,17 +46,30 @@ const createPendingDeposit = (userId, overrides = {}) => depositService.createDe
     ...overrides,
 });
 
+const proofImage = {
+    proofImagePath: 'uploads/sub-agent-requests/sub-agent-test.jpg',
+    proofImageUrl: '/uploads/sub-agent-requests/sub-agent-test.jpg',
+    proofImageOriginalName: 'sub-agent-test.jpg',
+    proofImageMimeType: 'image/jpeg',
+    proofImageSize: 12345,
+};
+
 const approveAsSubAgent = async ({ user, admin, group, percent = 1 }) => {
     const request = await groupRequestService.createGroupRequest({
         userId: user._id,
         requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
         reason: 'I want to become a sub-agent',
+        proofImage,
     });
 
     const result = await groupRequestService.approveGroupRequest(request.id, {
         approvedGroupId: group._id,
-        approvedCommissionPercent: percent,
         adminId: admin._id,
+    });
+
+    await referralService.updateSubAgent(user._id, { commissionPercent: percent }, {
+        actorId: admin._id,
+        actorRole: 'ADMIN',
     });
 
     return { request: result.request, user: await User.findById(user._id) };
@@ -110,6 +123,7 @@ describe('Sub-agent request workflow', () => {
             userId: user._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
             reason: 'Please review me',
+            proofImage,
         });
 
         expect(request.status).toBe(GROUP_REQUEST_STATUS.PENDING);
@@ -127,10 +141,11 @@ describe('Sub-agent request workflow', () => {
         await expect(groupRequestService.createGroupRequest({
             userId: agent._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            proofImage,
         })).rejects.toMatchObject({ code: 'SUB_AGENT_ALREADY_ACTIVE' });
     });
 
-    it('admin approval requires group and commission percent, assigns group, and generates code', async () => {
+    it('admin approval requires group, assigns group, and keeps referral code stable', async () => {
         const currentGroup = await createGroup();
         const targetGroup = await createGroup();
         const admin = await createAdmin({ groupId: currentGroup._id });
@@ -138,21 +153,11 @@ describe('Sub-agent request workflow', () => {
         const request = await groupRequestService.createGroupRequest({
             userId: user._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            proofImage,
         });
-
-        await expect(groupRequestService.approveGroupRequest(request.id, {
-            approvedCommissionPercent: 1,
-            adminId: admin._id,
-        })).rejects.toMatchObject({ code: 'APPROVED_GROUP_REQUIRED' });
-
-        await expect(groupRequestService.approveGroupRequest(request.id, {
-            approvedGroupId: targetGroup._id,
-            adminId: admin._id,
-        })).rejects.toMatchObject({ code: 'INVALID_SUB_AGENT_PERCENTAGE' });
 
         await groupRequestService.approveGroupRequest(request.id, {
             approvedGroupId: targetGroup._id,
-            approvedCommissionPercent: 2,
             adminId: admin._id,
         });
 
@@ -161,7 +166,7 @@ describe('Sub-agent request workflow', () => {
         expect(fresh.subAgentStatus).toBe(SUB_AGENT_STATUS.ACTIVE);
         expect(fresh.groupId.toString()).toBe(targetGroup._id.toString());
         expect(fresh.agentProfile.code).toBe(fresh.referralCode);
-        expect(fresh.agentProfile.commissionPercent).toBe(2);
+        expect(fresh.agentProfile.commissionPercent).toBe(0);
     });
 
     it('admin rejects request with reason and user remains normal customer', async () => {
@@ -171,6 +176,7 @@ describe('Sub-agent request workflow', () => {
         const request = await groupRequestService.createGroupRequest({
             userId: user._id,
             requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            proofImage,
         });
 
         const result = await groupRequestService.rejectGroupRequest(request.id, {
@@ -186,7 +192,19 @@ describe('Sub-agent request workflow', () => {
 });
 
 describe('Sub-agent referral and commission rules', () => {
-    it('registration with active agent code links direct referred user for 30 days', async () => {
+    it('every user has a stable referral code that does not change', async () => {
+        const group = await createGroup();
+        const user = await createCustomer({ groupId: group._id });
+
+        const first = await referralService.ensureReferralCode(user._id);
+        const second = await referralService.ensureReferralCode(user._id);
+
+        const fresh = await User.findById(user._id);
+        expect(first).toBe(second);
+        expect(fresh.referralCode).toBe(first);
+    });
+
+    it('registration with referral code links direct referred user for 30 days', async () => {
         const { agent, agentGroup } = await setupAgent({ percent: 1 });
 
         const result = await register({
@@ -204,7 +222,7 @@ describe('Sub-agent referral and commission rules', () => {
         expect(referred.groupId.toString()).toBe(agentGroup._id.toString());
     });
 
-    it('registration rejects invalid or inactive/non-agent code', async () => {
+    it('registration accepts any valid referral code but rejects invalid codes', async () => {
         const group = await createGroup();
         const normalUser = await createCustomer({ groupId: group._id });
 
@@ -215,12 +233,15 @@ describe('Sub-agent referral and commission rules', () => {
             inviteCode: 'KNOPE123',
         })).rejects.toMatchObject({ code: 'INVALID_REFERRAL_CODE' });
 
-        await expect(register({
+        const referred = await register({
             name: 'Normal Code',
             email: `normal-code-${Date.now()}@example.com`,
             password: 'SecurePass@1',
             inviteCode: normalUser.referralCode,
-        })).rejects.toMatchObject({ code: 'INVALID_REFERRAL_CODE' });
+        });
+
+        const fresh = await User.findById(referred.user._id);
+        expect(fresh.referredByAgentId.toString()).toBe(normalUser._id.toString());
     });
 
     it('successful gateway top-up within 30 days creates pending commission without wallet credit', async () => {
@@ -252,6 +273,31 @@ describe('Sub-agent referral and commission rules', () => {
         expect(commission.sourceType).toBe('manual_deposit');
         expect(commission.topupAmount).toBe(500);
         expect(commission.commissionAmount).toBe(5);
+    });
+
+    it('sub-agent request without proof image is rejected', async () => {
+        const group = await createGroup();
+        const user = await createCustomer({ groupId: group._id });
+
+        await expect(groupRequestService.createGroupRequest({
+            userId: user._id,
+            requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            reason: 'No proof',
+        })).rejects.toMatchObject({ code: 'PROOF_IMAGE_REQUIRED' });
+    });
+
+    it('sub-agent request can be submitted with proof image', async () => {
+        const group = await createGroup();
+        const user = await createCustomer({ groupId: group._id });
+
+        const request = await groupRequestService.createGroupRequest({
+            userId: user._id,
+            requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            reason: 'With proof',
+            proofImage,
+        });
+
+        expect(request.proofImageUrl).toContain('/uploads/sub-agent-requests/');
     });
 
     it('admin wallet adjustment does not create commission', async () => {
@@ -342,3 +388,4 @@ describe('Sub-agent referral and commission rules', () => {
         expect(await ReferralCommission.countDocuments()).toBe(0);
     });
 });
+

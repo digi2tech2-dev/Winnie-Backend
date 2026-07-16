@@ -7,6 +7,7 @@ const requireActiveUser = require('../../shared/middlewares/requireActiveUser');
 const authorize = require('../../shared/middlewares/authorize');
 const { authorizeRoles, requirePermission, requireAnyPermission } = authorize;
 const validate = require('../../shared/middlewares/validate');
+const { createUpload } = require('../../shared/middlewares/upload');
 const referralController = require('./referral.controller');
 const { GROUP_REQUEST_PERMISSIONS } = require('../groupRequests/groupRequest.constants');
 const {
@@ -18,6 +19,12 @@ const {
 } = require('./referral.validation');
 
 const router = Router();
+const subAgentProofUpload = createUpload('sub-agent-requests', {
+    allowedMimes: new Set(['image/jpeg', 'image/png', 'image/webp']),
+    allowedExts: new Set(['.jpg', '.jpeg', '.png', '.webp']),
+    acceptedLabel: 'JPG, JPEG, PNG, and WebP',
+    maxFileSize: 5 * 1024 * 1024,
+});
 
 router.post(
     '/referrals/validate-code',
@@ -45,6 +52,7 @@ router.post(
     authenticate,
     requireActiveUser,
     authorizeRoles('CUSTOMER'),
+    subAgentProofUpload.single('proofImage'),
     body('requestedMessage').optional({ nullable: true }).isString().trim().isLength({ max: 1000 }),
     body('message').optional({ nullable: true }).isString().trim().isLength({ max: 1000 }),
     body('reason').optional({ nullable: true }).isString().trim().isLength({ max: 1000 }),

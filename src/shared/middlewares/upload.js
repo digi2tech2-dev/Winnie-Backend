@@ -58,7 +58,7 @@ const DEPOSIT_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, '.pdf']);
  * @param {'avatars'|'products'|'categories'|'payments'|'deposits'} category
  * @returns {multer.Multer} A multer instance ready to use as middleware
  */
-const createUpload = (category) => {
+const createUpload = (category, options = {}) => {
     const uploadDir = path.join(UPLOADS_ROOT, category);
 
     // Ensure directory exists
@@ -77,8 +77,12 @@ const createUpload = (category) => {
 
     // File filter: deposits allow PDFs, everything else is images-only
     const isDeposit = category === 'deposits';
-    const allowedMimes = isDeposit ? DEPOSIT_MIME_TYPES : IMAGE_MIME_TYPES;
-    const allowedExts = isDeposit ? DEPOSIT_EXTENSIONS : IMAGE_EXTENSIONS;
+    const allowedMimes = options.allowedMimes || (isDeposit ? DEPOSIT_MIME_TYPES : IMAGE_MIME_TYPES);
+    const allowedExts = options.allowedExts || (isDeposit ? DEPOSIT_EXTENSIONS : IMAGE_EXTENSIONS);
+    const acceptedLabel = options.acceptedLabel || (isDeposit
+        ? 'JPG, JPEG, PNG, WebP, GIF, SVG, BMP, and PDF'
+        : 'JPG, JPEG, PNG, WebP, GIF, SVG, and BMP');
+    const maxFileSize = options.maxFileSize || MAX_FILE_SIZE;
 
     const fileFilter = (_req, file, cb) => {
         const ext = path.extname(file.originalname).toLowerCase();
@@ -86,12 +90,9 @@ const createUpload = (category) => {
         const extOk = allowedExts.has(ext);
 
         if (!mimeOk || !extOk) {
-            const accepted = isDeposit
-                ? 'JPG, JPEG, PNG, WebP, GIF, SVG, BMP, and PDF'
-                : 'JPG, JPEG, PNG, WebP, GIF, SVG, and BMP';
             return cb(
                 new BusinessRuleError(
-                    `Only ${accepted} files are accepted.`,
+                    `Only ${acceptedLabel} files are accepted.`,
                     'INVALID_FILE_TYPE'
                 )
             );
@@ -103,7 +104,7 @@ const createUpload = (category) => {
         storage,
         fileFilter,
         limits: {
-            fileSize: MAX_FILE_SIZE,
+            fileSize: maxFileSize,
             files: 1,
         },
     });

@@ -16,6 +16,18 @@ const actorFrom = (req) => ({
     userAgent: req.get('User-Agent') || null,
 });
 
+const proofImageFromFile = (file) => {
+    if (!file) return null;
+    const relativePath = `uploads/sub-agent-requests/${file.filename}`;
+    return {
+        proofImagePath: relativePath,
+        proofImageUrl: `/${relativePath}`,
+        proofImageOriginalName: file.originalname || null,
+        proofImageMimeType: file.mimetype || null,
+        proofImageSize: file.size || null,
+    };
+};
+
 const validateCode = catchAsync(async (req, res) => {
     const code = req.body.inviteCode || req.body.referralCode;
     const result = await referralService.validateReferralCode(code, {
@@ -40,6 +52,7 @@ const requestSubAgent = catchAsync(async (req, res) => {
         userId: req.user._id,
         requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
         reason: req.body.requestedMessage || req.body.reason || req.body.message || null,
+        proofImage: proofImageFromFile(req.file),
         metadata: { source: 'sub-agent-api' },
         actor: actorFrom(req),
     });
@@ -124,7 +137,6 @@ const adminListSubAgentRequests = catchAsync(async (req, res) => {
 const adminApproveSubAgentRequest = catchAsync(async (req, res) => {
     const result = await groupRequestService.approveGroupRequest(req.params.id, {
         approvedGroupId: req.body.approvedGroupId || req.body.groupId || null,
-        approvedCommissionPercent: req.body.approvedCommissionPercent ?? req.body.commissionPercent,
         adminNote: req.body.adminNote || null,
         adminId: req.user._id,
         actor: actorFrom(req),
