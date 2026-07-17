@@ -84,6 +84,8 @@ const SUPERVISOR_PERMISSION_GROUPS = Object.freeze([
             { key: 'topups.review', labelAr: 'مراجعة طلبات الرصيد', labelEn: 'Review top-ups' },
             { key: 'financial_reports.read', labelAr: 'عرض التقارير المالية', labelEn: 'View financial reports' },
             { key: 'financial_reports.close', labelAr: 'تقفيل اليوم المالي', labelEn: 'Close financial days' },
+            { key: 'referral_payouts.read', labelAr: 'عرض طلبات سحب الإحالات', labelEn: 'View referral payout requests' },
+            { key: 'referral_payouts.manage', labelAr: 'إدارة طلبات سحب الإحالات', labelEn: 'Manage referral payout requests' },
             { key: 'whatsapp_notifications.read', labelAr: 'عرض إشعارات واتساب', labelEn: 'View WhatsApp notifications' },
             { key: 'whatsapp_notifications.manage', labelAr: 'إدارة إشعارات واتساب', labelEn: 'Manage WhatsApp notifications' },
             { key: 'whatsapp_notifications.send_test', labelAr: 'إرسال رسائل تجربة واتساب', labelEn: 'Send WhatsApp test messages' },

@@ -1,7 +1,12 @@
 'use strict';
 
 const { body, query } = require('express-validator');
-const { REFERRAL_RELATIONSHIP_STATUS, REFERRAL_COMMISSION_STATUS } = require('./referral.constants');
+const {
+    REFERRAL_RELATIONSHIP_STATUS,
+    REFERRAL_COMMISSION_STATUS,
+    REFERRAL_PAYOUT_METHODS,
+    REFERRAL_PAYOUT_STATUS,
+} = require('./referral.constants');
 
 const paginationValidation = [
     query('page').optional().isInt({ min: 1 }).withMessage('page must be a positive integer'),
@@ -85,10 +90,93 @@ const myCommissionListValidation = [
         .withMessage('status must be CREDITED, SKIPPED, or REVERSED'),
 ];
 
+const payoutListValidation = [
+    ...paginationValidation,
+    ...dateFilterValidation,
+    mongoIdQuery('userId'),
+    mongoIdQuery('user'),
+    query('status')
+        .optional()
+        .isIn(Object.values(REFERRAL_PAYOUT_STATUS))
+        .withMessage('status must be a valid referral payout status'),
+    query('method')
+        .optional()
+        .isIn(Object.values(REFERRAL_PAYOUT_METHODS))
+        .withMessage('method must be wallet_credit or manual_external'),
+    query('currency')
+        .optional()
+        .isString()
+        .trim()
+        .isLength({ min: 3, max: 3 })
+        .withMessage('currency must be a 3-letter code'),
+];
+
+const createPayoutValidation = [
+    body('method')
+        .isIn(Object.values(REFERRAL_PAYOUT_METHODS))
+        .withMessage('method must be wallet_credit or manual_external'),
+    body('currency')
+        .optional()
+        .isString()
+        .trim()
+        .isLength({ min: 3, max: 3 })
+        .withMessage('currency must be a 3-letter code'),
+    body('requestedCurrency')
+        .optional()
+        .isString()
+        .trim()
+        .isLength({ min: 3, max: 3 })
+        .withMessage('requestedCurrency must be a 3-letter code'),
+    body()
+        .custom((value) => Boolean(value.currency || value.requestedCurrency))
+        .withMessage('currency is required'),
+    body('amount')
+        .optional()
+        .isFloat({ gt: 0 })
+        .withMessage('amount must be greater than zero'),
+    body('requestedAmount')
+        .optional()
+        .isFloat({ gt: 0 })
+        .withMessage('requestedAmount must be greater than zero'),
+    body('payoutDetails')
+        .optional({ nullable: true })
+        .isObject()
+        .withMessage('payoutDetails must be an object'),
+    body('payoutDetails.methodName').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+    body('payoutDetails.accountName').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+    body('payoutDetails.accountNumber').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+    body('payoutDetails.phone').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+    body('payoutDetails.walletAddress').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+    body('payoutDetails.notes').optional({ nullable: true }).isString().trim().isLength({ max: 500 }),
+];
+
+const rejectPayoutValidation = [
+    body('reason')
+        .optional()
+        .isString()
+        .trim()
+        .isLength({ max: 1000 })
+        .withMessage('reason cannot exceed 1000 characters'),
+    body('rejectionReason')
+        .optional()
+        .isString()
+        .trim()
+        .isLength({ max: 1000 })
+        .withMessage('rejectionReason cannot exceed 1000 characters'),
+    body()
+        .custom((value) => Boolean(value.reason || value.rejectionReason))
+        .withMessage('reason is required'),
+    body('adminNotes').optional({ nullable: true }).isString().trim().isLength({ max: 2000 }),
+    body('adminNote').optional({ nullable: true }).isString().trim().isLength({ max: 2000 }),
+];
+
 module.exports = {
     validateCodeValidation,
     referralSettingsValidation,
     relationshipListValidation,
     commissionListValidation,
     myCommissionListValidation,
+    payoutListValidation,
+    createPayoutValidation,
+    rejectPayoutValidation,
 };

@@ -23,6 +23,26 @@ const REFERRAL_SOURCE_TYPES = Object.freeze({
     PAYMENT: 'payment',
 });
 
+const REFERRAL_PAYOUT_METHODS = Object.freeze({
+    WALLET_CREDIT: 'wallet_credit',
+    MANUAL_EXTERNAL: 'manual_external',
+});
+
+const REFERRAL_PAYOUT_STATUS = Object.freeze({
+    PENDING: 'pending',
+    APPROVED: 'approved',
+    PAID: 'paid',
+    REJECTED: 'rejected',
+    CANCELLED: 'cancelled',
+});
+
+const REFERRAL_COMMISSION_PAYOUT_STATUS = Object.freeze({
+    AVAILABLE: 'available',
+    LOCKED: 'locked',
+    PAID: 'paid',
+    CANCELLED: 'cancelled',
+});
+
 const REFERRAL_APPLY_TO = Object.freeze({
     EVERY_ELIGIBLE_WALLET_CREDIT: 'EVERY_ELIGIBLE_WALLET_CREDIT',
 });
@@ -49,6 +69,9 @@ module.exports = {
     REFERRAL_RELATIONSHIP_STATUS,
     REFERRAL_COMMISSION_STATUS,
     REFERRAL_SOURCE_TYPES,
+    REFERRAL_PAYOUT_METHODS,
+    REFERRAL_PAYOUT_STATUS,
+    REFERRAL_COMMISSION_PAYOUT_STATUS,
     REFERRAL_APPLY_TO,
     REFERRAL_SETTINGS_KEY,
     DEFAULT_REFERRAL_SETTINGS,

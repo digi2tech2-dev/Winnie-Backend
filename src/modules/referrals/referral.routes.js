@@ -16,6 +16,9 @@ const {
     relationshipListValidation,
     commissionListValidation,
     myCommissionListValidation,
+    payoutListValidation,
+    createPayoutValidation,
+    rejectPayoutValidation,
 } = require('./referral.validation');
 
 const router = Router();
@@ -67,6 +70,32 @@ router.get(
     myCommissionListValidation,
     validate,
     referralController.getMyCommissions
+);
+
+router.get(
+    '/me/referrals/payout-summary',
+    authenticate,
+    requireActiveUser,
+    referralController.getMyPayoutSummary
+);
+
+router.get(
+    '/me/referrals/payouts',
+    authenticate,
+    requireActiveUser,
+    payoutListValidation,
+    validate,
+    referralController.getMyPayouts
+);
+
+router.post(
+    '/me/referrals/payouts',
+    authenticate,
+    requireActiveUser,
+    authorizeRoles('CUSTOMER'),
+    createPayoutValidation,
+    validate,
+    referralController.createMyPayout
 );
 
 router.get(
@@ -123,6 +152,59 @@ router.get(
     commissionListValidation,
     validate,
     referralController.adminListCommissions
+);
+
+router.get(
+    '/admin/referral-payouts',
+    authenticate,
+    authorizeRoles('ADMIN', 'SUPERVISOR'),
+    requireAnyPermission('referral_payouts.read', 'referrals.view'),
+    payoutListValidation,
+    validate,
+    referralController.adminListReferralPayouts
+);
+
+router.get(
+    '/admin/referral-payouts/:id',
+    authenticate,
+    authorizeRoles('ADMIN', 'SUPERVISOR'),
+    requireAnyPermission('referral_payouts.read', 'referrals.view'),
+    param('id').isMongoId(),
+    validate,
+    referralController.adminGetReferralPayout
+);
+
+router.post(
+    '/admin/referral-payouts/:id/approve-wallet-credit',
+    authenticate,
+    authorizeRoles('ADMIN', 'SUPERVISOR'),
+    requireAnyPermission('referral_payouts.manage', 'wallet.adjust'),
+    param('id').isMongoId(),
+    validate,
+    referralController.adminApproveReferralPayoutWalletCredit
+);
+
+router.post(
+    '/admin/referral-payouts/:id/mark-paid',
+    authenticate,
+    authorizeRoles('ADMIN', 'SUPERVISOR'),
+    requirePermission('referral_payouts.manage'),
+    param('id').isMongoId(),
+    body('adminNotes').optional({ nullable: true }).isString().trim().isLength({ max: 2000 }),
+    body('adminNote').optional({ nullable: true }).isString().trim().isLength({ max: 2000 }),
+    validate,
+    referralController.adminMarkReferralPayoutPaid
+);
+
+router.post(
+    '/admin/referral-payouts/:id/reject',
+    authenticate,
+    authorizeRoles('ADMIN', 'SUPERVISOR'),
+    requirePermission('referral_payouts.manage'),
+    param('id').isMongoId(),
+    rejectPayoutValidation,
+    validate,
+    referralController.adminRejectReferralPayout
 );
 
 router.get(

@@ -72,6 +72,30 @@ const getMyCommissions = catchAsync(async (req, res) => {
     sendPaginated(res, { commissions: result.commissions }, result.pagination, 'Referral commissions retrieved.');
 });
 
+const getMyPayoutSummary = catchAsync(async (req, res) => {
+    const summary = await referralService.getReferralPayoutSummary(req.user._id);
+    sendSuccess(res, summary, 'Referral payout summary retrieved.');
+});
+
+const getMyPayouts = catchAsync(async (req, res) => {
+    const result = await referralService.listReferralPayouts({
+        userId: req.user._id,
+        status: req.query.status,
+        method: req.query.method,
+        currency: req.query.currency,
+        page: req.query.page,
+        limit: req.query.limit,
+        admin: false,
+    });
+
+    sendPaginated(res, { payouts: result.payouts }, result.pagination, 'Referral payout requests retrieved.');
+});
+
+const createMyPayout = catchAsync(async (req, res) => {
+    const payout = await referralService.createReferralPayoutRequest(req.user._id, req.body, actorFrom(req));
+    sendSuccess(res, { payout }, 'Referral payout request submitted.');
+});
+
 const getMyReferredUsers = catchAsync(async (req, res) => {
     const result = await referralService.getReferredUsers(req.user._id, {
         page: req.query.page,
@@ -118,6 +142,65 @@ const adminListCommissions = catchAsync(async (req, res) => {
     });
 
     sendPaginated(res, { commissions: result.commissions }, result.pagination, 'Referral commissions retrieved.');
+});
+
+const adminListReferralPayouts = catchAsync(async (req, res) => {
+    const result = await referralService.listReferralPayouts({
+        userId: req.query.userId || req.query.user,
+        status: req.query.status,
+        method: req.query.method,
+        currency: req.query.currency,
+        from: req.query.from,
+        to: req.query.to,
+        page: req.query.page,
+        limit: req.query.limit,
+        admin: true,
+    });
+
+    sendPaginated(res, { payouts: result.payouts }, result.pagination, 'Referral payout requests retrieved.');
+});
+
+const adminGetReferralPayout = catchAsync(async (req, res) => {
+    const payout = await referralService.getReferralPayoutById(req.params.id, { admin: true });
+    sendSuccess(res, { payout }, 'Referral payout request retrieved.');
+});
+
+const adminApproveReferralPayoutWalletCredit = catchAsync(async (req, res) => {
+    const result = await referralService.approveReferralPayoutWalletCredit(req.params.id, actorFrom(req));
+    sendSuccess(
+        res,
+        result,
+        result.alreadyProcessed ? 'Referral payout request already paid.' : 'Referral payout credited to wallet.'
+    );
+});
+
+const adminMarkReferralPayoutPaid = catchAsync(async (req, res) => {
+    const result = await referralService.markReferralPayoutPaid(
+        req.params.id,
+        { adminNotes: req.body.adminNotes || req.body.adminNote || null },
+        actorFrom(req)
+    );
+    sendSuccess(
+        res,
+        result,
+        result.alreadyProcessed ? 'Referral payout request already paid.' : 'Referral payout request marked paid.'
+    );
+});
+
+const adminRejectReferralPayout = catchAsync(async (req, res) => {
+    const result = await referralService.rejectReferralPayout(
+        req.params.id,
+        {
+            reason: req.body.reason || req.body.rejectionReason,
+            adminNotes: req.body.adminNotes || req.body.adminNote || null,
+        },
+        actorFrom(req)
+    );
+    sendSuccess(
+        res,
+        result,
+        result.alreadyProcessed ? 'Referral payout request already rejected.' : 'Referral payout request rejected.'
+    );
 });
 
 const adminListSubAgentRequests = catchAsync(async (req, res) => {
@@ -185,11 +268,19 @@ module.exports = {
     getMySubAgent,
     requestSubAgent,
     getMyCommissions,
+    getMyPayoutSummary,
+    getMyPayouts,
+    createMyPayout,
     getMyReferredUsers,
     getReferralSettings,
     updateReferralSettings,
     adminListRelationships,
     adminListCommissions,
+    adminListReferralPayouts,
+    adminGetReferralPayout,
+    adminApproveReferralPayoutWalletCredit,
+    adminMarkReferralPayoutPaid,
+    adminRejectReferralPayout,
     adminListSubAgentRequests,
     adminApproveSubAgentRequest,
     adminRejectSubAgentRequest,

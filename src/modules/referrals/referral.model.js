@@ -5,6 +5,9 @@ const {
     REFERRAL_RELATIONSHIP_STATUS,
     REFERRAL_COMMISSION_STATUS,
     REFERRAL_SOURCE_TYPES,
+    REFERRAL_PAYOUT_METHODS,
+    REFERRAL_PAYOUT_STATUS,
+    REFERRAL_COMMISSION_PAYOUT_STATUS,
     ELIGIBLE_REFERRAL_SEMANTIC_TYPES,
 } = require('./referral.constants');
 
@@ -265,6 +268,37 @@ const referralCommissionSchema = new mongoose.Schema(
             index: true,
         },
 
+        payoutStatus: {
+            type: String,
+            enum: Object.values(REFERRAL_COMMISSION_PAYOUT_STATUS),
+            default: REFERRAL_COMMISSION_PAYOUT_STATUS.AVAILABLE,
+            index: true,
+        },
+
+        payoutRequestId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'ReferralCommissionPayout',
+            default: null,
+            index: true,
+        },
+
+        payoutLockedAt: {
+            type: Date,
+            default: null,
+            index: true,
+        },
+
+        payoutReleasedAt: {
+            type: Date,
+            default: null,
+        },
+
+        payoutPaidAt: {
+            type: Date,
+            default: null,
+            index: true,
+        },
+
         idempotencyKey: {
             type: String,
             required: [true, 'idempotencyKey is required'],
@@ -314,6 +348,7 @@ referralCommissionSchema.pre('validate', function syncSubAgentCommissionAliases(
     if (this.fxRateUsed === null || this.fxRateUsed === undefined) this.fxRateUsed = 1;
     if (!this.fxSnapshotAt) this.fxSnapshotAt = this.earnedAt || this.createdAt || new Date();
     if (!this.earnedAt) this.earnedAt = this.createdAt || new Date();
+    if (!this.payoutStatus) this.payoutStatus = REFERRAL_COMMISSION_PAYOUT_STATUS.AVAILABLE;
     next();
 });
 
@@ -331,12 +366,181 @@ referralCommissionSchema.index({ invitedUserId: 1, createdAt: -1 });
 referralCommissionSchema.index({ agentId: 1, earnedAt: -1 });
 referralCommissionSchema.index({ referredUserId: 1, earnedAt: -1 });
 referralCommissionSchema.index({ status: 1, createdAt: -1 });
+referralCommissionSchema.index({ payoutStatus: 1, commissionCurrency: 1, inviterUserId: 1 });
+
+const referralCommissionPayoutSchema = new mongoose.Schema(
+    {
+        userId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            required: [true, 'userId is required'],
+            index: true,
+        },
+
+        method: {
+            type: String,
+            enum: Object.values(REFERRAL_PAYOUT_METHODS),
+            required: [true, 'method is required'],
+            index: true,
+        },
+
+        status: {
+            type: String,
+            enum: Object.values(REFERRAL_PAYOUT_STATUS),
+            default: REFERRAL_PAYOUT_STATUS.PENDING,
+            index: true,
+        },
+
+        requestedAmount: {
+            type: Number,
+            required: [true, 'requestedAmount is required'],
+            min: [0, 'requestedAmount cannot be negative'],
+        },
+
+        requestedCurrency: {
+            type: String,
+            required: [true, 'requestedCurrency is required'],
+            uppercase: true,
+            trim: true,
+            minlength: 3,
+            maxlength: 3,
+            index: true,
+        },
+
+        lockedCommissionIds: [{
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'ReferralCommission',
+        }],
+
+        lockedAmount: {
+            type: Number,
+            default: 0,
+            min: [0, 'lockedAmount cannot be negative'],
+        },
+
+        lockedCurrency: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            minlength: 3,
+            maxlength: 3,
+            default: null,
+        },
+
+        payoutDetails: {
+            type: mongoose.Schema.Types.Mixed,
+            default: undefined,
+        },
+
+        adminNotes: {
+            type: String,
+            trim: true,
+            maxlength: 2000,
+            default: null,
+        },
+
+        rejectionReason: {
+            type: String,
+            trim: true,
+            maxlength: 1000,
+            default: null,
+        },
+
+        reviewedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+            index: true,
+        },
+
+        reviewedAt: {
+            type: Date,
+            default: null,
+            index: true,
+        },
+
+        paidBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+            index: true,
+        },
+
+        paidAt: {
+            type: Date,
+            default: null,
+            index: true,
+        },
+
+        walletTransactionId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'WalletTransaction',
+            default: null,
+            index: true,
+        },
+
+        walletCreditAmount: {
+            type: Number,
+            default: null,
+            min: [0, 'walletCreditAmount cannot be negative'],
+        },
+
+        walletCreditCurrency: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            minlength: 3,
+            maxlength: 3,
+            default: null,
+        },
+
+        fxRateUsed: {
+            type: Number,
+            default: null,
+            min: [0, 'fxRateUsed cannot be negative'],
+        },
+
+        fxSnapshotAt: {
+            type: Date,
+            default: null,
+        },
+
+        fxMetadata: {
+            type: mongoose.Schema.Types.Mixed,
+            default: undefined,
+        },
+
+        metadata: {
+            type: mongoose.Schema.Types.Mixed,
+            default: undefined,
+        },
+
+        idempotencyKey: {
+            type: String,
+            required: [true, 'idempotencyKey is required'],
+            trim: true,
+        },
+    },
+    { timestamps: true }
+);
+
+referralCommissionPayoutSchema.index({ userId: 1, requestedCurrency: 1, status: 1, createdAt: -1 });
+referralCommissionPayoutSchema.index({ idempotencyKey: 1 }, { unique: true });
+referralCommissionPayoutSchema.index(
+    { userId: 1, requestedCurrency: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { status: REFERRAL_PAYOUT_STATUS.PENDING },
+    }
+);
 
 const ReferralRelationship = mongoose.model('ReferralRelationship', referralRelationshipSchema);
 const ReferralCommission = mongoose.model('ReferralCommission', referralCommissionSchema);
+const ReferralCommissionPayout = mongoose.model('ReferralCommissionPayout', referralCommissionPayoutSchema);
 
 module.exports = {
     ReferralRelationship,
     ReferralCommission,
+    ReferralCommissionPayout,
     SubAgentCommission: ReferralCommission,
 };

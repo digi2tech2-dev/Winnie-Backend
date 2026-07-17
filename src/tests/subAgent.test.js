@@ -7,7 +7,8 @@ const paymentService = require('../modules/payments/payment.service');
 const adminWalletService = require('../modules/admin/admin.wallet.service');
 const { register } = require('../modules/auth/auth.service');
 const { User, SUB_AGENT_STATUS } = require('../modules/users/user.model');
-const { ReferralRelationship, ReferralCommission } = require('../modules/referrals/referral.model');
+const { ReferralRelationship, ReferralCommission, ReferralCommissionPayout } = require('../modules/referrals/referral.model');
+const { REFERRAL_COMMISSION_PAYOUT_STATUS, REFERRAL_PAYOUT_STATUS } = require('../modules/referrals/referral.constants');
 const { GROUP_REQUEST_TYPES, GROUP_REQUEST_STATUS } = require('../modules/groupRequests/groupRequest.constants');
 const { PAYMENT_GATEWAYS } = require('../modules/payments/payment.constants');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
@@ -517,6 +518,203 @@ describe('Sub-agent referral and commission rules', () => {
         await depositService.approveDeposit(deposit._id, admin._id);
 
         expect(await ReferralCommission.countDocuments()).toBe(0);
+    });
+});
+
+describe('Referral commission payout workflow', () => {
+    const createReferralCommission = async ({ percent = 10, amount = 100, currency = 'USD', referrerOverrides = {}, referredOverrides = {} } = {}) => {
+        const group = await createGroup();
+        const admin = await createAdmin({ groupId: group._id });
+        const referrer = await createCustomer({
+            groupId: group._id,
+            walletBalance: 0,
+            currency,
+            ...referrerOverrides,
+        });
+        await referralService.updateSubAgent(referrer._id, { commissionPercent: percent }, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+        const referred = await createCustomer({
+            groupId: group._id,
+            walletBalance: 0,
+            currency,
+            ...referredOverrides,
+        });
+        await referralService.createReferralRelationship({
+            inviterUserId: referrer._id,
+            invitedUserId: referred._id,
+            referralCode: referrer.referralCode,
+        });
+        const deposit = await createPendingDeposit(referred._id, {
+            requestedAmount: amount,
+            currency,
+            exchangeRate: currency === 'USD' ? 1 : 50,
+            amountUsd: currency === 'USD' ? amount : amount / 50,
+        });
+        await depositService.approveDeposit(deposit._id, admin._id);
+        const commission = await ReferralCommission.findOne({ inviterUserId: referrer._id });
+        return { admin, group, referrer, referred, commission };
+    };
+
+    it('user sees available balance and can create wallet-credit payout request', async () => {
+        const { referrer, commission } = await createReferralCommission({ percent: 10, amount: 100 });
+
+        const summary = await referralService.getReferralPayoutSummary(referrer._id);
+        expect(summary.availableBalances).toEqual([{ currency: 'USD', amount: 10, count: 1 }]);
+
+        const payout = await referralService.createReferralPayoutRequest(referrer._id, {
+            method: 'wallet_credit',
+            currency: 'USD',
+            amount: 10,
+        });
+
+        expect(payout.status).toBe(REFERRAL_PAYOUT_STATUS.PENDING);
+        expect(payout.lockedCommissionCount).toBe(1);
+
+        const locked = await ReferralCommission.findById(commission._id);
+        expect(locked.payoutStatus).toBe(REFERRAL_COMMISSION_PAYOUT_STATUS.LOCKED);
+
+        const afterLock = await referralService.getReferralPayoutSummary(referrer._id);
+        expect(afterLock.availableBalances).toEqual([]);
+        expect(afterLock.pendingPayoutBalances).toEqual([{ currency: 'USD', amount: 10, count: 1 }]);
+    });
+
+    it('rejecting payout releases locked commissions', async () => {
+        const { admin, referrer } = await createReferralCommission({ percent: 10, amount: 100 });
+        const payout = await referralService.createReferralPayoutRequest(referrer._id, {
+            method: 'wallet_credit',
+            currency: 'USD',
+            amount: 10,
+        });
+
+        await expect(referralService.createReferralPayoutRequest(referrer._id, {
+            method: 'wallet_credit',
+            currency: 'USD',
+            amount: 10,
+        })).rejects.toMatchObject({ code: 'REFERRAL_PAYOUT_ALREADY_PENDING' });
+
+        const rejected = await referralService.rejectReferralPayout(payout.id, { reason: 'Missing review data' }, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+
+        expect(rejected.payout.status).toBe(REFERRAL_PAYOUT_STATUS.REJECTED);
+        expect(rejected.payout.rejectionReason).toBe('Missing review data');
+
+        const summary = await referralService.getReferralPayoutSummary(referrer._id);
+        expect(summary.availableBalances).toEqual([{ currency: 'USD', amount: 10, count: 1 }]);
+        expect(summary.pendingPayoutBalances).toEqual([]);
+    });
+
+    it('wallet-credit approval credits wallet once and marks commissions paid', async () => {
+        const { admin, referrer } = await createReferralCommission({ percent: 10, amount: 100 });
+        const payout = await referralService.createReferralPayoutRequest(referrer._id, {
+            method: 'wallet_credit',
+            currency: 'USD',
+            amount: 10,
+        });
+
+        const first = await referralService.approveReferralPayoutWalletCredit(payout.id, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+        const second = await referralService.approveReferralPayoutWalletCredit(payout.id, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+
+        expect(first.payout.status).toBe(REFERRAL_PAYOUT_STATUS.PAID);
+        expect(second.alreadyProcessed).toBe(true);
+        const freshReferrer = await User.findById(referrer._id);
+        expect(freshReferrer.walletBalance).toBe(10);
+
+        const walletTransactions = await WalletTransaction.find({ userId: referrer._id, semanticType: 'REFERRAL_COMMISSION_PAYOUT' });
+        expect(walletTransactions).toHaveLength(1);
+        expect(walletTransactions[0].sourceType).toBe('REFERRAL_PAYOUT');
+
+        const commission = await ReferralCommission.findOne({ inviterUserId: referrer._id });
+        expect(commission.status).toBe('paid');
+        expect(commission.payoutStatus).toBe(REFERRAL_COMMISSION_PAYOUT_STATUS.PAID);
+        expect(commission.walletTransactionId.toString()).toBe(walletTransactions[0]._id.toString());
+    });
+
+    it('manual external mark-paid marks commissions paid without wallet credit', async () => {
+        const { admin, referrer } = await createReferralCommission({ percent: 10, amount: 100 });
+        const payout = await referralService.createReferralPayoutRequest(referrer._id, {
+            method: 'manual_external',
+            currency: 'USD',
+            amount: 10,
+            payoutDetails: { methodName: 'Vodafone Cash', phone: '01000000000' },
+        });
+
+        const first = await referralService.markReferralPayoutPaid(payout.id, { adminNotes: 'Paid externally' }, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+        const second = await referralService.markReferralPayoutPaid(payout.id, {}, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+
+        expect(first.payout.status).toBe(REFERRAL_PAYOUT_STATUS.PAID);
+        expect(second.alreadyProcessed).toBe(true);
+        expect((await User.findById(referrer._id)).walletBalance).toBe(0);
+        expect(await WalletTransaction.countDocuments({ userId: referrer._id, semanticType: 'REFERRAL_COMMISSION_PAYOUT' })).toBe(0);
+    });
+
+    it('wallet-credit payout converts currency at approval time when wallet currency changed', async () => {
+        await Currency.create({
+            code: 'EGP',
+            name: 'Egyptian Pound',
+            symbol: 'E£',
+            platformRate: 50,
+            marketRate: 50,
+            isActive: true,
+        });
+        const { admin, referrer } = await createReferralCommission({
+            percent: 2,
+            amount: 1000,
+            currency: 'EGP',
+        });
+        const payout = await referralService.createReferralPayoutRequest(referrer._id, {
+            method: 'wallet_credit',
+            currency: 'EGP',
+            amount: 20,
+        });
+        await User.updateOne({ _id: referrer._id }, { $set: { currency: 'USD' } });
+
+        const result = await referralService.approveReferralPayoutWalletCredit(payout.id, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+
+        expect(result.payout.walletCreditAmount).toBe(0.4);
+        expect(result.payout.walletCreditCurrency).toBe('USD');
+        expect(result.payout.fxRateUsed).toBe(0.02);
+        expect((await User.findById(referrer._id)).walletBalance).toBe(0.4);
+    });
+
+    it('rejects invalid payout amounts and currencies', async () => {
+        const { referrer } = await createReferralCommission({ percent: 10, amount: 100 });
+
+        await expect(referralService.createReferralPayoutRequest(referrer._id, {
+            method: 'wallet_credit',
+            currency: 'USD',
+            amount: 0,
+        })).rejects.toMatchObject({ code: 'INVALID_REFERRAL_PAYOUT_AMOUNT' });
+
+        await expect(referralService.createReferralPayoutRequest(referrer._id, {
+            method: 'wallet_credit',
+            currency: 'USD',
+            amount: 11,
+        })).rejects.toMatchObject({ code: 'INSUFFICIENT_REFERRAL_PAYOUT_BALANCE' });
+
+        await expect(referralService.createReferralPayoutRequest(referrer._id, {
+            method: 'wallet_credit',
+            currency: 'EGP',
+            amount: 10,
+        })).rejects.toMatchObject({ code: 'NO_REFERRAL_PAYOUT_BALANCE' });
     });
 });
 

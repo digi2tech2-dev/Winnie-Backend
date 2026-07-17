@@ -16,14 +16,20 @@ const {
     TRANSACTION_TYPES,
     TRANSACTION_DIRECTIONS,
     TRANSACTION_STATUS,
+    LEDGER_TRANSACTION_TYPES,
+    TRANSACTION_SOURCE_TYPES,
 } = require('../wallet/walletTransaction.model');
+const { creditWalletDirect } = require('../wallet/wallet.service');
 const { createAuditLog } = require('../audit/audit.service');
 const {
     REFERRAL_ACTIONS,
     ENTITY_TYPES,
     ACTOR_ROLES,
 } = require('../audit/audit.constants');
-const { safeCreateNotification } = require('../notifications/notification.service');
+const {
+    safeCreateNotification,
+    safeCreateAdminActorNotifications,
+} = require('../notifications/notification.service');
 const { NOTIFICATION_TYPES, NOTIFICATION_PRIORITIES } = require('../notifications/notification.model');
 const { toDecimal, toFiat } = require('../../shared/utils/decimalPrecision');
 const { getConversionRate } = require('../../services/currencyConverter.service');
@@ -35,10 +41,14 @@ const {
 const {
     ReferralRelationship,
     ReferralCommission,
+    ReferralCommissionPayout,
 } = require('./referral.model');
 const {
     REFERRAL_RELATIONSHIP_STATUS,
     REFERRAL_COMMISSION_STATUS,
+    REFERRAL_PAYOUT_METHODS,
+    REFERRAL_PAYOUT_STATUS,
+    REFERRAL_COMMISSION_PAYOUT_STATUS,
     REFERRAL_APPLY_TO,
     REFERRAL_SETTINGS_KEY,
     DEFAULT_REFERRAL_SETTINGS,
@@ -696,6 +706,791 @@ const getReferralSummary = async (userId) => {
             minSourceAmount: settings.minSourceAmount,
             maxCommissionAmount: settings.maxCommissionAmount,
         },
+    };
+};
+
+const payoutEligibleCommissionStatuses = [
+    REFERRAL_COMMISSION_STATUS.PENDING,
+    REFERRAL_COMMISSION_STATUS.AVAILABLE,
+];
+
+const availablePayoutStatusFilter = () => ({
+    $or: [
+        { payoutStatus: { $exists: false } },
+        { payoutStatus: null },
+        { payoutStatus: REFERRAL_COMMISSION_PAYOUT_STATUS.AVAILABLE },
+    ],
+});
+
+const groupCommissionBalances = async (match) => {
+    const rows = await ReferralCommission.aggregate([
+        { $match: match },
+        {
+            $group: {
+                _id: '$commissionCurrency',
+                amount: { $sum: '$commissionAmount' },
+                count: { $sum: 1 },
+            },
+        },
+        { $sort: { _id: 1 } },
+    ]);
+
+    return rows.map((row) => ({
+        currency: row._id,
+        amount: toFiat(row.amount),
+        count: row.count,
+    }));
+};
+
+const getReferralPayoutBalances = async (userId) => {
+    const inviterUserId = new mongoose.Types.ObjectId(toIdString(userId));
+    const baseMatch = { inviterUserId };
+
+    const [availableBalances, pendingPayoutBalances, paidPayoutBalances] = await Promise.all([
+        groupCommissionBalances({
+            ...baseMatch,
+            status: { $in: payoutEligibleCommissionStatuses },
+            ...availablePayoutStatusFilter(),
+        }),
+        groupCommissionBalances({
+            ...baseMatch,
+            status: { $in: payoutEligibleCommissionStatuses },
+            payoutStatus: REFERRAL_COMMISSION_PAYOUT_STATUS.LOCKED,
+        }),
+        groupCommissionBalances({
+            ...baseMatch,
+            $or: [
+                { status: REFERRAL_COMMISSION_STATUS.PAID },
+                { payoutStatus: REFERRAL_COMMISSION_PAYOUT_STATUS.PAID },
+            ],
+        }),
+    ]);
+
+    return {
+        availableBalances,
+        pendingPayoutBalances,
+        paidPayoutBalances,
+    };
+};
+
+const serializePayoutUser = (user) => {
+    if (!user || typeof user !== 'object') return user ? { id: toIdString(user) } : null;
+    return {
+        id: toIdString(user._id || user.id),
+        name: user.name || null,
+        email: user.email || null,
+        phone: user.phone || null,
+        referralCode: user.referralCode || null,
+        currency: user.currency || null,
+    };
+};
+
+const serializePayout = (payout, { admin = false } = {}) => {
+    if (!payout) return null;
+    const raw = typeof payout.toObject === 'function' ? payout.toObject() : payout;
+    const lockedCommissionIds = Array.isArray(raw.lockedCommissionIds) ? raw.lockedCommissionIds : [];
+
+    return {
+        id: toIdString(raw._id || raw.id),
+        userId: toIdString(raw.userId),
+        user: admin ? serializePayoutUser(raw.userId) : undefined,
+        method: raw.method,
+        status: raw.status,
+        requestedAmount: toFiat(raw.requestedAmount),
+        requestedCurrency: normalizeCurrency(raw.requestedCurrency),
+        lockedAmount: toFiat(raw.lockedAmount ?? raw.requestedAmount),
+        lockedCurrency: raw.lockedCurrency ? normalizeCurrency(raw.lockedCurrency) : normalizeCurrency(raw.requestedCurrency),
+        lockedCommissionIds: lockedCommissionIds.map(toIdString),
+        lockedCommissionCount: lockedCommissionIds.length,
+        payoutDetails: raw.payoutDetails || null,
+        adminNotes: raw.adminNotes || null,
+        rejectionReason: raw.rejectionReason || null,
+        reviewedBy: admin ? serializePayoutUser(raw.reviewedBy) : toIdString(raw.reviewedBy),
+        reviewedAt: raw.reviewedAt || null,
+        paidBy: admin ? serializePayoutUser(raw.paidBy) : toIdString(raw.paidBy),
+        paidAt: raw.paidAt || null,
+        walletTransactionId: toIdString(raw.walletTransactionId),
+        walletCreditAmount: raw.walletCreditAmount === null || raw.walletCreditAmount === undefined
+            ? null
+            : toFiat(raw.walletCreditAmount),
+        walletCreditCurrency: raw.walletCreditCurrency ? normalizeCurrency(raw.walletCreditCurrency) : null,
+        fxRateUsed: raw.fxRateUsed ?? null,
+        fxSnapshotAt: raw.fxSnapshotAt || null,
+        fxMetadata: raw.fxMetadata || undefined,
+        metadata: admin ? raw.metadata || undefined : undefined,
+        createdAt: raw.createdAt,
+        updatedAt: raw.updatedAt,
+    };
+};
+
+const normalizePayoutDetails = (details = {}) => {
+    const source = details && typeof details === 'object' && !Array.isArray(details) ? details : {};
+    return ['methodName', 'accountName', 'accountNumber', 'phone', 'walletAddress', 'notes'].reduce((acc, key) => {
+        const value = source[key];
+        if (value === undefined || value === null) return acc;
+        const normalized = String(value).trim();
+        if (normalized) acc[key] = normalized.slice(0, 500);
+        return acc;
+    }, {});
+};
+
+const normalizePayoutMethod = (method) => {
+    const normalized = String(method || '').trim().toLowerCase();
+    if (!Object.values(REFERRAL_PAYOUT_METHODS).includes(normalized)) {
+        throw new BusinessRuleError('Invalid referral payout method.', 'INVALID_REFERRAL_PAYOUT_METHOD');
+    }
+    return normalized;
+};
+
+const convertAmountBetweenCurrencies = async ({ amount, sourceCurrency, targetCurrency, reason = 'referral_payout' }) => {
+    const source = normalizeCurrency(sourceCurrency);
+    const target = normalizeCurrency(targetCurrency);
+    const roundedAmount = toFiat(amount);
+    const snapshotAt = new Date();
+
+    if (source === target) {
+        return {
+            amount: roundedAmount,
+            currency: target,
+            fxRateUsed: 1,
+            fxSnapshotAt: snapshotAt,
+            fxMetadata: {
+                sourceCurrency: source,
+                sourceRate: 1,
+                targetCurrency: target,
+                targetRate: 1,
+                conversion: 'same_currency',
+                reason,
+            },
+        };
+    }
+
+    const [sourceRate, targetRate] = await Promise.all([
+        getConversionRate(source),
+        getConversionRate(target),
+    ]);
+
+    if (!sourceRate || sourceRate <= 0 || !targetRate || targetRate <= 0) {
+        throw new BusinessRuleError('Currency conversion rate is unavailable for referral payout.', 'REFERRAL_PAYOUT_FX_UNAVAILABLE');
+    }
+
+    const fxRateUsed = Number(toDecimal(targetRate).dividedBy(toDecimal(sourceRate)).toDecimalPlaces(8).toNumber());
+    const convertedAmount = toFiat(toDecimal(roundedAmount).times(toDecimal(fxRateUsed)));
+
+    return {
+        amount: convertedAmount,
+        currency: target,
+        fxRateUsed,
+        fxSnapshotAt: snapshotAt,
+        fxMetadata: {
+            sourceCurrency: source,
+            sourceRate,
+            targetCurrency: target,
+            targetRate,
+            conversion: 'platform_rate',
+            reason,
+        },
+    };
+};
+
+const getReferralPayoutSummary = async (userId) => {
+    await ensureReferralCode(userId);
+    const [balances, latestPayouts] = await Promise.all([
+        getReferralPayoutBalances(userId),
+        ReferralCommissionPayout.find({ userId })
+            .sort({ createdAt: -1 })
+            .limit(5)
+            .lean(),
+    ]);
+
+    return {
+        ...balances,
+        latestPayouts: latestPayouts.map((payout) => serializePayout(payout)),
+        supportsPartialAmount: false,
+        payoutMode: 'full_currency_balance',
+    };
+};
+
+const listReferralPayouts = async ({
+    userId,
+    status,
+    method,
+    currency,
+    from,
+    to,
+    page = 1,
+    limit = 20,
+    admin = false,
+} = {}) => {
+    const normalizedPage = parsePage(page);
+    const normalizedLimit = parseLimit(limit);
+    const skip = (normalizedPage - 1) * normalizedLimit;
+    const filter = {};
+
+    if (userId) filter.userId = userId;
+    if (status) filter.status = status;
+    if (method) filter.method = normalizePayoutMethod(method);
+    if (currency) filter.requestedCurrency = normalizeCurrency(currency);
+    const dateFilter = buildDateFilter({ from, to });
+    if (dateFilter) filter.createdAt = dateFilter;
+
+    const query = ReferralCommissionPayout.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(normalizedLimit);
+    const populatedQuery = admin
+        ? query
+            .populate('userId', 'name email phone referralCode currency')
+            .populate('reviewedBy', 'name email role')
+            .populate('paidBy', 'name email role')
+        : query;
+
+    const [payouts, total] = await Promise.all([
+        populatedQuery.lean(),
+        ReferralCommissionPayout.countDocuments(filter),
+    ]);
+
+    return {
+        payouts: payouts.map((payout) => serializePayout(payout, { admin })),
+        pagination: {
+            page: normalizedPage,
+            limit: normalizedLimit,
+            total,
+            pages: Math.ceil(total / normalizedLimit) || 1,
+        },
+    };
+};
+
+const getReferralPayoutById = async (id, { userId, admin = false } = {}) => {
+    const filter = { _id: id };
+    if (userId) filter.userId = userId;
+    const query = ReferralCommissionPayout.findOne(filter);
+    const populatedQuery = admin
+        ? query
+            .populate('userId', 'name email phone referralCode currency')
+            .populate('reviewedBy', 'name email role')
+            .populate('paidBy', 'name email role')
+        : query;
+    const payout = await populatedQuery.lean();
+    if (!payout) throw new NotFoundError('Referral payout request');
+    return serializePayout(payout, { admin });
+};
+
+const emitPayoutRequestedSideEffects = ({ payout, userId, actor = {} }) => {
+    void createAuditLog({
+        actorId: actor.actorId || userId,
+        actorRole: actor.actorRole || actor.role || ACTOR_ROLES.CUSTOMER,
+        action: REFERRAL_ACTIONS.REFERRAL_PAYOUT_REQUESTED,
+        entityType: ENTITY_TYPES.REFERRAL_PAYOUT,
+        entityId: payout._id,
+        metadata: {
+            userId: toIdString(userId),
+            amount: payout.requestedAmount,
+            currency: payout.requestedCurrency,
+            method: payout.method,
+            lockedCommissionCount: payout.lockedCommissionIds?.length || 0,
+        },
+        ipAddress: actor.ipAddress || null,
+        userAgent: actor.userAgent || null,
+    });
+
+    void safeCreateNotification({
+        userId,
+        title: 'Referral payout request submitted',
+        message: `Your referral payout request for ${payout.requestedAmount} ${payout.requestedCurrency} was submitted.`,
+        type: NOTIFICATION_TYPES.WALLET,
+        priority: NOTIFICATION_PRIORITIES.NORMAL,
+        route: '/customer/sub-agent',
+        entityType: 'referral_payout',
+        entityId: payout._id,
+        metadata: {
+            eventKey: `referral-payout:${payout._id.toString()}:submitted`,
+            eventType: 'referral_payout_requested',
+            payoutRequestId: payout._id.toString(),
+        },
+    });
+
+    void safeCreateAdminActorNotifications({
+        roles: [ROLES.ADMIN, ROLES.SUPERVISOR],
+        permissions: ['referral_payouts.read'],
+        title: 'New referral payout request',
+        message: `A referral payout request for ${payout.requestedAmount} ${payout.requestedCurrency} needs review.`,
+        type: NOTIFICATION_TYPES.WALLET,
+        priority: NOTIFICATION_PRIORITIES.NORMAL,
+        route: '/admin/sub-agents',
+        entityType: 'referral_payout',
+        entityId: payout._id,
+        metadata: {
+            eventKey: `referral-payout:${payout._id.toString()}:admin`,
+            eventType: 'referral_payout_requested',
+            payoutRequestId: payout._id.toString(),
+            userId: toIdString(userId),
+        },
+    });
+};
+
+const createReferralPayoutRequest = async (userId, payload = {}, actor = {}) => {
+    const method = normalizePayoutMethod(payload.method);
+    const requestedCurrency = normalizeCurrency(payload.currency || payload.requestedCurrency);
+    if (!requestedCurrency || requestedCurrency.length !== 3) {
+        throw new BusinessRuleError('A valid payout currency is required.', 'INVALID_REFERRAL_PAYOUT_CURRENCY');
+    }
+
+    const payoutDetails = normalizePayoutDetails(payload.payoutDetails);
+    if (method === REFERRAL_PAYOUT_METHODS.MANUAL_EXTERNAL && Object.keys(payoutDetails).length === 0) {
+        throw new BusinessRuleError('Payout details are required for manual external payouts.', 'REFERRAL_PAYOUT_DETAILS_REQUIRED');
+    }
+
+    const providedAmount = payload.amount ?? payload.requestedAmount;
+    const requestedAmount = providedAmount === undefined || providedAmount === null || providedAmount === ''
+        ? null
+        : toFiat(providedAmount);
+    if (requestedAmount !== null && requestedAmount <= 0) {
+        throw new BusinessRuleError('Referral payout amount must be greater than zero.', 'INVALID_REFERRAL_PAYOUT_AMOUNT');
+    }
+
+    const pending = await ReferralCommissionPayout.findOne({
+        userId,
+        requestedCurrency,
+        status: REFERRAL_PAYOUT_STATUS.PENDING,
+    }).lean();
+    if (pending) {
+        throw new BusinessRuleError('A payout request is already pending for this currency.', 'REFERRAL_PAYOUT_ALREADY_PENDING');
+    }
+
+    const session = await mongoose.startSession();
+    let payoutId;
+
+    try {
+        session.startTransaction();
+
+        const user = await User.findById(userId).select('_id name email currency').session(session);
+        if (!user) throw new NotFoundError('User');
+
+        const duplicatePending = await ReferralCommissionPayout.findOne({
+            userId,
+            requestedCurrency,
+            status: REFERRAL_PAYOUT_STATUS.PENDING,
+        }).session(session);
+        if (duplicatePending) {
+            throw new BusinessRuleError('A payout request is already pending for this currency.', 'REFERRAL_PAYOUT_ALREADY_PENDING');
+        }
+
+        const availableFilter = {
+            inviterUserId: user._id,
+            commissionCurrency: requestedCurrency,
+            status: { $in: payoutEligibleCommissionStatuses },
+            ...availablePayoutStatusFilter(),
+        };
+        const commissions = await ReferralCommission.find(availableFilter)
+            .sort({ earnedAt: 1, createdAt: 1 })
+            .session(session);
+
+        if (!commissions.length) {
+            throw new BusinessRuleError('No available referral commission balance for this currency.', 'NO_REFERRAL_PAYOUT_BALANCE');
+        }
+
+        const totalAvailable = toFiat(commissions.reduce((sum, commission) => (
+            toDecimal(sum).plus(toDecimal(commission.commissionAmount)).toNumber()
+        ), 0));
+        const amountToWithdraw = requestedAmount === null ? totalAvailable : requestedAmount;
+        if (amountToWithdraw <= 0) {
+            throw new BusinessRuleError('Referral payout amount must be greater than zero.', 'INVALID_REFERRAL_PAYOUT_AMOUNT');
+        }
+        if (amountToWithdraw > totalAvailable) {
+            throw new BusinessRuleError('Requested payout exceeds available referral commission balance.', 'INSUFFICIENT_REFERRAL_PAYOUT_BALANCE');
+        }
+        if (amountToWithdraw !== totalAvailable) {
+            throw new BusinessRuleError('Partial referral payout is not supported yet. Request the full available balance for this currency.', 'REFERRAL_PAYOUT_FULL_BALANCE_REQUIRED');
+        }
+
+        const commissionIds = commissions.map((commission) => commission._id);
+        payoutId = new mongoose.Types.ObjectId();
+        const now = new Date();
+        const [payout] = await ReferralCommissionPayout.create([{
+            _id: payoutId,
+            userId: user._id,
+            method,
+            status: REFERRAL_PAYOUT_STATUS.PENDING,
+            requestedAmount: amountToWithdraw,
+            requestedCurrency,
+            lockedAmount: totalAvailable,
+            lockedCurrency: requestedCurrency,
+            lockedCommissionIds: commissionIds,
+            payoutDetails: method === REFERRAL_PAYOUT_METHODS.MANUAL_EXTERNAL ? payoutDetails : undefined,
+            idempotencyKey: `referral-payout-request:${payoutId.toString()}`,
+            metadata: {
+                supportsPartialAmount: false,
+                payoutMode: 'full_currency_balance',
+                lockedCommissionCount: commissionIds.length,
+                commissionIds: commissionIds.map(toIdString),
+            },
+        }], { session });
+
+        const updateResult = await ReferralCommission.updateMany(
+            {
+                _id: { $in: commissionIds },
+                inviterUserId: user._id,
+                commissionCurrency: requestedCurrency,
+                status: { $in: payoutEligibleCommissionStatuses },
+                ...availablePayoutStatusFilter(),
+            },
+            {
+                $set: {
+                    payoutStatus: REFERRAL_COMMISSION_PAYOUT_STATUS.LOCKED,
+                    payoutRequestId: payout._id,
+                    payoutLockedAt: now,
+                },
+                $unset: {
+                    payoutReleasedAt: '',
+                },
+            },
+            { session }
+        );
+
+        if ((updateResult.modifiedCount || updateResult.nModified || 0) !== commissionIds.length) {
+            throw new BusinessRuleError('Referral commission balance changed while creating payout request.', 'REFERRAL_PAYOUT_LOCK_CONFLICT');
+        }
+
+        await session.commitTransaction();
+        emitPayoutRequestedSideEffects({ payout, userId: user._id, actor });
+    } catch (err) {
+        if (session.inTransaction()) await session.abortTransaction();
+        if (err.code === 11000) {
+            throw new BusinessRuleError('A payout request is already pending for this currency.', 'REFERRAL_PAYOUT_ALREADY_PENDING');
+        }
+        throw err;
+    } finally {
+        try { session.endSession(); } catch (_) { /* noop */ }
+    }
+
+    return getReferralPayoutById(payoutId, { userId });
+};
+
+const emitPayoutReviewSideEffects = ({ payout, action, actor = {}, walletTransactionId = null }) => {
+    const targetUserId = payout.userId?._id || payout.userId;
+
+    void createAuditLog({
+        actorId: actor.actorId || actor._id || actor.userId,
+        actorRole: actor.actorRole || actor.role || ACTOR_ROLES.ADMIN,
+        action,
+        entityType: ENTITY_TYPES.REFERRAL_PAYOUT,
+        entityId: payout._id,
+        metadata: {
+            userId: toIdString(payout.userId),
+            amount: payout.requestedAmount,
+            currency: payout.requestedCurrency,
+            method: payout.method,
+            walletTransactionId: walletTransactionId ? toIdString(walletTransactionId) : toIdString(payout.walletTransactionId),
+        },
+        ipAddress: actor.ipAddress || null,
+        userAgent: actor.userAgent || null,
+    });
+
+    const paid = action === REFERRAL_ACTIONS.REFERRAL_PAYOUT_APPROVED_WALLET_CREDIT ||
+        action === REFERRAL_ACTIONS.REFERRAL_PAYOUT_MARKED_PAID;
+    void safeCreateNotification({
+        userId: targetUserId,
+        title: paid ? 'Referral payout paid' : 'Referral payout rejected',
+        message: paid
+            ? `Your referral payout request for ${payout.requestedAmount} ${payout.requestedCurrency} was paid.`
+            : `Your referral payout request for ${payout.requestedAmount} ${payout.requestedCurrency} was rejected.`,
+        type: NOTIFICATION_TYPES.WALLET,
+        priority: NOTIFICATION_PRIORITIES.NORMAL,
+        route: '/customer/sub-agent',
+        entityType: 'referral_payout',
+        entityId: payout._id,
+        metadata: {
+            eventKey: `referral-payout:${payout._id.toString()}:${paid ? 'paid' : 'rejected'}`,
+            eventType: paid ? 'referral_payout_paid' : 'referral_payout_rejected',
+            payoutRequestId: payout._id.toString(),
+        },
+    });
+};
+
+const markLockedCommissionsPaid = async ({ payout, now, walletTransactionId = null, session }) => {
+    const update = {
+        status: REFERRAL_COMMISSION_STATUS.PAID,
+        payoutStatus: REFERRAL_COMMISSION_PAYOUT_STATUS.PAID,
+        payoutPaidAt: now,
+    };
+    if (walletTransactionId) update.walletTransactionId = walletTransactionId;
+
+    return ReferralCommission.updateMany(
+        {
+            _id: { $in: payout.lockedCommissionIds || [] },
+            payoutRequestId: payout._id,
+            payoutStatus: REFERRAL_COMMISSION_PAYOUT_STATUS.LOCKED,
+        },
+        { $set: update },
+        { session }
+    );
+};
+
+const approveReferralPayoutWalletCredit = async (payoutId, actor = {}) => {
+    const session = await mongoose.startSession();
+    let alreadyProcessed = false;
+    let walletTransaction = null;
+
+    try {
+        session.startTransaction();
+        const payout = await ReferralCommissionPayout.findById(payoutId).session(session);
+        if (!payout) throw new NotFoundError('Referral payout request');
+        if (payout.method !== REFERRAL_PAYOUT_METHODS.WALLET_CREDIT) {
+            throw new BusinessRuleError('This payout request is not a wallet credit request.', 'INVALID_REFERRAL_PAYOUT_METHOD');
+        }
+        if (payout.status === REFERRAL_PAYOUT_STATUS.PAID) {
+            walletTransaction = payout.walletTransactionId
+                ? await WalletTransaction.findById(payout.walletTransactionId).session(session)
+                : null;
+            alreadyProcessed = true;
+            await session.commitTransaction();
+        } else {
+            if (payout.status !== REFERRAL_PAYOUT_STATUS.PENDING) {
+                throw new BusinessRuleError('Only pending payout requests can be approved.', 'REFERRAL_PAYOUT_NOT_PENDING');
+            }
+
+            const user = await User.findById(payout.userId).select('_id currency').session(session);
+            if (!user) throw new NotFoundError('User');
+            const walletCurrency = normalizeCurrency(user.currency || payout.requestedCurrency);
+            const conversion = await convertAmountBetweenCurrencies({
+                amount: payout.requestedAmount,
+                sourceCurrency: payout.requestedCurrency,
+                targetCurrency: walletCurrency,
+                reason: 'referral_payout_wallet_credit',
+            });
+
+            const walletIdempotencyKey = `referral-payout:${payout._id.toString()}:wallet-credit`;
+            walletTransaction = await WalletTransaction.findOne({ idempotencyKey: walletIdempotencyKey }).session(session);
+            if (!walletTransaction) {
+                const creditResult = await creditWalletDirect({
+                    userId: payout.userId,
+                    amount: conversion.amount,
+                    currency: conversion.currency,
+                    description: `Referral commission payout ${payout.requestedAmount} ${payout.requestedCurrency}`,
+                    semanticType: LEDGER_TRANSACTION_TYPES.REFERRAL_COMMISSION_PAYOUT,
+                    sourceType: TRANSACTION_SOURCE_TYPES.REFERRAL_PAYOUT,
+                    sourceId: payout._id,
+                    metadata: {
+                        payoutRequestId: payout._id.toString(),
+                        commissionIds: (payout.lockedCommissionIds || []).map(toIdString),
+                        originalPayoutAmount: payout.requestedAmount,
+                        originalPayoutCurrency: payout.requestedCurrency,
+                        walletCreditAmount: conversion.amount,
+                        walletCreditCurrency: conversion.currency,
+                        fxRateUsed: conversion.fxRateUsed,
+                        fxSnapshotAt: conversion.fxSnapshotAt,
+                        fxMetadata: conversion.fxMetadata,
+                    },
+                    idempotencyKey: walletIdempotencyKey,
+                    actorId: actor.actorId || actor._id || actor.userId || null,
+                    actorRole: actor.actorRole || actor.role || ACTOR_ROLES.ADMIN,
+                    session,
+                });
+                walletTransaction = creditResult.transaction;
+            }
+
+            const now = new Date();
+            await markLockedCommissionsPaid({
+                payout,
+                now,
+                walletTransactionId: walletTransaction._id,
+                session,
+            });
+
+            payout.status = REFERRAL_PAYOUT_STATUS.PAID;
+            payout.reviewedBy = actor.actorId || actor._id || actor.userId || null;
+            payout.reviewedAt = now;
+            payout.paidBy = actor.actorId || actor._id || actor.userId || null;
+            payout.paidAt = now;
+            payout.walletTransactionId = walletTransaction._id;
+            payout.walletCreditAmount = conversion.amount;
+            payout.walletCreditCurrency = conversion.currency;
+            payout.fxRateUsed = conversion.fxRateUsed;
+            payout.fxSnapshotAt = conversion.fxSnapshotAt;
+            payout.fxMetadata = conversion.fxMetadata;
+            await payout.save({ session });
+
+            await session.commitTransaction();
+        }
+    } catch (err) {
+        if (session.inTransaction()) await session.abortTransaction();
+        if (err.code === 11000) {
+            const existingPayout = await ReferralCommissionPayout.findById(payoutId);
+            if (existingPayout?.status === REFERRAL_PAYOUT_STATUS.PAID) {
+                return {
+                    alreadyProcessed: true,
+                    payout: serializePayout(existingPayout, { admin: true }),
+                };
+            }
+        }
+        throw err;
+    } finally {
+        try { session.endSession(); } catch (_) { /* noop */ }
+    }
+
+    const freshPayout = await ReferralCommissionPayout.findById(payoutId)
+        .populate('userId', 'name email phone referralCode currency')
+        .populate('reviewedBy', 'name email role')
+        .populate('paidBy', 'name email role');
+
+    if (!alreadyProcessed) {
+        emitPayoutReviewSideEffects({
+            payout: freshPayout,
+            action: REFERRAL_ACTIONS.REFERRAL_PAYOUT_APPROVED_WALLET_CREDIT,
+            actor,
+            walletTransactionId: walletTransaction?._id,
+        });
+        void createAuditLog({
+            actorId: actor.actorId || actor._id || actor.userId,
+            actorRole: actor.actorRole || actor.role || ACTOR_ROLES.ADMIN,
+            action: REFERRAL_ACTIONS.REFERRAL_PAYOUT_WALLET_CREDIT_CREATED,
+            entityType: ENTITY_TYPES.WALLET,
+            entityId: walletTransaction?._id,
+            metadata: {
+                payoutRequestId: toIdString(freshPayout?._id),
+                userId: toIdString(freshPayout?.userId),
+                amount: freshPayout?.walletCreditAmount,
+                currency: freshPayout?.walletCreditCurrency,
+            },
+            ipAddress: actor.ipAddress || null,
+            userAgent: actor.userAgent || null,
+        });
+    }
+
+    return {
+        alreadyProcessed,
+        payout: serializePayout(freshPayout, { admin: true }),
+        walletTransaction,
+    };
+};
+
+const markReferralPayoutPaid = async (payoutId, { adminNotes = null } = {}, actor = {}) => {
+    const session = await mongoose.startSession();
+    let alreadyProcessed = false;
+
+    try {
+        session.startTransaction();
+        const payout = await ReferralCommissionPayout.findById(payoutId).session(session);
+        if (!payout) throw new NotFoundError('Referral payout request');
+        if (payout.method !== REFERRAL_PAYOUT_METHODS.MANUAL_EXTERNAL) {
+            throw new BusinessRuleError('This payout request is not a manual external payout request.', 'INVALID_REFERRAL_PAYOUT_METHOD');
+        }
+        if (payout.status === REFERRAL_PAYOUT_STATUS.PAID) {
+            alreadyProcessed = true;
+        } else {
+            if (payout.status !== REFERRAL_PAYOUT_STATUS.PENDING) {
+                throw new BusinessRuleError('Only pending payout requests can be marked paid.', 'REFERRAL_PAYOUT_NOT_PENDING');
+            }
+            const now = new Date();
+            await markLockedCommissionsPaid({ payout, now, session });
+            payout.status = REFERRAL_PAYOUT_STATUS.PAID;
+            payout.reviewedBy = actor.actorId || actor._id || actor.userId || null;
+            payout.reviewedAt = now;
+            payout.paidBy = actor.actorId || actor._id || actor.userId || null;
+            payout.paidAt = now;
+            payout.adminNotes = adminNotes || payout.adminNotes || null;
+            await payout.save({ session });
+        }
+        await session.commitTransaction();
+    } catch (err) {
+        if (session.inTransaction()) await session.abortTransaction();
+        throw err;
+    } finally {
+        try { session.endSession(); } catch (_) { /* noop */ }
+    }
+
+    const payout = await ReferralCommissionPayout.findById(payoutId)
+        .populate('userId', 'name email phone referralCode currency')
+        .populate('reviewedBy', 'name email role')
+        .populate('paidBy', 'name email role');
+    if (!alreadyProcessed) {
+        emitPayoutReviewSideEffects({
+            payout,
+            action: REFERRAL_ACTIONS.REFERRAL_PAYOUT_MARKED_PAID,
+            actor,
+        });
+    }
+
+    return {
+        alreadyProcessed,
+        payout: serializePayout(payout, { admin: true }),
+    };
+};
+
+const rejectReferralPayout = async (payoutId, { reason, adminNotes = null } = {}, actor = {}) => {
+    const rejectionReason = String(reason || '').trim();
+    if (!rejectionReason) {
+        throw new BusinessRuleError('Rejection reason is required.', 'REFERRAL_PAYOUT_REJECTION_REASON_REQUIRED');
+    }
+
+    const session = await mongoose.startSession();
+    let alreadyProcessed = false;
+
+    try {
+        session.startTransaction();
+        const payout = await ReferralCommissionPayout.findById(payoutId).session(session);
+        if (!payout) throw new NotFoundError('Referral payout request');
+        if (payout.status === REFERRAL_PAYOUT_STATUS.REJECTED) {
+            alreadyProcessed = true;
+        } else {
+            if (payout.status === REFERRAL_PAYOUT_STATUS.PAID) {
+                throw new BusinessRuleError('Paid payout requests cannot be rejected.', 'REFERRAL_PAYOUT_ALREADY_PAID');
+            }
+            if (payout.status !== REFERRAL_PAYOUT_STATUS.PENDING) {
+                throw new BusinessRuleError('Only pending payout requests can be rejected.', 'REFERRAL_PAYOUT_NOT_PENDING');
+            }
+
+            const now = new Date();
+            await ReferralCommission.updateMany(
+                {
+                    _id: { $in: payout.lockedCommissionIds || [] },
+                    payoutRequestId: payout._id,
+                    payoutStatus: REFERRAL_COMMISSION_PAYOUT_STATUS.LOCKED,
+                },
+                {
+                    $set: {
+                        payoutStatus: REFERRAL_COMMISSION_PAYOUT_STATUS.AVAILABLE,
+                        payoutReleasedAt: now,
+                    },
+                    $unset: {
+                        payoutRequestId: '',
+                        payoutLockedAt: '',
+                    },
+                },
+                { session }
+            );
+
+            payout.status = REFERRAL_PAYOUT_STATUS.REJECTED;
+            payout.reviewedBy = actor.actorId || actor._id || actor.userId || null;
+            payout.reviewedAt = now;
+            payout.rejectionReason = rejectionReason;
+            payout.adminNotes = adminNotes || null;
+            await payout.save({ session });
+        }
+        await session.commitTransaction();
+    } catch (err) {
+        if (session.inTransaction()) await session.abortTransaction();
+        throw err;
+    } finally {
+        try { session.endSession(); } catch (_) { /* noop */ }
+    }
+
+    const payout = await ReferralCommissionPayout.findById(payoutId)
+        .populate('userId', 'name email phone referralCode currency')
+        .populate('reviewedBy', 'name email role')
+        .populate('paidBy', 'name email role');
+    if (!alreadyProcessed) {
+        emitPayoutReviewSideEffects({
+            payout,
+            action: REFERRAL_ACTIONS.REFERRAL_PAYOUT_REJECTED,
+            actor,
+        });
+    }
+
+    return {
+        alreadyProcessed,
+        payout: serializePayout(payout, { admin: true }),
     };
 };
 
@@ -1366,6 +2161,13 @@ module.exports = {
     createReferralRelationship,
     auditRelationshipCreated,
     getReferralSummary,
+    getReferralPayoutSummary,
+    listReferralPayouts,
+    getReferralPayoutById,
+    createReferralPayoutRequest,
+    approveReferralPayoutWalletCredit,
+    markReferralPayoutPaid,
+    rejectReferralPayout,
     getReferredUsers,
     listRelationships,
     listCommissions,

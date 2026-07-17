@@ -94,6 +94,11 @@ const REFERRAL_ACTIONS = Object.freeze({
     SUB_AGENT_COMMISSION_CREATED: 'sub_agent_commission_created',
     REFERRAL_COMMISSION_CREATED: 'referral_commission_created',
     REFERRAL_COMMISSION_STOPPED: 'referral_commission_stopped',
+    REFERRAL_PAYOUT_REQUESTED: 'referral_payout_requested',
+    REFERRAL_PAYOUT_APPROVED_WALLET_CREDIT: 'referral_payout_approved_wallet_credit',
+    REFERRAL_PAYOUT_MARKED_PAID: 'referral_payout_marked_paid',
+    REFERRAL_PAYOUT_REJECTED: 'referral_payout_rejected',
+    REFERRAL_PAYOUT_WALLET_CREDIT_CREATED: 'referral_payout_wallet_credit_created',
 });
 
 /** Actions on group change and sub-agent requests. */
@@ -214,6 +219,7 @@ const ENTITY_TYPES = Object.freeze({
     SETTING: 'SETTING',
     REFERRAL_RELATIONSHIP: 'REFERRAL_RELATIONSHIP',
     REFERRAL_COMMISSION: 'REFERRAL_COMMISSION',
+    REFERRAL_PAYOUT: 'REFERRAL_PAYOUT',
     GROUP_REQUEST: 'GROUP_REQUEST',
     SYSTEM: 'SYSTEM',
     FINANCIAL_DAILY_CLOSE: 'FINANCIAL_DAILY_CLOSE',
