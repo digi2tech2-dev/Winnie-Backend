@@ -7,9 +7,14 @@ const {
     PAYMENT_STATUSES,
 } = require('../modules/payments/payment.constants');
 const { getPaymentGateway } = require('../modules/payments/gateways/gateway.factory');
+const MockPaymentGateway = require('../modules/payments/gateways/mock.gateway');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { User } = require('../modules/users/user.model');
 const { Setting } = require('../modules/admin/setting.model');
+const {
+    PAYMENT_RISK_LIMITS_SETTING_KEY,
+    getDefaultPaymentRiskLimits,
+} = require('../modules/payments/paymentRisk.config');
 
 const {
     connectTestDB,
@@ -73,6 +78,29 @@ const savePaymentMethod = async (method = {}) => {
                     }],
                 }],
                 description: 'Payment method test settings',
+            },
+        },
+        { upsert: true }
+    );
+};
+
+const saveRiskSettings = async (overrides = {}) => {
+    await Setting.updateOne(
+        { key: PAYMENT_RISK_LIMITS_SETTING_KEY },
+        {
+            $set: {
+                key: PAYMENT_RISK_LIMITS_SETTING_KEY,
+                value: {
+                    ...getDefaultPaymentRiskLimits(),
+                    newAccountHours: 0,
+                    maxSingleAmount: 1000,
+                    hourlyAmountLimit: 1000,
+                    dailyAmountLimit: 1000,
+                    hourlyAttemptLimit: 99,
+                    dailyAttemptLimit: 99,
+                    ...overrides,
+                },
+                description: 'Payment risk test settings',
             },
         },
         { upsert: true }
@@ -345,5 +373,221 @@ describe('Payments base module', () => {
         const unchanged = await Payment.findById(payment._id);
         expect(unchanged.status).toBe(PAYMENT_STATUSES.REQUIRES_ACTION);
         expect((await User.findById(customer._id)).walletBalance).toBe(100);
+    });
+
+    it('limit-blocked payments are not sent to a gateway and are not stored as pending', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        await saveRiskSettings({ maxSingleAmount: 1 });
+        const createSpy = jest.spyOn(MockPaymentGateway.prototype, 'createPaymentIntent');
+
+        await expect(createMockPayment(customer, { amount: 50 }))
+            .rejects.toMatchObject({ code: 'PAYMENT_RISK_LIMIT_REACHED' });
+
+        expect(createSpy).not.toHaveBeenCalled();
+        expect(await Payment.countDocuments({ userId: customer._id })).toBe(0);
+        createSpy.mockRestore();
+    });
+
+    it('failed, canceled, and expired payments do not count against future limits', async () => {
+        const statuses = [
+            PAYMENT_STATUSES.FAILED,
+            PAYMENT_STATUSES.CANCELED,
+            PAYMENT_STATUSES.EXPIRED,
+        ];
+
+        for (const status of statuses) {
+            await clearCollections();
+            await saveRiskSettings({ dailyAttemptLimit: 1 });
+            const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+            const payment = await createMockPayment(customer);
+            await Payment.updateOne(
+                { _id: payment._id },
+                {
+                    $set: {
+                        status,
+                        failedAt: status === PAYMENT_STATUSES.FAILED || status === PAYMENT_STATUSES.EXPIRED ? new Date() : null,
+                        canceledAt: status === PAYMENT_STATUSES.CANCELED ? new Date() : null,
+                    },
+                }
+            );
+
+            await expect(createMockPayment(customer, { amount: 25 }))
+                .resolves.toMatchObject({ status: PAYMENT_STATUSES.REQUIRES_ACTION });
+        }
+    });
+
+    it('active gateway-created pending payments count against limits', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        await saveRiskSettings({ dailyAttemptLimit: 1 });
+
+        const first = await createMockPayment(customer);
+
+        expect(first.gatewayCreated).toBe(true);
+        await expect(createMockPayment(customer, { amount: 25 }))
+            .rejects.toMatchObject({ code: 'PAYMENT_RISK_LIMIT_REACHED' });
+    });
+
+    it('completed credited payments count against limits', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        await saveRiskSettings({ dailyAttemptLimit: 1 });
+        const first = await createMockPayment(customer);
+        await paymentService.confirmMockPayment(first._id, { actor: customer });
+
+        await expect(createMockPayment(customer, { amount: 25 }))
+            .rejects.toMatchObject({ code: 'PAYMENT_RISK_LIMIT_REACHED' });
+    });
+
+    it('does not create a pending payment when gateway creation returns no gateway reference', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        const createSpy = jest
+            .spyOn(MockPaymentGateway.prototype, 'createPaymentIntent')
+            .mockResolvedValue({ status: PAYMENT_STATUSES.REQUIRES_ACTION });
+
+        await expect(createMockPayment(customer))
+            .rejects.toMatchObject({ code: 'GATEWAY_NOT_CREATED' });
+
+        expect(createSpy).toHaveBeenCalledTimes(1);
+        expect(await Payment.countDocuments({ userId: customer._id })).toBe(0);
+        createSpy.mockRestore();
+    });
+
+    it('admin sync rejects payments that were not sent to a gateway', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        const payment = await Payment.create({
+            userId: customer._id,
+            purpose: 'WALLET_TOPUP',
+            gateway: PAYMENT_GATEWAYS.MOCK,
+            method: 'CARD',
+            amount: 50,
+            totalAmount: 50,
+            currency: 'USD',
+            status: PAYMENT_STATUSES.INITIATED,
+        });
+
+        await expect(paymentService.syncPaymentStatus(payment._id, { actor: await createAdmin() }))
+            .rejects.toMatchObject({ code: 'PAYMENT_NOT_SENT_TO_GATEWAY' });
+    });
+
+    it('admin sync calls the gateway adapter and credits once when the gateway says paid', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        const payment = await createMockPayment(customer);
+        const statusSpy = jest
+            .spyOn(MockPaymentGateway.prototype, 'getPaymentStatus')
+            .mockResolvedValue({
+                status: PAYMENT_STATUSES.SUCCEEDED,
+                providerStatus: 'PAID',
+                gatewayPaymentId: payment.gatewayPaymentId,
+                gatewayReference: payment.gatewayReference,
+            });
+
+        const first = await paymentService.syncPaymentStatus(payment._id, {
+            actor: await createAdmin(),
+            source: 'admin_reconciliation',
+        });
+        const second = await paymentService.syncPaymentStatus(payment._id, {
+            actor: await createAdmin(),
+            source: 'admin_reconciliation',
+        });
+
+        expect(statusSpy).toHaveBeenCalledTimes(1);
+        expect(first.payment.status).toBe(PAYMENT_STATUSES.SUCCEEDED);
+        expect(second.alreadyProcessed).toBe(true);
+        expect((await User.findById(customer._id)).walletBalance).toBe(150);
+        expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(1);
+        statusSpy.mockRestore();
+    });
+
+    it('admin sync updates failed, canceled, and expired statuses without wallet credit', async () => {
+        const statusCases = [
+            PAYMENT_STATUSES.FAILED,
+            PAYMENT_STATUSES.CANCELED,
+            PAYMENT_STATUSES.EXPIRED,
+        ];
+
+        for (const status of statusCases) {
+            await clearCollections();
+            const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+            const payment = await createMockPayment(customer);
+            const statusSpy = jest
+                .spyOn(MockPaymentGateway.prototype, 'getPaymentStatus')
+                .mockResolvedValue({
+                    status,
+                    providerStatus: status,
+                    gatewayPaymentId: payment.gatewayPaymentId,
+                    gatewayReference: payment.gatewayReference,
+                });
+
+            const result = await paymentService.syncPaymentStatus(payment._id, { actor: await createAdmin() });
+
+            expect(result.payment.status).toBe(status);
+            expect(result.payment.creditedAt).toBeNull();
+            expect((await User.findById(customer._id)).walletBalance).toBe(100);
+            expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(0);
+            statusSpy.mockRestore();
+        }
+    });
+
+    it('unsupported gateway sync returns a clear message and does not silently succeed', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        const payment = await Payment.create({
+            userId: customer._id,
+            purpose: 'WALLET_TOPUP',
+            gateway: PAYMENT_GATEWAYS.TAP,
+            method: 'CARD',
+            amount: 50,
+            totalAmount: 50,
+            currency: 'USD',
+            status: PAYMENT_STATUSES.REQUIRES_ACTION,
+            gatewayPaymentId: 'tap-payment-1',
+            gatewayReference: 'tap-ref-1',
+            checkoutUrl: 'https://tap.example/checkout/1',
+            gatewayCreated: true,
+            gatewayCreatedAt: new Date(),
+        });
+
+        await expect(paymentService.syncPaymentStatus(payment._id, { actor: await createAdmin() }))
+            .rejects.toMatchObject({
+                code: 'PAYMENT_SYNC_NOT_SUPPORTED',
+                message: 'This gateway does not support automatic sync',
+            });
+    });
+
+    it('admin manual match completes an eligible payment and credits wallet idempotently', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        const admin = await createAdmin();
+        const payment = await createMockPayment(customer);
+
+        const first = await paymentService.manualMatchPayment(payment._id, {
+            actor: admin,
+            reason: 'Bank transfer confirmed',
+        });
+        const second = await paymentService.manualMatchPayment(payment._id, {
+            actor: admin,
+            reason: 'Duplicate click',
+        });
+
+        expect(first.payment.status).toBe(PAYMENT_STATUSES.SUCCEEDED);
+        expect(first.payment.creditedAt).not.toBeNull();
+        expect(second.alreadyProcessed).toBe(true);
+        expect((await User.findById(customer._id)).walletBalance).toBe(150);
+        expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(1);
+    });
+
+    it('admin manual match rejects pure pre-gateway records', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        const payment = await Payment.create({
+            userId: customer._id,
+            purpose: 'WALLET_TOPUP',
+            gateway: PAYMENT_GATEWAYS.MOCK,
+            method: 'CARD',
+            amount: 50,
+            totalAmount: 50,
+            currency: 'USD',
+            status: PAYMENT_STATUSES.FAILED,
+            metadata: { paymentLifecycle: { blockedReason: 'PAYMENT_LIMIT_EXCEEDED' } },
+        });
+
+        await expect(paymentService.manualMatchPayment(payment._id, { actor: await createAdmin() }))
+            .rejects.toMatchObject({ code: 'PAYMENT_NOT_SENT_TO_GATEWAY' });
     });
 });

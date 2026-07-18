@@ -32,6 +32,7 @@ const {
 const {
     LEDGER_TRANSACTION_TYPES,
     TRANSACTION_SOURCE_TYPES,
+    WalletTransaction,
 } = require('../wallet/walletTransaction.model');
 const { createAuditLog } = require('../audit/audit.service');
 const {
@@ -499,6 +500,31 @@ const buildCheckoutResponse = (payment) => ({
     ...safeGatewayChargeFields(payment),
 });
 
+const hasGatewayCreatedEvidence = (paymentOrIntent = {}) => Boolean(
+    paymentOrIntent.gatewayCreated ||
+    paymentOrIntent.gatewayPaymentId ||
+    paymentOrIntent.gatewayReference ||
+    paymentOrIntent.checkoutUrl
+);
+
+const assertGatewayIntentCreated = (intent = {}) => {
+    if (!hasGatewayCreatedEvidence(intent)) {
+        throw new BusinessRuleError(
+            'Payment gateway did not return a checkout reference.',
+            'GATEWAY_NOT_CREATED'
+        );
+    }
+};
+
+const assertPaymentReachedGateway = (payment) => {
+    if (hasGatewayCreatedEvidence(payment)) return;
+
+    throw new BusinessRuleError(
+        'Payment was not sent to gateway and cannot be synced',
+        'PAYMENT_NOT_SENT_TO_GATEWAY'
+    );
+};
+
 const metadataModeForGateway = (gateway) => {
     if (gateway === PAYMENT_GATEWAYS.MOCK) return 'mock';
     if (gateway === PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL) return 'network_international';
@@ -531,6 +557,8 @@ const serializePayment = (payment, { admin = false, webhookEvents = [] } = {}) =
         gatewayPaymentId: doc.gatewayPaymentId,
         gatewayReference: doc.gatewayReference,
         checkoutUrl: doc.checkoutUrl,
+        gatewayCreated: hasGatewayCreatedEvidence(doc),
+        gatewayCreatedAt: doc.gatewayCreatedAt,
         returnUrl: doc.returnUrl,
         cancelUrl: doc.cancelUrl,
         expiresAt: doc.expiresAt,
@@ -545,10 +573,23 @@ const serializePayment = (payment, { admin = false, webhookEvents = [] } = {}) =
     };
 
     if (admin) {
+        const syncableStatuses = new Set(ACTIVE_PAYMENT_STATUSES);
+        const terminalFailureStatuses = new Set([
+            PAYMENT_STATUSES.FAILED,
+            PAYMENT_STATUSES.CANCELED,
+            PAYMENT_STATUSES.EXPIRED,
+        ]);
         response.metadata = safePaymentMetadata(doc.metadata || {});
         response.createdByIp = doc.createdByIp || null;
         response.userAgent = doc.userAgent || null;
         response.idempotencyKey = doc.idempotencyKey || null;
+        response.canSync = hasGatewayCreatedEvidence(doc) &&
+            syncableStatuses.has(doc.status) &&
+            !doc.creditedAt &&
+            doc.status !== PAYMENT_STATUSES.SUCCEEDED;
+        response.canManualMatch = hasGatewayCreatedEvidence(doc) &&
+            !terminalFailureStatuses.has(doc.status) &&
+            !(doc.creditedAt && doc.walletTransactionId);
         response.webhookEvents = webhookEvents;
     }
 
@@ -670,6 +711,7 @@ const createPaymentIntent = async ({
         returnUrl,
         cancelUrl,
     });
+    assertGatewayIntentCreated(intent);
 
     const paymentPayload = {
         _id: paymentId,
@@ -689,6 +731,8 @@ const createPaymentIntent = async ({
         gatewayPaymentId: intent.gatewayPaymentId || null,
         gatewayReference: intent.gatewayReference || null,
         checkoutUrl: intent.checkoutUrl || null,
+        gatewayCreated: true,
+        gatewayCreatedAt: new Date(),
         returnUrl: returnUrl || null,
         cancelUrl: cancelUrl || null,
         expiresAt: intent.expiresAt || null,
@@ -896,118 +940,17 @@ const confirmMockPayment = async (paymentId, { actor, requestMeta = {} } = {}) =
     const gatewayAdapter = getPaymentGateway(initialPayment.gateway);
     await gatewayAdapter.confirmMockPayment(initialPayment);
 
-    const session = await mongoose.startSession();
-    let creditedPayment;
-    let transaction;
-
-    try {
-        session.startTransaction();
-
-        const now = new Date();
-        const payment = await Payment.findOneAndUpdate(
-            {
-                _id: initialPayment._id,
-                gateway: PAYMENT_GATEWAYS.MOCK,
-                status: { $in: [...ACTIVE_PAYMENT_STATUSES, PAYMENT_STATUSES.SUCCEEDED] },
-                creditedAt: null,
-                walletTransactionId: null,
-            },
-            {
-                $set: {
-                    status: PAYMENT_STATUSES.SUCCEEDED,
-                    succeededAt: initialPayment.succeededAt || now,
-                },
-            },
-            { new: true, session }
-        );
-
-        if (!payment) {
-            const current = await Payment.findById(initialPayment._id).session(session);
-            if (current?.walletTransactionId && current?.creditedAt) {
-                await session.commitTransaction();
-                return { payment: current, alreadyProcessed: true };
-            }
-            throw new BusinessRuleError(
-                'Payment is not in a creditable state.',
-                'PAYMENT_NOT_CREDITABLE'
-            );
-        }
-
-        const creditResult = await creditWalletDirect({
-            userId: payment.userId,
-            amount: payment.amount,
-            reference: null,
-            semanticType: LEDGER_TRANSACTION_TYPES.CARD_PAYMENT_SUCCESS,
-            sourceType: TRANSACTION_SOURCE_TYPES.PAYMENT,
-            sourceId: payment._id,
-            currency: payment.currency,
-            description: `Card payment wallet top-up #${payment._id.toString().slice(-6)}`,
-            metadata: {
-                paymentId: payment._id.toString(),
-                gateway: payment.gateway,
-                gatewayPaymentId: payment.gatewayPaymentId,
-                purpose: payment.purpose,
-            },
-            idempotencyKey: `payment:${payment._id.toString()}:wallet-credit`,
-            actorId: actor?.actorId || actor?._id || actor?.userId || payment.userId,
-            actorRole: actor?.actorRole || actor?.role || ACTOR_ROLES.CUSTOMER,
-            session,
-        });
-
-        transaction = creditResult.transaction;
-        payment.walletTransactionId = transaction._id;
-        payment.creditedAt = now;
-        creditedPayment = await payment.save({ session });
-
-        await session.commitTransaction();
-    } catch (err) {
-        if (session.inTransaction()) {
-            await session.abortTransaction();
-        }
-        throw err;
-    } finally {
-        try { session.endSession(); } catch (_) { /* session already ended */ }
-    }
-
-    await processWalletCreditSafely(transaction);
-
-    void createAuditLog({
-        actorId: actor?.actorId || actor?._id || actor?.userId || creditedPayment.userId,
-        actorRole: actor?.actorRole || actor?.role || ACTOR_ROLES.CUSTOMER,
-        action: PAYMENT_ACTIONS.SUCCEEDED,
-        entityType: ENTITY_TYPES.PAYMENT,
-        entityId: creditedPayment._id,
-        metadata: {
-            gateway: creditedPayment.gateway,
-            amount: creditedPayment.amount,
-            currency: creditedPayment.currency,
-            walletTransactionId: creditedPayment.walletTransactionId,
+    return finalizeSuccessfulPayment(initialPayment, {
+        actor,
+        gatewayStatus: {
+            status: PAYMENT_STATUSES.SUCCEEDED,
+            gatewayPaymentId: initialPayment.gatewayPaymentId,
+            gatewayReference: initialPayment.gatewayReference,
+            providerStatus: PAYMENT_STATUSES.SUCCEEDED,
         },
-        ipAddress: requestMeta.ipAddress || null,
-        userAgent: requestMeta.userAgent || null,
+        requestMeta,
+        source: 'mock_confirmation',
     });
-
-    void createAuditLog({
-        actorId: creditedPayment.userId,
-        actorRole: ACTOR_ROLES.CUSTOMER,
-        action: WALLET_ACTIONS.CREDIT,
-        entityType: ENTITY_TYPES.WALLET,
-        entityId: creditedPayment.userId,
-        metadata: {
-            paymentId: creditedPayment._id,
-            gateway: creditedPayment.gateway,
-            amount: creditedPayment.amount,
-            currency: creditedPayment.currency,
-            walletTransactionId: creditedPayment.walletTransactionId,
-            reason: LEDGER_TRANSACTION_TYPES.CARD_PAYMENT_SUCCESS,
-        },
-        ipAddress: requestMeta.ipAddress || null,
-        userAgent: requestMeta.userAgent || null,
-    });
-
-    notifyPaymentSucceeded(creditedPayment, { transactionId: transaction?._id });
-
-    return { payment: creditedPayment, transaction, alreadyProcessed: false };
 };
 
 const terminalTimestampFieldForStatus = (status) => ({
@@ -1063,7 +1006,18 @@ const auditPaymentReconciliation = ({
     });
 };
 
-const creditAuthoritativePayment = async (initialPayment, gatewayStatus, { actor, requestMeta = {} } = {}) => {
+const walletCreditIdempotencyKey = (paymentId) => `payment:${paymentId.toString()}:wallet-credit`;
+
+const finalizeSuccessfulPayment = async (
+    initialPayment,
+    {
+        actor,
+        gatewayStatus = {},
+        requestMeta = {},
+        source = 'gateway_status_sync',
+        auditMetadata = {},
+    } = {}
+) => {
     if (initialPayment.walletTransactionId && initialPayment.creditedAt) {
         return {
             payment: initialPayment,
@@ -1075,15 +1029,16 @@ const creditAuthoritativePayment = async (initialPayment, gatewayStatus, { actor
     const session = await mongoose.startSession();
     let creditedPayment;
     let transaction;
+    let alreadyProcessed = false;
 
     try {
         session.startTransaction();
 
         const now = new Date();
+        const idempotencyKey = walletCreditIdempotencyKey(initialPayment._id);
         const payment = await Payment.findOneAndUpdate(
             {
                 _id: initialPayment._id,
-                gateway: initialPayment.gateway,
                 status: { $in: [...ACTIVE_PAYMENT_STATUSES, PAYMENT_STATUSES.SUCCEEDED] },
                 creditedAt: null,
                 walletTransactionId: null,
@@ -1094,6 +1049,7 @@ const creditAuthoritativePayment = async (initialPayment, gatewayStatus, { actor
                     succeededAt: initialPayment.succeededAt || now,
                     gatewayPaymentId: gatewayStatus.gatewayPaymentId || initialPayment.gatewayPaymentId || null,
                     gatewayReference: gatewayStatus.gatewayReference || initialPayment.gatewayReference || null,
+                    creditedAt: now,
                 },
             },
             { new: true, session }
@@ -1115,34 +1071,48 @@ const creditAuthoritativePayment = async (initialPayment, gatewayStatus, { actor
             );
         }
 
-        payment.metadata = buildGatewaySyncMetadata(payment, gatewayStatus, now);
-
-        const creditResult = await creditWalletDirect({
-            userId: payment.userId,
-            amount: payment.amount,
-            reference: null,
-            semanticType: LEDGER_TRANSACTION_TYPES.CARD_PAYMENT_SUCCESS,
-            sourceType: TRANSACTION_SOURCE_TYPES.PAYMENT,
-            sourceId: payment._id,
-            currency: payment.currency,
-            description: `Card payment wallet top-up #${payment._id.toString().slice(-6)}`,
-            metadata: {
-                paymentId: payment._id.toString(),
-                gateway: payment.gateway,
-                gatewayPaymentId: payment.gatewayPaymentId,
-                gatewayReference: payment.gatewayReference,
-                providerStatus: gatewayStatus.providerStatus || null,
-                purpose: payment.purpose,
+        payment.metadata = {
+            ...buildGatewaySyncMetadata(payment, gatewayStatus, now),
+            paymentLifecycle: {
+                ...(payment.metadata?.paymentLifecycle || {}),
+                lastSuccessSource: source,
+                ...auditMetadata,
             },
-            idempotencyKey: `payment:${payment._id.toString()}:wallet-credit`,
-            actorId: actor?.actorId || actor?._id || actor?.userId || payment.userId,
-            actorRole: actor?.actorRole || actor?.role || ACTOR_ROLES.CUSTOMER,
-            session,
-        });
+        };
 
-        transaction = creditResult.transaction;
+        const existingTransaction = await WalletTransaction.findOne({ idempotencyKey }).session(session);
+
+        if (existingTransaction) {
+            transaction = existingTransaction;
+            alreadyProcessed = true;
+        } else {
+            const creditResult = await creditWalletDirect({
+                userId: payment.userId,
+                amount: payment.amount,
+                reference: null,
+                semanticType: LEDGER_TRANSACTION_TYPES.CARD_PAYMENT_SUCCESS,
+                sourceType: TRANSACTION_SOURCE_TYPES.PAYMENT,
+                sourceId: payment._id,
+                currency: payment.currency,
+                description: `Card payment wallet top-up #${payment._id.toString().slice(-6)}`,
+                metadata: {
+                    paymentId: payment._id.toString(),
+                    gateway: payment.gateway,
+                    gatewayPaymentId: payment.gatewayPaymentId,
+                    gatewayReference: payment.gatewayReference,
+                    providerStatus: gatewayStatus.providerStatus || null,
+                    purpose: payment.purpose,
+                    source,
+                },
+                idempotencyKey,
+                actorId: actor?.actorId || actor?._id || actor?.userId || payment.userId,
+                actorRole: actor?.actorRole || actor?.role || ACTOR_ROLES.CUSTOMER,
+                session,
+            });
+            transaction = creditResult.transaction;
+        }
+
         payment.walletTransactionId = transaction._id;
-        payment.creditedAt = now;
         creditedPayment = await payment.save({ session });
 
         await session.commitTransaction();
@@ -1155,7 +1125,9 @@ const creditAuthoritativePayment = async (initialPayment, gatewayStatus, { actor
         try { session.endSession(); } catch (_) { /* session already ended */ }
     }
 
-    await processWalletCreditSafely(transaction);
+    if (!alreadyProcessed) {
+        await processWalletCreditSafely(transaction);
+    }
 
     void createAuditLog({
         actorId: actor?.actorId || actor?._id || actor?.userId || creditedPayment.userId,
@@ -1169,7 +1141,8 @@ const creditAuthoritativePayment = async (initialPayment, gatewayStatus, { actor
             currency: creditedPayment.currency,
             walletTransactionId: creditedPayment.walletTransactionId,
             providerStatus: gatewayStatus.providerStatus || null,
-            source: 'gateway_status_sync',
+            source,
+            ...auditMetadata,
         },
         ipAddress: requestMeta.ipAddress || null,
         userAgent: requestMeta.userAgent || null,
@@ -1188,21 +1161,32 @@ const creditAuthoritativePayment = async (initialPayment, gatewayStatus, { actor
             currency: creditedPayment.currency,
             walletTransactionId: creditedPayment.walletTransactionId,
             reason: LEDGER_TRANSACTION_TYPES.CARD_PAYMENT_SUCCESS,
-            source: 'gateway_status_sync',
+            source,
+            ...auditMetadata,
         },
         ipAddress: requestMeta.ipAddress || null,
         userAgent: requestMeta.userAgent || null,
     });
 
-    notifyPaymentSucceeded(creditedPayment, { transactionId: transaction?._id });
+    if (!alreadyProcessed) {
+        notifyPaymentSucceeded(creditedPayment, { transactionId: transaction?._id });
+    }
 
     return {
         payment: creditedPayment,
         transaction,
-        alreadyProcessed: false,
+        alreadyProcessed,
         providerStatus: gatewayStatus.providerStatus || null,
     };
 };
+
+const creditAuthoritativePayment = async (initialPayment, gatewayStatus, { actor, requestMeta = {} } = {}) =>
+    finalizeSuccessfulPayment(initialPayment, {
+        actor,
+        gatewayStatus,
+        requestMeta,
+        source: 'gateway_status_sync',
+    });
 
 const updatePaymentFromGatewayStatus = async (initialPayment, gatewayStatus) => {
     const targetStatus = gatewayStatus.status || initialPayment.status;
@@ -1276,25 +1260,21 @@ const syncPaymentStatus = async (paymentId, { actor, requestMeta = {}, source = 
             return result;
         }
 
-        if (initialPayment.gateway === PAYMENT_GATEWAYS.MOCK) {
-            const result = {
-                payment: initialPayment,
-                alreadyProcessed: Boolean(initialPayment.walletTransactionId && initialPayment.creditedAt),
-                providerStatus: initialPayment.status,
-            };
-            auditPaymentReconciliation({
-                payment: result.payment,
-                actor,
-                action: PAYMENT_ACTIONS.RECONCILIATION_SYNCED,
-                providerStatus: result.providerStatus,
-                source,
-                requestMeta,
-            });
-            return result;
-        }
+        assertPaymentReachedGateway(initialPayment);
 
         const gatewayAdapter = getPaymentGateway(initialPayment.gateway);
-        const gatewayStatus = await gatewayAdapter.getPaymentStatus(initialPayment);
+        let gatewayStatus;
+        try {
+            gatewayStatus = await gatewayAdapter.getPaymentStatus(initialPayment);
+        } catch (err) {
+            if (err.code === 'PAYMENT_GATEWAY_NOT_IMPLEMENTED') {
+                throw new BusinessRuleError(
+                    'This gateway does not support automatic sync',
+                    'PAYMENT_SYNC_NOT_SUPPORTED'
+                );
+            }
+            throw err;
+        }
 
         const result = gatewayStatus.status === PAYMENT_STATUSES.SUCCEEDED
             ? await creditAuthoritativePayment(initialPayment, gatewayStatus, { actor, requestMeta })
@@ -1321,6 +1301,51 @@ const syncPaymentStatus = async (paymentId, { actor, requestMeta = {}, source = 
         });
         throw err;
     }
+};
+
+const assertPaymentCanBeManuallyMatched = (payment) => {
+    assertPaymentReachedGateway(payment);
+
+    if (payment.walletTransactionId && payment.creditedAt) return;
+
+    if ([PAYMENT_STATUSES.FAILED, PAYMENT_STATUSES.CANCELED, PAYMENT_STATUSES.EXPIRED].includes(payment.status)) {
+        throw new BusinessRuleError(
+            `Payment cannot be manually matched from status '${payment.status}'.`,
+            'PAYMENT_NOT_MANUALLY_MATCHABLE'
+        );
+    }
+
+    if (!isAllowedPaymentTransition(payment.status, PAYMENT_STATUSES.SUCCEEDED)) {
+        throw new BusinessRuleError(
+            `Payment cannot transition from '${payment.status}' to SUCCEEDED.`,
+            'INVALID_PAYMENT_STATUS_TRANSITION'
+        );
+    }
+};
+
+const manualMatchPayment = async (paymentId, { actor, requestMeta = {}, reason = null } = {}) => {
+    assertPaymentsEnabled();
+
+    const initialPayment = await Payment.findById(paymentId);
+    if (!initialPayment) throw new NotFoundError('Payment');
+    assertPaymentOwnerOrAdmin(initialPayment, actor);
+    assertPaymentCanBeManuallyMatched(initialPayment);
+
+    return finalizeSuccessfulPayment(initialPayment, {
+        actor,
+        gatewayStatus: {
+            status: PAYMENT_STATUSES.SUCCEEDED,
+            gatewayPaymentId: initialPayment.gatewayPaymentId,
+            gatewayReference: initialPayment.gatewayReference,
+            providerStatus: 'MANUAL_MATCH',
+        },
+        requestMeta,
+        source: 'admin_manual_match',
+        auditMetadata: {
+            manualMatched: true,
+            reason: reason || null,
+        },
+    });
 };
 
 const failMockPayment = async (paymentId, { actor, requestMeta = {} } = {}) => {
@@ -1404,6 +1429,7 @@ module.exports = {
     getPaymentById,
     listPayments,
     syncPaymentStatus,
+    manualMatchPayment,
     confirmMockPayment,
     failMockPayment,
     serializePayment,

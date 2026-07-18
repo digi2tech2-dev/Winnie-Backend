@@ -106,6 +106,20 @@ const adminSyncPaymentStatus = catchAsync(async (req, res) => {
     }, 'Payment status reconciled.');
 });
 
+const adminManualMatchPayment = catchAsync(async (req, res) => {
+    const result = await paymentService.manualMatchPayment(req.params.id, {
+        actor: actorFrom(req),
+        requestMeta: requestMetaFrom(req),
+        reason: req.body?.reason || null,
+    });
+
+    sendSuccess(res, {
+        payment: paymentService.serializePayment(result.payment, { admin: true }),
+        alreadyProcessed: result.alreadyProcessed,
+        providerStatus: result.providerStatus || null,
+    }, 'Payment manually matched.');
+});
+
 const mockFailPayment = catchAsync(async (req, res) => {
     const result = await paymentService.failMockPayment(req.params.id, {
         actor: actorFrom(req),
@@ -161,4 +175,5 @@ module.exports = {
     adminListPayments,
     adminGetPayment,
     adminSyncPaymentStatus,
+    adminManualMatchPayment,
 };

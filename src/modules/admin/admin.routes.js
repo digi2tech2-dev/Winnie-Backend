@@ -207,6 +207,7 @@ router.get('/orders/:id', requirePermission('orders.view'), ordersCtrl.getOrderB
 // PAYMENTS
 router.get('/payments', requirePermission('payments.view'), listPaymentsValidation, validate, paymentsCtrl.adminListPayments);
 router.post('/payments/:id/sync-status', requirePermission('payments.view'), paymentIdValidation, validate, paymentsCtrl.adminSyncPaymentStatus);
+router.post('/payments/:id/manual-match', requirePermission('payments.view'), paymentIdValidation, validate, paymentsCtrl.adminManualMatchPayment);
 router.get('/payments/:id', requirePermission('payments.view'), paymentIdValidation, validate, paymentsCtrl.adminGetPayment);
 
 // ═══════════════════════════════════════════════════════════════════════════════

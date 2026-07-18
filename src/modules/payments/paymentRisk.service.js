@@ -1,7 +1,11 @@
 'use strict';
 
 const { Payment } = require('./payment.model');
-const { PAYMENT_PURPOSES } = require('./payment.constants');
+const {
+    ACTIVE_PAYMENT_STATUSES,
+    PAYMENT_PURPOSES,
+    PAYMENT_STATUSES,
+} = require('./payment.constants');
 const { Setting } = require('../admin/setting.model');
 const { createAuditLog } = require('../audit/audit.service');
 const {
@@ -58,6 +62,25 @@ const paymentAmountToBaseCurrency = async (payment) => {
 
     return amountToBaseCurrency(payment.amount, payment.currency);
 };
+
+const gatewayCreatedEvidenceFilter = () => ({
+    $or: [
+        { gatewayCreated: true },
+        { gatewayPaymentId: { $type: 'string', $ne: '' } },
+        { gatewayReference: { $type: 'string', $ne: '' } },
+        { checkoutUrl: { $type: 'string', $ne: '' } },
+    ],
+});
+
+const riskCountablePaymentFilter = () => ({
+    $or: [
+        { status: PAYMENT_STATUSES.SUCCEEDED },
+        {
+            status: { $in: ACTIVE_PAYMENT_STATUSES },
+            ...gatewayCreatedEvidenceFilter(),
+        },
+    ],
+});
 
 const isExceeded = (value, limit) => Number(value) > Number(limit);
 
@@ -141,6 +164,7 @@ const evaluatePaymentRisk = async ({
         userId: user._id,
         purpose: PAYMENT_PURPOSES.WALLET_TOPUP,
         createdAt: { $gte: dailyWindowStart },
+        ...riskCountablePaymentFilter(),
     })
         .select('amount currency metadata createdAt')
         .lean();

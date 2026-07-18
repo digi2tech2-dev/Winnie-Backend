@@ -104,6 +104,17 @@ const paymentSchema = new mongoose.Schema(
             default: null,
         },
 
+        gatewayCreated: {
+            type: Boolean,
+            default: false,
+            index: true,
+        },
+
+        gatewayCreatedAt: {
+            type: Date,
+            default: null,
+        },
+
         returnUrl: {
             type: String,
             trim: true,
