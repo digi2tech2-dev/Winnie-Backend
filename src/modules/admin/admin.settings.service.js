@@ -7,8 +7,8 @@
  * Only admins can write. Reads can be used internally.
  */
 
-const { Setting } = require('./setting.model');
-const { NotFoundError } = require('../../shared/errors/AppError');
+const { Setting, ADMIN_SECURITY_PIN_HASH_KEY } = require('./setting.model');
+const { NotFoundError, AuthorizationError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 const {
@@ -19,12 +19,13 @@ const {
 // ─── List ──────────────────────────────────────────────────────────────────────
 
 const listSettings = async () => {
-    return Setting.find().sort({ key: 1 }).select('-__v');
+    return Setting.find({ key: { $ne: ADMIN_SECURITY_PIN_HASH_KEY } }).sort({ key: 1 }).select('-__v');
 };
 
 // ─── Get One ──────────────────────────────────────────────────────────────────
 
 const getSettingByKey = async (key) => {
+    if (key === ADMIN_SECURITY_PIN_HASH_KEY) throw new NotFoundError('Setting');
     const setting = await Setting.findOne({ key });
     if (!setting) throw new NotFoundError('Setting');
     return setting;
@@ -51,6 +52,10 @@ const normalizeSettingValueForUpdate = (key, value, currentValue) => {
 // ─── Update ───────────────────────────────────────────────────────────────────
 
 const updateSetting = async (key, value, adminId) => {
+    if (key === ADMIN_SECURITY_PIN_HASH_KEY) {
+        throw new AuthorizationError('Security PIN must be changed through the security PIN endpoint.');
+    }
+
     let setting = await Setting.findOne({ key });
     const before = setting ? setting.value : undefined;
     const normalizedValue = normalizeSettingValueForUpdate(key, value, before);

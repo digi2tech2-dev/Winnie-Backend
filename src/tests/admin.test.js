@@ -21,12 +21,15 @@ const {
 } = require('../modules/wallet/walletTransaction.model');
 const { Currency } = require('../modules/currency/currency.model');
 const { Setting, seedDefaultSettings } = require('../modules/admin/setting.model');
+const { AuditLog } = require('../modules/audit/audit.model');
+const { ADMIN_ACTIONS } = require('../modules/audit/audit.constants');
 
 const adminUsersService = require('../modules/admin/admin.users.service');
 const adminWalletService = require('../modules/admin/admin.wallet.service');
 const adminSettingService = require('../modules/admin/admin.settings.service');
+const adminSecurityPinService = require('../modules/admin/admin.securityPin.service');
 const { validateBody, schemas } = require('../modules/admin/admin.validation');
-const { authorizeRoles } = require('../shared/middlewares/authorize');
+const { authorizeRoles, requirePermission } = require('../shared/middlewares/authorize');
 
 const {
     connectTestDB,
@@ -593,6 +596,127 @@ describe('[3] Admin Settings Service', () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // [4] Validation Schemas
 // ═══════════════════════════════════════════════════════════════════════════════
+
+describe('[3.5] Admin Security PIN Service', () => {
+    it('verify accepts legacy 1111 when no PIN hash is configured', async () => {
+        await expect(adminSecurityPinService.verifyPin('1111')).resolves.toBe(true);
+        await expect(adminSecurityPinService.getStatus()).resolves.toEqual({ configured: false });
+    });
+
+    it('change PIN with legacy currentPin stores a hash and creates an audit log', async () => {
+        const { admin } = await setup();
+        const result = await adminSecurityPinService.updatePin(
+            { currentPin: '1111', newPin: '2580', confirmPin: '2580' },
+            admin._id,
+            { actorId: admin._id, actorRole: 'ADMIN', ipAddress: '127.0.0.1', userAgent: 'jest' }
+        );
+
+        expect(result).toEqual({ success: true, configured: true });
+
+        const setting = await Setting.findOne({ key: adminSecurityPinService.ADMIN_SECURITY_PIN_HASH_KEY }).lean();
+        expect(setting.value).toEqual(expect.any(String));
+        expect(setting.value).not.toBe('2580');
+        expect(setting.value).not.toBe('1111');
+        expect(setting.value).toMatch(/^\$2[aby]\$/);
+
+        const audit = await AuditLog.findOne({
+            action: ADMIN_ACTIONS.SECURITY_PIN_UPDATED,
+            entityType: 'SETTING',
+            entityId: setting._id,
+        }).lean();
+        expect(audit).not.toBeNull();
+        expect(audit.metadata).toEqual({ key: adminSecurityPinService.ADMIN_SECURITY_PIN_HASH_KEY });
+        expect(JSON.stringify(audit.metadata)).not.toContain('2580');
+        expect(JSON.stringify(audit.metadata)).not.toContain(setting.value);
+    });
+
+    it('after changing PIN, legacy 1111 no longer works and the new PIN verifies', async () => {
+        const { admin } = await setup();
+        await adminSecurityPinService.updatePin({ currentPin: '1111', newPin: '2580', confirmPin: '2580' }, admin._id);
+
+        await expect(adminSecurityPinService.verifyPin('1111'))
+            .rejects.toMatchObject({ code: 'AUTHENTICATION_ERROR', message: 'Invalid security PIN' });
+        await expect(adminSecurityPinService.verifyPin('2580')).resolves.toBe(true);
+    });
+
+    it('wrong PIN fails with a generic error', async () => {
+        const { admin } = await setup();
+        await adminSecurityPinService.updatePin({ currentPin: '1111', newPin: '2580', confirmPin: '2580' }, admin._id);
+
+        await expect(adminSecurityPinService.verifyPin('9999'))
+            .rejects.toMatchObject({ code: 'AUTHENTICATION_ERROR', message: 'Invalid security PIN' });
+    });
+
+    it('new PIN must be exactly 4 digits', async () => {
+        const { admin } = await setup();
+
+        await expect(adminSecurityPinService.updatePin({ currentPin: '1111', newPin: '123', confirmPin: '123' }, admin._id))
+            .rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+        await expect(adminSecurityPinService.updatePin({ currentPin: '1111', newPin: '12345', confirmPin: '12345' }, admin._id))
+            .rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+        await expect(adminSecurityPinService.updatePin({ currentPin: '1111', newPin: '12a4', confirmPin: '12a4' }, admin._id))
+            .rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+    });
+
+    it('confirmPin must match newPin', async () => {
+        const { admin } = await setup();
+
+        await expect(adminSecurityPinService.updatePin({ currentPin: '1111', newPin: '2580', confirmPin: '2581' }, admin._id))
+            .rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+    });
+
+    it('PIN hash is not returned by status, verify, or change responses', async () => {
+        const { admin } = await setup();
+        const changeResponse = await adminSecurityPinService.updatePin({ currentPin: '1111', newPin: '2580', confirmPin: '2580' }, admin._id);
+        const statusResponse = await adminSecurityPinService.getStatus();
+        const verifyResponse = await adminSecurityPinService.verifyPin('2580');
+        const setting = await Setting.findOne({ key: adminSecurityPinService.ADMIN_SECURITY_PIN_HASH_KEY }).lean();
+
+        expect(JSON.stringify(changeResponse)).not.toContain(setting.value);
+        expect(JSON.stringify(statusResponse)).not.toContain(setting.value);
+        expect(JSON.stringify({ valid: verifyResponse })).not.toContain(setting.value);
+    });
+
+    it('generic settings APIs do not expose or update the PIN hash setting', async () => {
+        const { admin } = await setup();
+        await adminSecurityPinService.updatePin({ currentPin: '1111', newPin: '2580', confirmPin: '2580' }, admin._id);
+
+        const settings = await adminSettingService.listSettings();
+        expect(settings.map((setting) => setting.key)).not.toContain(adminSecurityPinService.ADMIN_SECURITY_PIN_HASH_KEY);
+        await expect(adminSettingService.getSettingByKey(adminSecurityPinService.ADMIN_SECURITY_PIN_HASH_KEY))
+            .rejects.toMatchObject({ code: 'NOT_FOUND' });
+        await expect(adminSettingService.updateSetting(adminSecurityPinService.ADMIN_SECURITY_PIN_HASH_KEY, 'plain', admin._id))
+            .rejects.toMatchObject({ code: 'AUTHORIZATION_ERROR' });
+    });
+
+    it('normal customer cannot pass admin security PIN route guards', async () => {
+        const { customer } = await setup();
+        let roleError = null;
+
+        try {
+            authorizeRoles('ADMIN', 'SUPERVISOR')({ user: customer }, {}, () => undefined);
+        } catch (err) {
+            roleError = err;
+        }
+
+        expect(roleError).toMatchObject({ code: 'AUTHORIZATION_ERROR' });
+    });
+
+    it('supervisor requires admin_security_pin.manage permission for PIN endpoints', async () => {
+        const { customer } = await setup();
+        customer.role = 'SUPERVISOR';
+        customer.permissions = ['orders.view'];
+        let permissionError = null;
+
+        try {
+            requirePermission('admin_security_pin.manage')({ user: customer }, {}, () => undefined);
+        } catch (err) {
+            permissionError = err;
+        }
+
+        expect(permissionError).toMatchObject({ code: 'AUTHORIZATION_ERROR' });
+    });
+});
 
 describe('[4] Joi Validation Schemas', () => {
 

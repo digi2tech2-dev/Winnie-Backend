@@ -97,6 +97,7 @@ const SUPERVISOR_PERMISSION_GROUPS = Object.freeze([
         titleAr: 'أخرى',
         titleEn: 'Operations',
         items: [
+            { key: 'admin_security_pin.manage', labelAr: 'إدارة رمز دخول أدوات الأدمن', labelEn: 'Manage admin tools access PIN' },
             { key: 'suppliers.manage', labelAr: 'إدارة الموردين', labelEn: 'Manage suppliers' },
             { key: 'groupRequests.view', labelAr: 'عرض طلبات الوكلاء', labelEn: 'View group requests' },
             { key: 'groupRequests.manage', labelAr: 'إدارة طلبات الوكلاء', labelEn: 'Manage group requests' },

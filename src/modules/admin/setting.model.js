@@ -51,6 +51,7 @@ const settingSchema = new mongoose.Schema(
 );
 
 const Setting = mongoose.model('Setting', settingSchema);
+const ADMIN_SECURITY_PIN_HASH_KEY = 'ADMIN_SECURITY_PIN_HASH';
 
 // ─── Default settings (seeded on first boot) ─────────────────────────────────
 const DEFAULT_SETTINGS = [
@@ -95,4 +96,4 @@ const seedDefaultSettings = async () => {
     }
 };
 
-module.exports = { Setting, DEFAULT_SETTINGS, seedDefaultSettings };
+module.exports = { Setting, DEFAULT_SETTINGS, seedDefaultSettings, ADMIN_SECURITY_PIN_HASH_KEY };

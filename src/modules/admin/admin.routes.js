@@ -79,7 +79,7 @@ const { authorizeRoles, requirePermission, requireAnyPermission } = authorize;
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendPaginated } = require('../../shared/utils/apiResponse');
 const { createUpload } = require('../../shared/middlewares/upload');
-const { walletLimiter } = require('../../shared/middlewares/rateLimiter');
+const { authLimiter, walletLimiter } = require('../../shared/middlewares/rateLimiter');
 const validate = require('../../shared/middlewares/validate');
 
 const { validateBody, validateQuery, schemas } = require('./admin.validation');
@@ -96,6 +96,7 @@ const providersCtrl = require('./admin.providers.controller');
 const ordersCtrl = require('./admin.orders.controller');
 const walletCtrl = require('./admin.wallet.controller');
 const settingsCtrl = require('./admin.settings.controller');
+const securityPinCtrl = require('./admin.securityPin.controller');
 const statsCtrl = require('./admin.stats.controller');
 const financialReportCtrl = require('./admin.financialReport.controller');
 const paymentsCtrl = require('../payments/payment.controller');
@@ -299,6 +300,10 @@ router.delete('/groups/:id', requirePermission('groups.manage'), catchAsync(asyn
 // ═══════════════════════════════════════════════════════════════════════════════
 // SETTINGS
 // ═══════════════════════════════════════════════════════════════════════════════
+
+router.get('/security-pin/status', requirePermission('admin_security_pin.manage'), securityPinCtrl.status);
+router.post('/security-pin/verify', requirePermission('admin_security_pin.manage'), authLimiter, securityPinCtrl.verify);
+router.patch('/security-pin', requirePermission('admin_security_pin.manage'), securityPinCtrl.update);
 
 router.get('/settings', authorizeRoles('ADMIN'), settingsCtrl.listSettings);
 router.get('/settings/:key', authorizeRoles('ADMIN'), settingsCtrl.getSettingByKey);
