@@ -195,6 +195,7 @@ router.post('/providers/:id/xena/balance/refresh', requirePermission('suppliers.
 router.get('/providers/:id/xena/product-config', requirePermission('suppliers.manage'), providersCtrl.getXenaProductConfig);
 router.patch('/providers/:id/xena/product-config', requirePermission('suppliers.manage'), validateBody(schemas.xenaProductConfig), providersCtrl.updateXenaProductConfig);
 router.post('/providers/:id/xena/sync-product', requirePermission('suppliers.manage'), providersCtrl.syncXenaSyntheticProduct);
+router.post('/providers/:id/xena/verify-target', requirePermission('suppliers.manage'), validateBody(schemas.xenaTargetVerification), providersCtrl.verifyXenaTarget);
 router.get('/providers/:providerId/products/:externalProductId/price', requirePermission('suppliers.manage'), providersCtrl.getProductPrice);
 router.patch('/providers/:id/toggle', requirePermission('suppliers.manage'), providersCtrl.toggleProvider);
 router.get('/providers/:id', requirePermission('suppliers.manage'), providersCtrl.getProviderById);

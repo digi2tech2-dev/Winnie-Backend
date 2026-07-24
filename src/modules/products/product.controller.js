@@ -1,6 +1,7 @@
 'use strict';
 
 const productService = require('./product.service');
+const xenaTargetService = require('../providers/xena/xenaTarget.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
@@ -116,6 +117,14 @@ const getProduct = catchAsync(async (req, res) => {
     sendSuccess(res, sanitizePricingForSupervisor(responseProduct, req.user));
 });
 
+const verifyTarget = catchAsync(async (req, res) => {
+    const result = await xenaTargetService.verifyProductTargetUid({
+        productId: req.params.id,
+        targetUid: req.body.targetUid,
+    });
+    sendSuccess(res, result, 'Target verified successfully.');
+});
+
 // ─── Admin only ───────────────────────────────────────────────────────────────
 
 /**
@@ -158,6 +167,7 @@ const toggleStatus = catchAsync(async (req, res) => {
 module.exports = {
     listProducts,
     getProduct,
+    verifyTarget,
     createProduct,
     publishProduct,
     updateProduct,

@@ -11,8 +11,10 @@ const XENA_ERROR_CODES = Object.freeze({
     CONNECTION_REQUIRED: 'XENA_CONNECTION_REQUIRED',
     REAUTHENTICATION_REQUIRED: 'XENA_REAUTHENTICATION_REQUIRED',
     PROVIDER_AUTH_FAILED: 'XENA_PROVIDER_AUTH_FAILED',
+    TARGET_INVALID: 'XENA_TARGET_INVALID',
     BALANCE_UNAVAILABLE: 'XENA_BALANCE_UNAVAILABLE',
     RATE_LIMITED: 'XENA_RATE_LIMITED',
+    VERIFICATION_UNAVAILABLE: 'XENA_VERIFICATION_UNAVAILABLE',
     INTEGRATION_UNAVAILABLE: 'XENA_INTEGRATION_UNAVAILABLE',
     MALFORMED_RESPONSE: 'XENA_MALFORMED_RESPONSE',
 });
@@ -20,6 +22,8 @@ const XENA_ERROR_CODES = Object.freeze({
 const contextUnavailableCode = (context) => (
     context === 'balance'
         ? XENA_ERROR_CODES.BALANCE_UNAVAILABLE
+        : context === 'targetVerification'
+            ? XENA_ERROR_CODES.VERIFICATION_UNAVAILABLE
         : XENA_ERROR_CODES.INTEGRATION_UNAVAILABLE
 );
 
@@ -31,10 +35,14 @@ const safeMessageForCode = (code) => {
             return 'Xena connection requires reauthentication.';
         case XENA_ERROR_CODES.PROVIDER_AUTH_FAILED:
             return 'Xena provider authentication failed.';
+        case XENA_ERROR_CODES.TARGET_INVALID:
+            return 'Xena target UID is invalid.';
         case XENA_ERROR_CODES.BALANCE_UNAVAILABLE:
             return 'Xena balance is currently unavailable.';
         case XENA_ERROR_CODES.RATE_LIMITED:
             return 'Xena rate limit reached. Please retry later.';
+        case XENA_ERROR_CODES.VERIFICATION_UNAVAILABLE:
+            return 'Xena target verification is currently unavailable.';
         case XENA_ERROR_CODES.MALFORMED_RESPONSE:
             return 'Xena returned a malformed response.';
         case XENA_ERROR_CODES.INTEGRATION_UNAVAILABLE:
@@ -60,8 +68,16 @@ const mapXenaErrorCode = (err, context) => {
         return XENA_ERROR_CODES.RATE_LIMITED;
     }
 
+    if (context === 'targetVerification' && status === 404) {
+        return XENA_ERROR_CODES.TARGET_INVALID;
+    }
+
+    if (context === 'targetVerification' && status === 409) {
+        return XENA_ERROR_CODES.REAUTHENTICATION_REQUIRED;
+    }
+
     if (status === 401 || status === 403) {
-        return context === 'challenge'
+        return context === 'challenge' || context === 'targetVerification'
             ? XENA_ERROR_CODES.PROVIDER_AUTH_FAILED
             : XENA_ERROR_CODES.REAUTHENTICATION_REQUIRED;
     }
@@ -153,6 +169,12 @@ class XenaClient {
     async getBalance({ connectionId }) {
         return this.request('get', `/v1/connections/${encodeURIComponent(connectionId)}/balance`, {
             context: 'balance',
+        });
+    }
+
+    async verifyTargetUser({ connectionId, targetUid }) {
+        return this.request('get', `/v1/connections/${encodeURIComponent(connectionId)}/users/${encodeURIComponent(targetUid)}`, {
+            context: 'targetVerification',
         });
     }
 }

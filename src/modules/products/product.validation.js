@@ -26,6 +26,13 @@ const listProductsValidation = [
     query('limit').optional().isInt({ min: 1, max: 200 }).withMessage('limit must be 1–200'),
 ];
 
+const targetVerificationValidation = [
+    param('id').isMongoId().withMessage('Invalid product ID'),
+    body('targetUid')
+        .exists({ checkFalsy: true }).withMessage('targetUid is required')
+        .isString().withMessage('targetUid must be a string'),
+];
+
 // ─── Admin: create standalone product ────────────────────────────────────────
 
 const createProductValidation = [
@@ -300,6 +307,7 @@ const updateProductValidation = [
 module.exports = {
     productIdParam,
     listProductsValidation,
+    targetVerificationValidation,
     createProductValidation,
     publishProductValidation,
     updateProductValidation,

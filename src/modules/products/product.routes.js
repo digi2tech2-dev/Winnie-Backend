@@ -5,6 +5,7 @@ const productController = require('./product.controller');
 const {
     productIdParam,
     listProductsValidation,
+    targetVerificationValidation,
     createProductValidation,
     publishProductValidation,
     updateProductValidation,
@@ -27,6 +28,18 @@ router.get(
     authenticate,
     listProductsValidation, validate,
     productController.listProducts
+);
+
+/**
+ * @route  POST /api/products/:id/target-verification
+ * @desc   Verify provider target account metadata through Winnie backend
+ * @access Authenticated
+ */
+router.post(
+    '/:id/target-verification',
+    authenticate,
+    targetVerificationValidation, validate,
+    productController.verifyTarget
 );
 
 /**

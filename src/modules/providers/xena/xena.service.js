@@ -208,6 +208,22 @@ const getConnectionIdOrThrow = (state) => {
     return connectionId;
 };
 
+const assertVerificationConnectionUsable = (state) => {
+    if (state?.status === XENA_CONNECTION_STATUSES.REAUTHENTICATION_REQUIRED) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.REAUTHENTICATION_REQUIRED),
+            XENA_ERROR_CODES.REAUTHENTICATION_REQUIRED
+        );
+    }
+
+    if (state?.status && state.status !== XENA_CONNECTION_STATUSES.CONNECTED) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.CONNECTION_REQUIRED),
+            XENA_ERROR_CODES.CONNECTION_REQUIRED
+        );
+    }
+};
+
 const buildClient = (provider) => {
     const apiToken = getProviderCredential(provider.apiToken || provider.apiKey || provider.effectiveToken || null);
     return new XenaClient({
@@ -224,6 +240,63 @@ const recordError = async (state, err, { status } = {}) => {
         state.status = status;
     }
     await state.save();
+};
+
+const pickTargetUserPayload = (payload) => (
+    payload?.data && typeof payload.data === 'object'
+        ? payload.data
+        : payload
+);
+
+const normalizeTargetUserResponse = (payload, targetUid) => {
+    const userPayload = pickTargetUserPayload(payload);
+    if (!userPayload || typeof userPayload !== 'object' || Array.isArray(userPayload)) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.MALFORMED_RESPONSE),
+            XENA_ERROR_CODES.MALFORMED_RESPONSE
+        );
+    }
+
+    const keys = Object.keys(userPayload);
+    if (keys.length === 0) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.TARGET_INVALID),
+            XENA_ERROR_CODES.TARGET_INVALID
+        );
+    }
+
+    if (userPayload.valid === false) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.TARGET_INVALID),
+            XENA_ERROR_CODES.TARGET_INVALID
+        );
+    }
+
+    const rawUid = userPayload.uid ?? userPayload.user?.uid ?? null;
+    const hasMatchingUid = rawUid !== null && rawUid !== undefined && String(rawUid) === targetUid;
+    const isValid = userPayload.valid === true || hasMatchingUid;
+
+    if (!isValid) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.TARGET_INVALID),
+            XENA_ERROR_CODES.TARGET_INVALID
+        );
+    }
+
+    const profile = userPayload.user && typeof userPayload.user === 'object'
+        ? userPayload.user
+        : userPayload;
+
+    return {
+        valid: true,
+        targetUid,
+        user: {
+            uid: targetUid,
+            nickname: profile.nickname ?? profile.name ?? null,
+            avatar: profile.avatar ?? null,
+            country: profile.country ?? null,
+        },
+    };
 };
 
 const challengeConnection = async ({ provider: providerOrId, displayName, username, password }) => {
@@ -382,15 +455,43 @@ const refreshBalance = async ({ provider: providerOrId }) => {
     }
 };
 
+const verifyTargetUser = async ({ provider: providerOrId, targetUid }) => {
+    const provider = await loadProvider(providerOrId);
+    const state = await getOrCreateState(provider);
+    assertVerificationConnectionUsable(state);
+    const connectionId = getConnectionIdOrThrow(state);
+
+    try {
+        const client = buildClient(provider);
+        const result = await client.verifyTargetUser({ connectionId, targetUid });
+        const safeResult = normalizeTargetUserResponse(result.data, targetUid);
+
+        state.lastErrorCode = null;
+        state.lastErrorMessage = null;
+        state.lastCheckedAt = new Date();
+        await state.save();
+
+        return safeResult;
+    } catch (err) {
+        const status = err.code === XENA_ERROR_CODES.REAUTHENTICATION_REQUIRED
+            ? XENA_CONNECTION_STATUSES.REAUTHENTICATION_REQUIRED
+            : undefined;
+        await recordError(state, err, { status });
+        throw err;
+    }
+};
+
 module.exports = {
     XENA_PROVIDER_CODE,
     XENA_ERROR_CODES,
     isXenaProvider,
     maskUsername,
     normalizeBalance,
+    normalizeTargetUserResponse,
     challengeConnection,
     reconnectConnection,
     verifyConnection,
     getConnectionStatus,
     refreshBalance,
+    verifyTargetUser,
 };

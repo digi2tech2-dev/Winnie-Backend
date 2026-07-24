@@ -438,6 +438,14 @@ const xenaProductConfigSchema = Joi.object({
     isActive: Joi.boolean(),
 }).min(1);
 
+const xenaTargetVerificationSchema = Joi.object({
+    targetUid: Joi.string().strict().min(1).max(100).pattern(/^\s*\d{1,50}\s*$/).required().messages({
+        'any.required': 'targetUid is required',
+        'string.empty': 'targetUid is required',
+        'string.pattern.base': 'targetUid must contain 1 to 50 digits only',
+    }),
+});
+
 const createCurrencySchema = Joi.object({
     code: Joi.string().trim().uppercase().length(3).pattern(/^[A-Z]{3}$/).required().messages({
         'any.required': 'Currency code is required',
@@ -536,6 +544,7 @@ module.exports = {
         xenaConnectionChallenge: xenaConnectionChallengeSchema,
         xenaConnectionVerify: xenaConnectionVerifySchema,
         xenaProductConfig: xenaProductConfigSchema,
+        xenaTargetVerification: xenaTargetVerificationSchema,
         // Orders
         listOrdersQuery,
         updateOrderStatus: updateOrderStatusSchema,
