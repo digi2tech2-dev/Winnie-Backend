@@ -83,6 +83,7 @@ const createUpload = (category, options = {}) => {
         ? 'JPG, JPEG, PNG, WebP, GIF, SVG, BMP, and PDF'
         : 'JPG, JPEG, PNG, WebP, GIF, SVG, and BMP');
     const maxFileSize = options.maxFileSize || MAX_FILE_SIZE;
+    const maxFiles = Math.max(parseInt(options.maxFiles, 10) || 1, 1);
 
     const fileFilter = (_req, file, cb) => {
         const ext = path.extname(file.originalname).toLowerCase();
@@ -105,7 +106,7 @@ const createUpload = (category, options = {}) => {
         fileFilter,
         limits: {
             fileSize: maxFileSize,
-            files: 1,
+            files: maxFiles,
         },
     });
 };

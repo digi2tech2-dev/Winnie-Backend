@@ -63,6 +63,9 @@ const assertAntiScamConfirmation = ({ antiScamConfirmed, termsAccepted } = {}) =
  * @param {number}          params.amountUsd
  * @param {string}          params.receiptImage
  * @param {string|null}     [params.notes]
+ * @param {Array}           [params.customFieldSnapshot]
+ * @param {Object}          [params.customFieldValues]
+ * @param {Object}          [params.customFieldFiles]
  * @param {Object|null}     [params.auditContext]
  *
  * @returns {Promise<DepositRequest>}
@@ -76,6 +79,9 @@ const createDepositRequest = async ({
     amountUsd,
     receiptImage,
     notes = null,
+    customFieldSnapshot = [],
+    customFieldValues = {},
+    customFieldFiles = {},
     antiScamConfirmed = false,
     termsAccepted = false,
     antiScamConfirmedAt = null,
@@ -109,6 +115,9 @@ const createDepositRequest = async ({
         amountUsd: Number(parseFloat(amountUsd).toFixed(2)),
         receiptImage,
         notes,
+        customFieldSnapshot: Array.isArray(customFieldSnapshot) ? customFieldSnapshot : [],
+        customFieldValues: customFieldValues && typeof customFieldValues === 'object' ? customFieldValues : {},
+        customFieldFiles: customFieldFiles && typeof customFieldFiles === 'object' ? customFieldFiles : {},
         status: DEPOSIT_STATUS.PENDING,
     });
 
@@ -126,6 +135,8 @@ const createDepositRequest = async ({
             currency,
             exchangeRate,
             amountUsd: deposit.amountUsd,
+            customFieldKeys: Object.keys(deposit.customFieldValues || {}),
+            customFieldFileKeys: Object.keys(deposit.customFieldFiles || {}),
             antiScamConfirmed: true,
             termsAccepted: true,
             antiScamConfirmedAt: antiScamConfirmedAt || null,

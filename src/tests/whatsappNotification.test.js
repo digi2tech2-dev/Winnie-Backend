@@ -245,9 +245,53 @@ describe('WhatsApp notifications', () => {
         });
         await whatsappService.processPendingMessages({ limit: 1 });
         const failed = await WhatsAppNotificationLog.findById(failedLog._id);
-        expect(failed.status).toBe('failed');
+        expect(failed.status).toBe('retry_pending');
         expect(failed.retryCount).toBe(1);
         expect(failed.nextRetryAt).toBeInstanceOf(Date);
+    });
+
+    it('marks OpenWA HTTP 500 as sent_unconfirmed and does not auto-retry', async () => {
+        const error = new Error('Cannot read properties of undefined (reading id)');
+        error.response = { status: 500, data: { message: error.message } };
+        axios.post.mockRejectedValueOnce(error);
+
+        const log = await whatsappService.queueWhatsAppNotification({
+            recipientType: 'customer',
+            phone: '+201011111111',
+            eventType: 'test_message',
+            payload: { message: 'maybe delivered' },
+        });
+
+        await whatsappService.processPendingMessages({ limit: 1 });
+        const sentUnconfirmed = await WhatsAppNotificationLog.findById(log._id).lean();
+        expect(sentUnconfirmed.status).toBe('sent_unconfirmed');
+        expect(sentUnconfirmed.reason).toBe('OPENWA_UNKNOWN_DELIVERY');
+        expect(sentUnconfirmed.nextRetryAt).toBeNull();
+        expect(sentUnconfirmed.metadata.openwa.statusCode).toBe(500);
+
+        axios.post.mockClear();
+        await whatsappService.processPendingMessages({ limit: 5 });
+        expect(axios.post).not.toHaveBeenCalled();
+    });
+
+    it('marks OpenWA 400 session/validation errors as failed with no duplicate loop', async () => {
+        const error = new Error('Session is not active');
+        error.response = { status: 400, data: { message: 'Session is not active' } };
+        axios.post.mockRejectedValueOnce(error);
+
+        const log = await whatsappService.queueWhatsAppNotification({
+            recipientType: 'customer',
+            phone: '+201011111111',
+            eventType: 'test_message',
+            payload: { message: 'bad session' },
+        });
+
+        await whatsappService.processPendingMessages({ limit: 1 });
+        const failed = await WhatsAppNotificationLog.findById(log._id).lean();
+        expect(failed.status).toBe('failed');
+        expect(failed.reason).toBe('OPENWA_BAD_REQUEST');
+        expect(failed.nextRetryAt).toBeNull();
+        expect(failed.metadata.openwa.statusCode).toBe(400);
     });
 
     it('admin can CRUD recipients, send tests, list logs, and retry failed logs', async () => {

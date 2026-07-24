@@ -41,7 +41,15 @@ const {
     ENTITY_TYPES,
     ACTOR_ROLES,
 } = require('../audit/audit.constants');
-const { notifyPaymentSucceeded } = require('../notifications/notification.events');
+const {
+    notifyPaymentFailed,
+    notifyPaymentReconciliationFailed,
+    notifyPaymentSucceeded,
+} = require('../notifications/notification.events');
+const {
+    escapeRegex,
+    normalizeSubmittedCustomFields,
+} = require('./paymentCustomFields');
 const config = require('../../config/config');
 const {
     AntiScamConfirmationRequiredError,
@@ -608,6 +616,7 @@ const createPaymentIntent = async ({
     antiScamConfirmed = false,
     termsAccepted = false,
     antiScamConfirmedAt = null,
+    customFields = {},
     requestMeta = {},
 } = {}) => {
     assertPaymentsEnabled();
@@ -627,6 +636,11 @@ const createPaymentIntent = async ({
         currency: normalizedCurrency,
     });
     assertPaymentMethodAmountAllowed(parsedAmount, selectedPaymentMethod);
+    const validatedCustomFields = normalizeSubmittedCustomFields({
+        fieldsConfig: selectedPaymentMethod?.customFields || [],
+        values: customFields || {},
+        skipFileRequired: true,
+    });
 
     const user = await User.findById(userId).select('currency status role createdAt identityVerificationRequired');
     if (!user) throw new NotFoundError('User');
@@ -761,6 +775,8 @@ const createPaymentIntent = async ({
                 name: selectedPaymentMethod.name || selectedPaymentMethod.title || null,
                 gateway: getPaymentMethodGateway(selectedPaymentMethod) || normalizedGateway,
             } : undefined,
+            customFieldSnapshot: validatedCustomFields.customFieldSnapshot,
+            customFieldValues: validatedCustomFields.customFieldValues,
             antiScamConfirmation: {
                 confirmed: true,
                 termsAccepted: true,
@@ -827,11 +843,25 @@ const getPaymentById = async (paymentId, { actor, admin = false } = {}) => {
     return payment;
 };
 
-const buildListFilter = ({ userId, status, gateway, purpose, credited, from, to } = {}) => {
+const buildListFilter = async ({
+    userId,
+    status,
+    gateway,
+    provider,
+    method,
+    currency,
+    purpose,
+    credited,
+    from,
+    to,
+    search,
+} = {}) => {
     const filter = {};
     if (userId) filter.userId = userId;
     if (status) filter.status = String(status).trim().toUpperCase();
-    if (gateway) filter.gateway = normalizeGatewayKey(gateway);
+    if (gateway || provider) filter.gateway = normalizeGatewayKey(gateway || provider);
+    if (method) filter.method = String(method).trim().toUpperCase();
+    if (currency) filter.currency = String(currency).trim().toUpperCase();
     if (purpose) filter.purpose = String(purpose).trim().toUpperCase();
     if (credited === true || credited === 'true') filter.creditedAt = { $ne: null };
     if (credited === false || credited === 'false') filter.creditedAt = null;
@@ -840,6 +870,27 @@ const buildListFilter = ({ userId, status, gateway, purpose, credited, from, to 
         if (from) filter.createdAt.$gte = new Date(from);
         if (to) filter.createdAt.$lte = new Date(to);
     }
+    if (search && String(search).trim()) {
+        const term = String(search).trim();
+        const regex = new RegExp(escapeRegex(term), 'i');
+        const matchingUsers = await User.find({
+            $or: [{ name: regex }, { email: regex }, { phone: regex }, { username: regex }],
+        }).select('_id').lean();
+        const orConditions = [
+            { gatewayPaymentId: regex },
+            { gatewayReference: regex },
+            { paymentMethodId: regex },
+            { gateway: regex },
+            { method: regex },
+            { status: regex },
+            { currency: regex },
+            { 'metadata.paymentMethod.name': regex },
+            { 'metadata.paymentMethod.gateway': regex },
+        ];
+        if (/^[a-f\d]{24}$/i.test(term)) orConditions.push({ _id: term });
+        if (matchingUsers.length) orConditions.push({ userId: { $in: matchingUsers.map((user) => user._id) } });
+        filter.$or = orConditions;
+    }
     return filter;
 };
 
@@ -847,17 +898,33 @@ const listPayments = async ({
     userId = null,
     status,
     gateway,
+    provider,
+    method,
+    currency,
     purpose,
     credited,
     from,
     to,
+    search,
     page = 1,
     limit = 20,
 } = {}) => {
     const normalizedLimit = Math.min(parseInt(limit, 10) || 20, 100);
     const normalizedPage = Math.max(parseInt(page, 10) || 1, 1);
     const skip = (normalizedPage - 1) * normalizedLimit;
-    const filter = buildListFilter({ userId, status, gateway, purpose, credited, from, to });
+    const filter = await buildListFilter({
+        userId,
+        status,
+        gateway,
+        provider,
+        method,
+        currency,
+        purpose,
+        credited,
+        from,
+        to,
+        search,
+    });
 
     const [payments, total] = await Promise.all([
         Payment.find(filter)
@@ -1221,9 +1288,20 @@ const updatePaymentFromGatewayStatus = async (initialPayment, gatewayStatus) => 
         { $set: update },
         { new: true }
     );
+    const resolvedPayment = payment || await Payment.findById(initialPayment._id);
+    if (
+        payment
+        && [PAYMENT_STATUSES.FAILED, PAYMENT_STATUSES.CANCELED, PAYMENT_STATUSES.EXPIRED].includes(targetStatus)
+    ) {
+        notifyPaymentFailed(payment, {
+            status: targetStatus,
+            source: 'gateway_status_sync',
+            reason: gatewayStatus.providerStatus || gatewayStatus.reason || null,
+        });
+    }
 
     return {
-        payment: payment || await Payment.findById(initialPayment._id),
+        payment: resolvedPayment,
         alreadyProcessed: false,
         providerStatus: gatewayStatus.providerStatus || null,
     };
@@ -1298,6 +1376,11 @@ const syncPaymentStatus = async (paymentId, { actor, requestMeta = {}, source = 
             errorCode: err.code || 'PAYMENT_RECONCILIATION_FAILED',
             errorMessage: err.message || 'Payment status could not be verified.',
             requestMeta,
+        });
+        notifyPaymentReconciliationFailed(initialPayment, {
+            source,
+            errorCode: err.code || 'PAYMENT_RECONCILIATION_FAILED',
+            errorMessage: err.message || 'Payment status could not be verified.',
         });
         throw err;
     }
@@ -1404,6 +1487,11 @@ const failMockPayment = async (paymentId, { actor, requestMeta = {} } = {}) => {
         }
         throw new BusinessRuleError('Payment is not fail-able.', 'PAYMENT_NOT_FAILABLE');
     }
+    notifyPaymentFailed(payment, {
+        status: PAYMENT_STATUSES.FAILED,
+        source: 'mock_failure',
+        reason: 'MOCK_PAYMENT_FAILED',
+    });
 
     void createAuditLog({
         actorId: actor?.actorId || actor?._id || actor?.userId || payment.userId,

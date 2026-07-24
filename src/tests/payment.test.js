@@ -75,6 +75,7 @@ const savePaymentMethod = async (method = {}) => {
                         customerVisible: true,
                         minAmount: method.minAmount ?? null,
                         maxAmount: method.maxAmount ?? null,
+                        customFields: method.customFields || [],
                     }],
                 }],
                 description: 'Payment method test settings',
@@ -191,6 +192,35 @@ describe('Payments base module', () => {
         expect(result.payment.feePercent).toBe(0);
         expect(result.payment.feeAmount).toBe(0);
         expect(result.payment.totalAmount).toBe(100);
+    });
+
+    it('stores customFields on payment intents without changing gateway amounts', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        await savePaymentMethod({
+            customFields: [{
+                key: 'payerReference',
+                label: 'Payer reference',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+        });
+
+        const result = await paymentService.createPaymentIntent({
+            userId: customer._id,
+            amount: 100,
+            currency: 'USD',
+            gateway: PAYMENT_GATEWAYS.MOCK,
+            paymentMethodId: 'pm-mock-fee',
+            customFields: { payerReference: 'PAY-123' },
+            antiScamConfirmed: true,
+            termsAccepted: true,
+        });
+
+        expect(result.payment.amount).toBe(100);
+        expect(result.payment.totalAmount).toBe(102);
+        expect(result.payment.metadata.customFieldSnapshot[0]).toMatchObject({ key: 'payerReference', type: 'text' });
+        expect(result.payment.metadata.customFieldValues).toEqual({ payerReference: 'PAY-123' });
     });
 
     it('rejects invalid payment amounts', async () => {

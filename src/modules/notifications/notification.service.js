@@ -170,7 +170,8 @@ const listNotifications = async (userId, {
     const filter = { userId };
 
     if (isRead !== undefined) {
-        filter.isRead = String(isRead) === 'true' || isRead === true;
+        const normalizedRead = String(isRead).trim().toLowerCase();
+        filter.isRead = normalizedRead === 'read' || normalizedRead === 'true' || isRead === true;
     }
 
     if (type) {

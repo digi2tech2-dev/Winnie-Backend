@@ -12,6 +12,8 @@ const RECIPIENT_TYPES = Object.freeze({
 const LOG_STATUSES = Object.freeze({
     PENDING: 'pending',
     SENT: 'sent',
+    SENT_UNCONFIRMED: 'sent_unconfirmed',
+    RETRY_PENDING: 'retry_pending',
     FAILED: 'failed',
     SKIPPED: 'skipped',
 });

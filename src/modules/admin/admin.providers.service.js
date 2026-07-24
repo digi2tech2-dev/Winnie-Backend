@@ -227,6 +227,7 @@ const getProviderBalance = async (id) => {
 
     const balanceAmount = extractProviderBalanceAmount(balance);
     if (Number.isFinite(balanceAmount) && balanceAmount < 10) {
+        const utcDay = new Date().toISOString().slice(0, 10);
         void safeCreateAdminActorNotifications({
             title: 'رصيد المورد منخفض',
             message: `رصيد المورد ${provider.name} انخفض إلى ${balanceAmount}. يرجى شحن الرصيد.`,
@@ -236,9 +237,13 @@ const getProviderBalance = async (id) => {
             entityType: 'provider',
             entityId: provider._id,
             metadata: {
+                eventKey: `provider-low-balance:${provider._id.toString()}:${utcDay}`,
+                eventType: 'provider_low_balance',
                 providerId: provider._id.toString(),
                 providerName: provider.name,
                 balance: balanceAmount,
+                threshold: 10,
+                day: utcDay,
             },
         });
     }

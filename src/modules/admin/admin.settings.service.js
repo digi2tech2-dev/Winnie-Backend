@@ -15,6 +15,10 @@ const {
     PAYMENT_RISK_LIMITS_SETTING_KEY,
     normalizePaymentRiskLimits,
 } = require('../payments/paymentRisk.config');
+const {
+    PAYMENT_GROUPS_SETTING_KEY,
+    normalizePaymentGroupsSettingValue,
+} = require('../payments/paymentCustomFields');
 
 // ─── List ──────────────────────────────────────────────────────────────────────
 
@@ -44,6 +48,9 @@ const normalizeSettingValueForUpdate = (key, value, currentValue) => {
             currentValue,
             allowMissing: false,
         });
+    }
+    if (key === PAYMENT_GROUPS_SETTING_KEY) {
+        return normalizePaymentGroupsSettingValue(value);
     }
 
     return value;

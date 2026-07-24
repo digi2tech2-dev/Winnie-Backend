@@ -34,7 +34,7 @@ const { createUpload } = require('../../shared/middlewares/upload');
 const { body, param, query } = require('express-validator');
 const validate = require('../../shared/middlewares/validate');
 
-const depositUpload = createUpload('deposits');
+const depositUpload = createUpload('deposits', { maxFiles: 20 });
 
 const router = Router();
 
@@ -177,7 +177,7 @@ const createDepositValidation = [
  */
 router.post(
     '/deposits',
-    depositUpload.single('receipt'),
+    depositUpload.any(),
     createDepositValidation,
     validate,
     me.createDeposit

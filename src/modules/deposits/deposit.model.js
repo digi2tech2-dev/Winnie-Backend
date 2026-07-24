@@ -102,6 +102,21 @@ const depositRequestSchema = new mongoose.Schema(
             default: null,
         },
 
+        customFieldSnapshot: {
+            type: [mongoose.Schema.Types.Mixed],
+            default: [],
+        },
+
+        customFieldValues: {
+            type: mongoose.Schema.Types.Mixed,
+            default: {},
+        },
+
+        customFieldFiles: {
+            type: mongoose.Schema.Types.Mixed,
+            default: {},
+        },
+
         /** Current lifecycle status. */
         status: {
             type: String,

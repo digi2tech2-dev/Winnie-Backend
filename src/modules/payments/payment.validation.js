@@ -55,6 +55,10 @@ const createPaymentIntentValidation = [
         .optional({ nullable: true, checkFalsy: true })
         .isISO8601().withMessage('antiScamConfirmedAt must be an ISO date'),
 
+    body('customFields')
+        .optional({ nullable: true })
+        .isObject().withMessage('customFields must be an object'),
+
     urlValidation('returnUrl'),
     urlValidation('cancelUrl'),
 ];
@@ -94,6 +98,29 @@ const listPaymentsValidation = [
         .toUpperCase()
         .isIn(Object.values(PAYMENT_GATEWAYS))
         .withMessage(`gateway must be one of: ${Object.values(PAYMENT_GATEWAYS).join(', ')}`),
+
+    query('provider')
+        .optional()
+        .isString().withMessage('provider must be a string')
+        .trim(),
+
+    query('method')
+        .optional()
+        .isString().withMessage('method must be a string')
+        .trim(),
+
+    query('currency')
+        .optional()
+        .isString().withMessage('currency must be a string')
+        .trim()
+        .isLength({ min: 3, max: 3 }).withMessage('currency must be a 3-letter ISO 4217 code')
+        .toUpperCase(),
+
+    query('search')
+        .optional()
+        .isString().withMessage('search must be a string')
+        .trim()
+        .isLength({ max: 160 }).withMessage('search cannot exceed 160 characters'),
 
     query('credited')
         .optional()

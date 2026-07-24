@@ -32,6 +32,14 @@ const {
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_RATE_LIMIT_MS = 60 * 1000;
 const TEST_RATE_LIMIT_MS = 60 * 1000;
+const RETRYABLE_TRANSPORT_CODES = new Set([
+    'ECONNREFUSED',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ETIMEDOUT',
+    'ECONNABORTED',
+    'ESOCKETTIMEDOUT',
+]);
 
 const getRuntimeOpenWaConfig = () => ({
     enabled: process.env.OPENWA_ENABLED !== undefined
@@ -61,6 +69,47 @@ const pickKnownPreferences = (source = {}, defaults) => Object.keys(defaults).re
     if (source[key] !== undefined) acc[key] = source[key] === true;
     return acc;
 }, {});
+
+const rawErrorMetadata = (error) => ({
+    statusCode: error.response?.status || null,
+    body: error.response?.data || null,
+    code: error.code || null,
+    message: error.message || null,
+});
+
+const classifyOpenWaSendError = (error) => {
+    const statusCode = error.response?.status || null;
+    if (statusCode) {
+        if (statusCode >= 500) {
+            return {
+                status: LOG_STATUSES.SENT_UNCONFIRMED,
+                reason: 'OPENWA_UNKNOWN_DELIVERY',
+                retryable: false,
+                sentAt: true,
+            };
+        }
+        return {
+            status: LOG_STATUSES.FAILED,
+            reason: statusCode === 400 ? 'OPENWA_BAD_REQUEST' : 'OPENWA_REJECTED',
+            retryable: false,
+            sentAt: false,
+        };
+    }
+
+    const code = String(error.code || '').trim().toUpperCase();
+    const message = String(error.message || '').toLowerCase();
+    const retryable = RETRYABLE_TRANSPORT_CODES.has(code)
+        || message.includes('timeout')
+        || message.includes('network')
+        || message.includes('socket hang up');
+
+    return {
+        status: retryable ? LOG_STATUSES.RETRY_PENDING : LOG_STATUSES.FAILED,
+        reason: retryable ? 'TRANSPORT_RETRYABLE' : 'TRANSPORT_FAILED',
+        retryable,
+        sentAt: false,
+    };
+};
 
 const serializeCustomerSettings = (user) => {
     const settings = user?.whatsappNotifications || {};
@@ -613,17 +662,44 @@ const processOneLog = async (log) => {
         log.providerMessageId = result.providerMessageId;
         log.errorMessage = null;
         log.nextRetryAt = null;
+        log.reason = null;
+        log.metadata = {
+            ...(log.metadata || {}),
+            openwa: {
+                ...(log.metadata?.openwa || {}),
+                statusCode: 200,
+                body: result.raw || null,
+                deliveryState: 'SENT',
+            },
+        };
+        log.markModified('metadata');
         await log.save();
         return log;
     } catch (error) {
+        const classification = classifyOpenWaSendError(error);
         const nextRetryCount = Number(log.retryCount || 0) + 1;
         log.retryCount = nextRetryCount;
-        log.status = LOG_STATUSES.FAILED;
+        log.status = classification.status;
         log.errorMessage = error.response?.data?.message || error.message || 'OpenWA request failed.';
-        log.reason = 'PROVIDER_ERROR';
-        if (nextRetryCount < Number(log.maxRetries || runtime.maxRetries || 0)) {
+        log.reason = classification.reason;
+        if (classification.sentAt) {
+            log.sentAt = new Date();
+        }
+        log.metadata = {
+            ...(log.metadata || {}),
+            openwa: {
+                ...(log.metadata?.openwa || {}),
+                ...rawErrorMetadata(error),
+                deliveryState: classification.status === LOG_STATUSES.SENT_UNCONFIRMED
+                    ? 'SENT_UNCONFIRMED'
+                    : classification.retryable ? 'RETRY_PENDING' : 'FAILED',
+            },
+        };
+        log.markModified('metadata');
+        if (classification.retryable && nextRetryCount < Number(log.maxRetries || runtime.maxRetries || 0)) {
             log.nextRetryAt = new Date(Date.now() + runtime.retryDelaySeconds * 1000);
         } else {
+            if (classification.retryable) log.status = LOG_STATUSES.FAILED;
             log.nextRetryAt = null;
         }
         await log.save();
@@ -636,6 +712,11 @@ const processPendingMessages = async ({ limit = 20 } = {}) => {
     const logs = await WhatsAppNotificationLog.find({
         $or: [
             { status: LOG_STATUSES.PENDING },
+            {
+                status: LOG_STATUSES.RETRY_PENDING,
+                nextRetryAt: { $lte: now },
+                $expr: { $lt: ['$retryCount', '$maxRetries'] },
+            },
             {
                 status: LOG_STATUSES.FAILED,
                 nextRetryAt: { $lte: now },

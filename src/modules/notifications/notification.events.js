@@ -178,6 +178,12 @@ const notifyOrderCreated = (order, { manualReview = false } = {}) => {
         metadata: { executionType: order?.executionType || null },
     });
 
+    void userOrderNotification(order, 'created', {
+        title: 'Order created',
+        message: `Your order #${orderNumberOf(order)} was created successfully.`,
+        metadata: { executionType: order?.executionType || null },
+    });
+
     if (manualReview) {
         void adminOrderNotification(order, 'manual_review', {
             title: 'طلب يحتاج مراجعة يدوية',
@@ -557,6 +563,98 @@ const notifyPaymentSucceeded = (payment, { transactionId } = {}) => {
     }));
 };
 
+const notifyPaymentFailed = (payment, { status = null, source = 'gateway', reason = null } = {}) => {
+    const paymentId = toIdString(payment?._id || payment?.id);
+    const resolvedStatus = String(status || payment?.status || 'failed').toLowerCase();
+    const label = amountLabel(payment?.amount, payment?.currency || 'USD');
+
+    void userWalletNotification(payment?.userId, `payment:${paymentId}:${resolvedStatus}`, {
+        title: 'Wallet top-up was not completed',
+        message: label
+            ? `Your wallet top-up for ${label} was ${resolvedStatus}.`
+            : `Your wallet top-up was ${resolvedStatus}.`,
+        entityType: 'payment',
+        entityId: toId(payment?._id || payment?.id),
+        metadata: {
+            paymentId,
+            status: resolvedStatus,
+            source,
+            reason,
+            gateway: payment?.gateway,
+            amount: payment?.amount,
+            currency: payment?.currency,
+        },
+    });
+
+    void safeCreateAdminActorNotifications({
+        roles: ADMIN_SUPERVISOR_ROLES,
+        permissions: PAYMENT_PERMISSIONS,
+        permissionMode: 'any',
+        title: 'Wallet top-up failed',
+        message: `A wallet top-up${label ? ` for ${label}` : ''} was ${resolvedStatus}.`,
+        type: NOTIFICATION_TYPES.WALLET,
+        priority: NOTIFICATION_PRIORITIES.NORMAL,
+        route: `/admin/payments?paymentId=${paymentId}`,
+        entityType: 'payment',
+        entityId: toId(payment?._id || payment?.id),
+        metadata: {
+            eventKey: `payment:${paymentId}:${resolvedStatus}`,
+            eventType: 'payment_failed',
+            paymentId,
+            userId: userIdOf(payment),
+            status: resolvedStatus,
+            source,
+            reason,
+            gateway: payment?.gateway,
+            amount: payment?.amount,
+            currency: payment?.currency,
+        },
+    });
+
+    safeQueueWhatsApp(whatsappService.queueCustomerEvent({
+        userId: toId(payment?.userId),
+        eventType: 'payment_failed_or_pending',
+        relatedEntityType: 'payment',
+        relatedEntityId: toId(payment?._id || payment?.id),
+        payload: {
+            paymentId,
+            status: resolvedStatus,
+            amount: payment?.amount,
+            currency: payment?.currency,
+            gateway: payment?.gateway,
+            reason,
+        },
+    }));
+};
+
+const notifyPaymentReconciliationFailed = (payment, { source = 'manual', errorCode = null, errorMessage = null } = {}) => {
+    if (!payment) return;
+    const paymentId = toIdString(payment?._id || payment?.id);
+
+    void safeCreateAdminActorNotifications({
+        roles: ADMIN_SUPERVISOR_ROLES,
+        permissions: PAYMENT_PERMISSIONS,
+        permissionMode: 'any',
+        title: 'Payment reconciliation failed',
+        message: `Payment ${paymentId.slice(-6)} could not be reconciled.`,
+        type: NOTIFICATION_TYPES.WALLET,
+        priority: NOTIFICATION_PRIORITIES.HIGH,
+        route: `/admin/payments?paymentId=${paymentId}`,
+        entityType: 'payment',
+        entityId: toId(payment?._id || payment?.id),
+        metadata: {
+            eventKey: `payment:${paymentId}:reconciliation_failed:${source}`,
+            eventType: 'payment_reconciliation_failed',
+            paymentId,
+            userId: userIdOf(payment),
+            source,
+            errorCode,
+            errorMessage,
+            gateway: payment?.gateway,
+        },
+    });
+};
+
 module.exports = {
     notifyOrderCreated,
     notifyOrderCompleted,
@@ -567,5 +665,7 @@ module.exports = {
     notifyDepositRequested,
     notifyDepositApproved,
     notifyDepositRejected,
+    notifyPaymentFailed,
+    notifyPaymentReconciliationFailed,
     notifyPaymentSucceeded,
 };

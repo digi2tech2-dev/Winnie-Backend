@@ -11,7 +11,7 @@ const listMyNotifications = catchAsync(async (req, res) => {
     const result = await notificationService.listNotifications(req.user._id, {
         page,
         limit,
-        isRead: req.query.isRead,
+        isRead: req.query.isRead ?? req.query.read ?? (req.query.unread !== undefined ? 'false' : undefined),
         type: req.query.type,
     });
 

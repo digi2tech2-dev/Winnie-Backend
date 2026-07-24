@@ -8,6 +8,7 @@
 
 const mongoose = require('mongoose');
 const { Order, ORDER_STATUS } = require('../orders/order.model');
+const { Product } = require('../products/product.model');
 const { markOrderAsFailed, processOrderRefund } = require('../orders/order.service');
 const { forcedDebitWallet } = require('../wallet/wallet.service');
 const {
@@ -38,18 +39,29 @@ const listOrders = async ({
     userId,
     providerId,
     search,
+    executionType,
+    type,
     from,
     to,
+    sort,
     page = 1,
     limit = 20,
 } = {}) => {
-    limit = Math.min(limit, 500);
+    page = Math.max(parseInt(page, 10) || 1, 1);
+    limit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 500);
     const skip = (page - 1) * limit;
 
     // 1. Single queryFilter — every condition goes directly onto this object.
     const queryFilter = {};
     if (status) queryFilter.status = status;
     if (userId) queryFilter.userId = new mongoose.Types.ObjectId(userId);
+    if (executionType || type) queryFilter.executionType = String(executionType || type).trim().toLowerCase();
+    if (providerId && mongoose.Types.ObjectId.isValid(String(providerId))) {
+        const providerProducts = await Product.find({ provider: providerId }).select('_id').lean();
+        queryFilter.productId = { $in: providerProducts.map((product) => product._id) };
+    } else if (providerId) {
+        queryFilter.providerCode = String(providerId).trim().toLowerCase();
+    }
     if (from || to) {
         queryFilter.createdAt = {};
         if (from) queryFilter.createdAt.$gte = new Date(from);
@@ -90,9 +102,17 @@ const listOrders = async ({
     }
 
     // 3. CRITICAL: Pass the EXACT SAME queryFilter to BOTH countDocuments and find.
+    const sortSpec = (() => {
+        const normalizedSort = String(sort || '').trim().toLowerCase();
+        if (normalizedSort === 'oldest' || normalizedSort === 'created_asc') return { createdAt: 1 };
+        if (normalizedSort === 'amount_asc' || normalizedSort === 'price_asc') return { chargedAmount: 1, createdAt: -1 };
+        if (normalizedSort === 'amount_desc' || normalizedSort === 'price_desc') return { chargedAmount: -1, createdAt: -1 };
+        return { createdAt: -1 };
+    })();
+
     const total = await Order.countDocuments(queryFilter);
     const orders = await Order.find(queryFilter)
-        .sort({ createdAt: -1 })
+        .sort(sortSpec)
         .skip(skip)
         .limit(limit)
         .populate('productId', 'name basePrice executionType provider')

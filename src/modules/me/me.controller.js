@@ -16,9 +16,15 @@ const productService = require('../products/product.service');
 const { buildCustomerPricingFields } = require('../products/customerPricingPresenter');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
-const { NotFoundError } = require('../../shared/errors/AppError');
+const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
 const { needsGoogleProfileCompletion } = require('../users/googleOnboarding');
+const {
+    escapeRegex,
+    findConfiguredPaymentMethodById,
+    mergeSubmittedCustomFieldValues,
+    normalizeSubmittedCustomFields,
+} = require('../payments/paymentCustomFields');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -93,16 +99,42 @@ const getWallet = catchAsync(async (req, res) => {
     const user = await User.findById(req.user._id).select('walletBalance currency creditLimit');
     if (!user) throw new NotFoundError('User');
 
-    const recent = await WalletTransaction.find({ userId: req.user._id })
-        .sort({ createdAt: -1 })
-        .limit(5)
-        .populate('reference', 'orderNumber customerInput status totalPrice')
-        .lean();
+    const completedFilter = { userId: req.user._id, status: 'COMPLETED' };
+    const [recent, aggregates, lastTransaction] = await Promise.all([
+        WalletTransaction.find({ userId: req.user._id })
+            .sort({ createdAt: -1 })
+            .limit(5)
+            .populate('reference', 'orderNumber customerInput status totalPrice')
+            .lean(),
+        WalletTransaction.aggregate([
+            { $match: completedFilter },
+            {
+                $group: {
+                    _id: '$type',
+                    total: { $sum: '$amount' },
+                    count: { $sum: 1 },
+                },
+            },
+        ]),
+        WalletTransaction.findOne({ userId: req.user._id }).sort({ createdAt: -1 }).select('createdAt').lean(),
+    ]);
+
+    const totalsByType = aggregates.reduce((acc, row) => {
+        acc[row._id] = Number(row.total || 0);
+        acc.transactionCount += Number(row.count || 0);
+        return acc;
+    }, { transactionCount: 0 });
 
     sendSuccess(res, {
         walletBalance: user.walletBalance,
         currency: user.currency,
         recentTransactions: recent,
+        lastTransactionAt: lastTransaction?.createdAt || null,
+        totalDeposits: totalsByType.CREDIT || 0,
+        totalSpent: totalsByType.DEBIT || 0,
+        totalRefunds: totalsByType.REFUND || 0,
+        transactionCount: totalsByType.transactionCount || 0,
+        totalTransactions: totalsByType.transactionCount || 0,
     }, 'Wallet summary retrieved.');
 });
 
@@ -112,17 +144,45 @@ const getWallet = catchAsync(async (req, res) => {
 
 /**
  * Paginated transaction history for the authenticated user.
- * Query: page, limit, from (ISO date), to (ISO date)
+ * Query: page, limit, from/fromDate, to/toDate, search, direction, status, semanticType/type
  */
 const getTransactions = catchAsync(async (req, res) => {
     const page = parsePage(req.query.page);
     const limit = parseLimit(req.query.limit);
     const filter = { userId: req.user._id };
+    const from = req.query.from || req.query.fromDate;
+    const to = req.query.to || req.query.toDate;
 
-    if (req.query.from || req.query.to) {
+    if (from || to) {
         filter.createdAt = {};
-        if (req.query.from) filter.createdAt.$gte = new Date(req.query.from);
-        if (req.query.to) filter.createdAt.$lte = new Date(req.query.to);
+        if (from) filter.createdAt.$gte = new Date(from);
+        if (to) filter.createdAt.$lte = new Date(to);
+    }
+    if (req.query.direction) filter.direction = String(req.query.direction).trim().toUpperCase();
+    if (req.query.status) filter.status = String(req.query.status).trim().toUpperCase();
+    if (req.query.semanticType || req.query.type) {
+        const type = String(req.query.semanticType || req.query.type).trim().toUpperCase();
+        filter.$and = [
+            ...(filter.$and || []),
+            { $or: [{ semanticType: type }, { type }] },
+        ];
+    }
+    if (req.query.search && String(req.query.search).trim()) {
+        const search = String(req.query.search).trim();
+        const regex = new RegExp(escapeRegex(search), 'i');
+        filter.$and = [
+            ...(filter.$and || []),
+            {
+                $or: [
+                    { description: regex },
+                    { reason: regex },
+                    { note: regex },
+                    { currency: regex },
+                    { semanticType: regex },
+                    { sourceType: regex },
+                ],
+            },
+        ];
     }
 
     const skip = (page - 1) * limit;
@@ -141,7 +201,7 @@ const getTransactions = catchAsync(async (req, res) => {
 
 /**
  * Paginated order list for the authenticated user.
- * Query: status, page, limit, from, to
+ * Query: status, page, limit, from, to, search, sort
  */
 const getOrders = catchAsync(async (req, res) => {
     const page = parsePage(req.query.page);
@@ -151,17 +211,59 @@ const getOrders = catchAsync(async (req, res) => {
         ...(req.query.status && { status: req.query.status }),
     };
 
-    if (req.query.from || req.query.to) {
+    const from = req.query.from || req.query.fromDate;
+    const to = req.query.to || req.query.toDate;
+    if (from || to) {
         filter.createdAt = {};
-        if (req.query.from) filter.createdAt.$gte = new Date(req.query.from);
-        if (req.query.to) filter.createdAt.$lte = new Date(req.query.to);
+        if (from) filter.createdAt.$gte = new Date(from);
+        if (to) filter.createdAt.$lte = new Date(to);
     }
 
     const { Order } = require('../orders/order.model');
+    const { Product } = require('../products/product.model');
+    if (req.query.search && String(req.query.search).trim()) {
+        const search = String(req.query.search).trim();
+        const regex = new RegExp(escapeRegex(search), 'i');
+        const orConditions = [
+            { providerOrderId: regex },
+            { providerCode: regex },
+            { 'customerInput.values.playerId': regex },
+            { 'customerInput.values.player_id': regex },
+            { 'customerInput.values.uid': regex },
+            { 'customerInput.values.username': regex },
+            {
+                $expr: {
+                    $regexMatch: {
+                        input: { $toString: '$orderNumber' },
+                        regex: search,
+                        options: 'i',
+                    },
+                },
+            },
+        ];
+        if (/^[a-f\d]{24}$/i.test(search)) orConditions.push({ _id: search });
+        const products = await Product.find({
+            deletedAt: null,
+            $or: [{ name: regex }, { description: regex }, { category: regex }],
+        }).select('_id').lean();
+        if (products.length) orConditions.push({ productId: { $in: products.map((product) => product._id) } });
+        filter.$or = orConditions;
+    }
+    if (req.query.executionType || req.query.type) {
+        filter.executionType = String(req.query.executionType || req.query.type).trim().toLowerCase();
+    }
+
+    const orderSort = (() => {
+        const sort = String(req.query.sort || '').trim().toLowerCase();
+        if (sort === 'oldest' || sort === 'created_asc') return { createdAt: 1 };
+        if (sort === 'amount_asc' || sort === 'price_asc') return { chargedAmount: 1, createdAt: -1 };
+        if (sort === 'amount_desc' || sort === 'price_desc') return { chargedAmount: -1, createdAt: -1 };
+        return { createdAt: -1 };
+    })();
     const skip = (page - 1) * limit;
     const [orders, total] = await Promise.all([
         Order.find(filter)
-            .sort({ createdAt: -1 })
+            .sort(orderSort)
             .skip(skip)
             .limit(limit)
             .populate('productId', 'name image')
@@ -374,8 +476,9 @@ const getProduct = catchAsync(async (req, res) => {
  */
 const createDeposit = catchAsync(async (req, res) => {
     // ── Validate file upload ─────────────────────────────────────────────
-    if (!req.file) {
-        const { BusinessRuleError } = require('../../shared/errors/AppError');
+    const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+    const receiptFile = req.file || uploadedFiles.find((file) => file.fieldname === 'receipt');
+    if (!receiptFile) {
         throw new BusinessRuleError(
             'Receipt image is required. Please upload a file.',
             'RECEIPT_REQUIRED'
@@ -406,7 +509,20 @@ const createDeposit = catchAsync(async (req, res) => {
     const amountUsd = Number((parsedAmount / exchangeRate).toFixed(2));
 
     // ── Build relative receipt path ──────────────────────────────────────
-    const receiptImage = `uploads/deposits/${req.file.filename}`;
+    const receiptImage = `uploads/deposits/${receiptFile.filename}`;
+    const { method: paymentMethod } = await findConfiguredPaymentMethodById(paymentMethodId);
+    const customFieldFiles = uploadedFiles.reduce((acc, file) => {
+        const bracketMatch = String(file.fieldname || '').match(/^customFieldFiles\[([A-Za-z0-9_-]+)\]$/);
+        const dottedMatch = String(file.fieldname || '').match(/^customFieldFiles\.([A-Za-z0-9_-]+)$/);
+        const key = bracketMatch?.[1] || dottedMatch?.[1] || null;
+        if (key) acc[key] = file;
+        return acc;
+    }, {});
+    const validatedCustomFields = normalizeSubmittedCustomFields({
+        fieldsConfig: paymentMethod.customFields || [],
+        values: mergeSubmittedCustomFieldValues(req.body),
+        files: customFieldFiles,
+    });
 
     // ── Persist ──────────────────────────────────────────────────────────
     const deposit = await depositService.createDepositRequest({
@@ -418,6 +534,9 @@ const createDeposit = catchAsync(async (req, res) => {
         amountUsd,
         receiptImage,
         notes: notes || null,
+        customFieldSnapshot: validatedCustomFields.customFieldSnapshot,
+        customFieldValues: validatedCustomFields.customFieldValues,
+        customFieldFiles: validatedCustomFields.customFieldFiles,
         antiScamConfirmed,
         termsAccepted,
         antiScamConfirmedAt,

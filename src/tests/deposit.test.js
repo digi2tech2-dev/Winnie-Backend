@@ -17,6 +17,7 @@ const { AuditLog } = require('../modules/audit/audit.model');
 const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES } = require('../modules/audit/audit.constants');
 const { User } = require('../modules/users/user.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
+const { normalizeSubmittedCustomFields } = require('../modules/payments/paymentCustomFields');
 
 const {
     connectTestDB,
@@ -617,5 +618,74 @@ describe('[8] Audit log correctness', () => {
 
         expect(await AuditLog.countDocuments({ action: DEPOSIT_ACTIONS.APPROVED })).toBe(0);
         expect(await AuditLog.countDocuments({ action: WALLET_ACTIONS.CREDIT })).toBe(0);
+    });
+});
+
+describe('[9] Manual deposit customFields storage', () => {
+    it('stores custom field snapshots, values, and file metadata', async () => {
+        const customer = await makeCustomer();
+        const deposit = await createPendingDeposit(customer._id, {
+            customFieldSnapshot: [{
+                key: 'transactionId',
+                label: 'Transaction ID',
+                type: 'text',
+                required: true,
+                options: [],
+                sortOrder: 0,
+            }],
+            customFieldValues: { transactionId: 'ABC123' },
+            customFieldFiles: {
+                receiptExtra: {
+                    path: 'uploads/deposits/extra.png',
+                    originalName: 'extra.png',
+                    mimeType: 'image/png',
+                    size: 123,
+                },
+            },
+        });
+
+        const fresh = await DepositRequest.findById(deposit._id).lean();
+        expect(fresh.customFieldSnapshot[0]).toMatchObject({ key: 'transactionId', type: 'text' });
+        expect(fresh.customFieldValues).toEqual({ transactionId: 'ABC123' });
+        expect(fresh.customFieldFiles.receiptExtra).toMatchObject({
+            path: 'uploads/deposits/extra.png',
+            originalName: 'extra.png',
+            mimeType: 'image/png',
+            size: 123,
+        });
+    });
+
+    it('validates required text fields and image file metadata', () => {
+        const config = [
+            { key: 'transactionId', label: 'Transaction ID', type: 'text', required: true, isActive: true },
+            { key: 'proof', label: 'Proof', type: 'image', required: true, isActive: true },
+        ];
+
+        expect(() => normalizeSubmittedCustomFields({
+            fieldsConfig: config,
+            values: {},
+            files: {},
+        })).toThrow(/Transaction ID/);
+
+        const validated = normalizeSubmittedCustomFields({
+            fieldsConfig: config,
+            values: { transactionId: 'ABC123' },
+            files: {
+                proof: {
+                    filename: 'proof.png',
+                    originalname: 'proof.png',
+                    mimetype: 'image/png',
+                    size: 321,
+                },
+            },
+        });
+
+        expect(validated.customFieldValues).toEqual({ transactionId: 'ABC123' });
+        expect(validated.customFieldFiles.proof).toMatchObject({
+            path: 'uploads/deposits/proof.png',
+            originalName: 'proof.png',
+            mimeType: 'image/png',
+            size: 321,
+        });
     });
 });

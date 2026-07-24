@@ -1,5 +1,7 @@
 'use strict';
 
+const mongoose = require('mongoose');
+
 /**
  * product.service.js  (Layer 3 — Platform Products)
  *
@@ -41,19 +43,91 @@ const {
  * Public-facing product list. Returns only active products for customers;
  * admins pass activeOnly=false to see everything.
  */
-const listProducts = async ({ activeOnly = true, page = 1, limit = 50 } = {}) => {
+const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const sortForProducts = (sort) => {
+    const normalized = String(sort || '').trim().toLowerCase();
+    if (normalized === 'newest' || normalized === 'created_desc') return { createdAt: -1, _id: -1 };
+    if (normalized === 'oldest' || normalized === 'created_asc') return { createdAt: 1, _id: 1 };
+    if (normalized === 'name_desc') return { name: -1 };
+    if (normalized === 'price_asc') return { basePrice: 1, name: 1 };
+    if (normalized === 'price_desc') return { basePrice: -1, name: 1 };
+    return { displayOrder: 1, name: 1 };
+};
+
+const listProducts = async ({
+    activeOnly = true,
+    page = 1,
+    limit = 50,
+    search,
+    category,
+    status,
+    linkType,
+    provider,
+    sort,
+} = {}) => {
     const filter = { deletedAt: null };
     if (activeOnly) {
         filter.isActive = true;
         filter.visibleInStore = { $ne: false };
     }
-    const skip = (page - 1) * limit;
+    if (category) filter.category = String(category).trim();
+    if (status) {
+        const normalizedStatus = String(status).trim().toLowerCase();
+        if (normalizedStatus === 'active') filter.isActive = true;
+        else if (normalizedStatus === 'inactive') filter.isActive = false;
+        else if (normalizedStatus === 'paused') filter.isPaused = true;
+        else filter.status = normalizedStatus;
+    }
+    if (provider && mongoose.Types.ObjectId.isValid(String(provider))) {
+        filter.provider = new mongoose.Types.ObjectId(String(provider));
+    }
+    if (linkType) {
+        const normalizedLinkType = String(linkType).trim().toLowerCase();
+        if (['automatic', 'linked', 'provider'].includes(normalizedLinkType)) {
+            filter.$and = [
+                ...(filter.$and || []),
+                {
+                    $or: [
+                        { executionType: EXECUTION_TYPES.AUTOMATIC },
+                        { provider: { $ne: null } },
+                        { providerProduct: { $ne: null } },
+                    ],
+                },
+            ];
+        } else if (['manual', 'unlinked', 'none'].includes(normalizedLinkType)) {
+            filter.executionType = EXECUTION_TYPES.MANUAL;
+            filter.provider = null;
+            filter.providerProduct = null;
+        }
+    }
+    if (search && String(search).trim()) {
+        const term = String(search).trim();
+        const regex = new RegExp(escapeRegex(term), 'i');
+        const providerProducts = await ProviderProduct.find({
+            $or: [{ rawName: regex }, { translatedName: regex }, { externalProductId: regex }],
+        }).select('_id').lean();
+        const orConditions = [
+            { name: regex },
+            { description: regex },
+            { category: regex },
+        ];
+        if (/^[a-f\d]{24}$/i.test(term)) orConditions.push({ _id: term });
+        if (providerProducts.length) orConditions.push({ providerProduct: { $in: providerProducts.map((product) => product._id) } });
+        filter.$and = [
+            ...(filter.$and || []),
+            { $or: orConditions },
+        ];
+    }
+    const normalizedPage = Math.max(parseInt(page, 10) || 1, 1);
+    const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const skip = (normalizedPage - 1) * normalizedLimit;
 
     const [products, total] = await Promise.all([
         Product.find(filter)
-            .sort({ displayOrder: 1, name: 1 })
+            .sort(sortForProducts(sort))
             .skip(skip)
-            .limit(limit)
+            .limit(normalizedLimit)
             .populate('provider', 'name slug')
             .populate('providerProduct', 'rawName translatedName externalProductId rawPrice minQty maxQty isActive lastSyncedAt'),
         Product.countDocuments(filter),
@@ -61,7 +135,7 @@ const listProducts = async ({ activeOnly = true, page = 1, limit = 50 } = {}) =>
 
     return {
         products,
-        pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+        pagination: { page: normalizedPage, limit: normalizedLimit, total, pages: Math.ceil(total / normalizedLimit) },
     };
 };
 

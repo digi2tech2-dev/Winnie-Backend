@@ -851,3 +851,59 @@ describe('[4] Joi Validation Schemas', () => {
         expect(runBodyValidation(schemas.updateSetting, { value: 'text' })).toBeNull();
     });
 });
+
+describe('[4.5] Payment method customFields settings validation', () => {
+    it('validates and stores payment method customFields', async () => {
+        const { admin } = await setup();
+        const updated = await adminSettingService.updateSetting('paymentGroups', [{
+            id: 'manual',
+            name: 'Manual deposits',
+            methods: [{
+                id: 'bank-transfer',
+                name: 'Bank transfer',
+                gateway: 'MANUAL',
+                isActive: true,
+                customFields: [{
+                    key: 'transactionId',
+                    label: 'Transaction ID',
+                    type: 'text',
+                    required: true,
+                    placeholder: '',
+                    options: [],
+                    sortOrder: 0,
+                    isActive: true,
+                }],
+            }],
+        }], admin._id);
+
+        expect(updated.value[0].methods[0].customFields[0]).toMatchObject({
+            key: 'transactionId',
+            label: 'Transaction ID',
+            type: 'text',
+            required: true,
+            isActive: true,
+        });
+    });
+
+    it('rejects duplicate active customFields and invalid custom field types', async () => {
+        const { admin } = await setup();
+        await expect(adminSettingService.updateSetting('paymentGroups', [{
+            id: 'manual',
+            methods: [{
+                id: 'bank-transfer',
+                customFields: [
+                    { key: 'transactionId', label: 'Transaction ID', type: 'text', required: true, isActive: true },
+                    { key: 'transactionId', label: 'Transaction ID copy', type: 'number', required: false, isActive: true },
+                ],
+            }],
+        }], admin._id)).rejects.toMatchObject({ code: 'DUPLICATE_CUSTOM_FIELD_KEY' });
+
+        await expect(adminSettingService.updateSetting('paymentGroups', [{
+            id: 'manual',
+            methods: [{
+                id: 'bank-transfer',
+                customFields: [{ key: 'receiptCode', label: 'Receipt Code', type: 'date', required: true, isActive: true }],
+            }],
+        }], admin._id)).rejects.toMatchObject({ code: 'INVALID_CUSTOM_FIELD_CONFIG' });
+    });
+});
