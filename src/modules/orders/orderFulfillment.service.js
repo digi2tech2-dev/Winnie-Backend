@@ -242,6 +242,29 @@ const buildProviderParams = (order, product, providerProduct) => {
     return mapped;
 };
 
+const buildProviderResultUpdate = (result = {}) => {
+    const update = {
+        providerOrderId: result.providerOrderId,
+        providerStatus: result.providerStatus,
+        providerRawResponse: result.rawResponse,
+    };
+
+    for (const key of [
+        'providerRequestId',
+        'providerIdempotencyKey',
+        'providerMessage',
+        'providerErrorCode',
+        'providerErrorMessage',
+        'providerTargetSnapshot',
+    ]) {
+        if (result[key] !== undefined) {
+            update[key] = result[key];
+        }
+    }
+
+    return update;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EXECUTE ORDER (called immediately after createOrder commits)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -283,6 +306,10 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     // Guard: only attempt execution once
     if (order.status !== ORDER_STATUS.PROCESSING) {
         return { order, placed: false, refunded: false };
+    }
+
+    if (order.providerOrderId) {
+        return { order, placed: false, refunded: order.refunded === true };
     }
 
     const actorId = auditContext?.actorId ?? order.userId;
@@ -393,6 +420,9 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             externalProductId: String(externalProductId),
             amount: order.quantity,
             quantity: order.quantity,
+            localOrderId: order._id.toString(),
+            orderId: order._id.toString(),
+            orderNumber: order.orderNumber,
             referenceId: stableOrderUuid,
             idempotencyKey: order.idempotencyKey ?? null,
             orderUuid: stableOrderUuid,
@@ -445,6 +475,39 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     // ── Interpret result ───────────────────────────────────────────────────────
     let newStatus;
     let refundIssued = false;
+    const now = new Date();
+
+    if (result.manualReview === true) {
+        await Order.findByIdAndUpdate(orderId, {
+            $set: {
+                status: ORDER_STATUS.MANUAL_REVIEW,
+                ...buildProviderResultUpdate(result),
+                rejectionReason: result.errorMessage ?? result.providerErrorMessage ?? 'Provider order requires manual review',
+                lastCheckedAt: now,
+            },
+        });
+
+        createAuditLog({
+            actorId, actorRole, ipAddress, userAgent,
+            action: ORDER_ACTIONS.MANUAL_REVIEW,
+            entityType: ENTITY_TYPES.ORDER,
+            entityId: orderId,
+            metadata: {
+                orderId: orderId.toString(),
+                providerOrderId: result.providerOrderId,
+                providerRequestId: result.providerRequestId,
+                providerErrorCode: result.providerErrorCode,
+                reason: 'PROVIDER_REQUIRES_MANUAL_REVIEW',
+            },
+        });
+
+        const reviewOrder = await Order.findById(orderId);
+        notifyOrderManualReview(reviewOrder, {
+            reason: result.providerErrorCode || 'PROVIDER_REQUIRES_MANUAL_REVIEW',
+        });
+
+        return { order: reviewOrder, placed: false, refunded: false };
+    }
 
     if (!result.success) {
         newStatus = ORDER_STATUS.FAILED;
@@ -457,16 +520,12 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     }
 
     // ── Persist the provider response onto the order ───────────────────────────
-    const now = new Date();
-
     if (newStatus === ORDER_STATUS.CANCELED || newStatus === ORDER_STATUS.PARTIAL) {
         const preparedOrder = await Order.findByIdAndUpdate(
             orderId,
             {
                 $set: {
-                    providerOrderId: result.providerOrderId,
-                    providerStatus: result.providerStatus,
-                    providerRawResponse: result.rawResponse,
+                    ...buildProviderResultUpdate(result),
                     lastCheckedAt: now,
                 },
             },
@@ -491,9 +550,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         await Order.findByIdAndUpdate(orderId, {
             $set: {
                 status: ORDER_STATUS.FAILED,
-                providerStatus: result.providerStatus,
-                providerOrderId: result.providerOrderId,
-                providerRawResponse: result.rawResponse,
+                ...buildProviderResultUpdate(result),
                 rejectionReason: result.errorMessage ?? result.rawResponse?.message ?? result.rawResponse?.error ?? 'Provider order failed',
                 failedAt: now,
                 lastCheckedAt: now,
@@ -546,9 +603,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         // Case B: pending — save providerOrderId, cron will poll
         await Order.findByIdAndUpdate(orderId, {
             $set: {
-                providerOrderId: result.providerOrderId,
-                providerStatus: result.providerStatus,
-                providerRawResponse: result.rawResponse,
+                ...buildProviderResultUpdate(result),
                 lastCheckedAt: now,
             },
         });
@@ -572,9 +627,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     await Order.findByIdAndUpdate(orderId, {
         $set: {
             status: ORDER_STATUS.COMPLETED,
-            providerOrderId: result.providerOrderId,
-            providerStatus: result.providerStatus,
-            providerRawResponse: result.rawResponse,
+            ...buildProviderResultUpdate(result),
             lastCheckedAt: now,
         },
     });

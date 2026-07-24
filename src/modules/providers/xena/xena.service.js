@@ -299,6 +299,133 @@ const normalizeTargetUserResponse = (payload, targetUid) => {
     };
 };
 
+const normalizeRechargeStatus = (status) => {
+    const value = String(status || '').toLowerCase().trim();
+
+    switch (value) {
+        case 'succeeded':
+        case 'success':
+        case 'completed':
+        case 'complete':
+            return { xenaStatus: 'succeeded', providerStatus: 'Completed' };
+        case 'processing':
+        case 'pending':
+        case 'queued':
+        case 'created':
+            return { xenaStatus: 'processing', providerStatus: 'Pending' };
+        case 'failed':
+        case 'fail':
+        case 'rejected':
+        case 'cancelled':
+        case 'canceled':
+            return { xenaStatus: 'failed', providerStatus: 'Cancelled' };
+        default:
+            return { xenaStatus: 'unknown', providerStatus: 'Unknown' };
+    }
+};
+
+const pickRechargePayload = (payload) => (
+    payload?.data && typeof payload.data === 'object'
+        ? payload.data
+        : payload
+);
+
+const extractRechargeId = (payload = {}) => {
+    const candidates = [
+        payload?.id,
+        payload?.rechargeId,
+        payload?.data?.id,
+        payload?.data?.rechargeId,
+    ];
+
+    for (const candidate of candidates) {
+        if (typeof candidate !== 'string') continue;
+        const trimmed = candidate.trim();
+        if (trimmed) return trimmed;
+    }
+
+    return null;
+};
+
+const sanitizeXenaPayload = (value) => {
+    if (value === null || value === undefined) return value;
+
+    if (typeof value === 'string') {
+        return redactSecretText(value);
+    }
+
+    if (Array.isArray(value)) {
+        return value.map((item) => sanitizeXenaPayload(item));
+    }
+
+    if (typeof value === 'object') {
+        const output = {};
+        for (const [key, entry] of Object.entries(value)) {
+            const normalizedKey = String(key || '').toLowerCase();
+            if (
+                normalizedKey.includes('authorization')
+                || normalizedKey.includes('apikey')
+                || normalizedKey.includes('api_key')
+                || normalizedKey.includes('api-token')
+                || normalizedKey.includes('apitoken')
+                || normalizedKey.includes('password')
+                || normalizedKey.includes('otp')
+                || normalizedKey.includes('secret')
+                || normalizedKey.includes('token')
+                || normalizedKey === 'headers'
+                || normalizedKey === 'connectionid'
+                || normalizedKey === 'encryptedconnectionid'
+            ) {
+                output[key] = '[REDACTED]';
+                continue;
+            }
+            output[key] = sanitizeXenaPayload(entry);
+        }
+        return output;
+    }
+
+    return value;
+};
+
+const normalizeRechargeResponse = ({ data, requestId }) => {
+    const payload = pickRechargePayload(data);
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.MALFORMED_RESPONSE),
+            XENA_ERROR_CODES.MALFORMED_RESPONSE
+        );
+    }
+
+    const providerOrderId = extractRechargeId(data);
+    const statusSource = payload.status ?? data?.status ?? data?.data?.status;
+    const { xenaStatus, providerStatus } = normalizeRechargeStatus(statusSource);
+
+    return {
+        providerOrderId,
+        providerRequestId: requestId || data?.requestId || data?.data?.requestId || null,
+        providerStatus,
+        xenaStatus,
+        providerMessage: payload.providerMessage ?? payload.message ?? null,
+        providerErrorCode: payload.errorCode ?? payload.code ?? null,
+        providerErrorMessage: payload.errorMessage ?? payload.error ?? null,
+        rawResponse: sanitizeXenaPayload(data),
+    };
+};
+
+const assertPositiveSafeInteger = (value, code, message) => {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new BusinessRuleError(message, code);
+    }
+    return value;
+};
+
+const assertNonEmptyString = (value, code, message) => {
+    if (typeof value !== 'string' || !value.trim()) {
+        throw new BusinessRuleError(message, code);
+    }
+    return value.trim();
+};
+
 const challengeConnection = async ({ provider: providerOrId, displayName, username, password }) => {
     const provider = await loadProvider(providerOrId);
     const state = await getOrCreateState(provider);
@@ -481,6 +608,59 @@ const verifyTargetUser = async ({ provider: providerOrId, targetUid }) => {
     }
 };
 
+const createRecharge = async ({
+    provider: providerOrId,
+    targetUid,
+    amount,
+    clientReference,
+    idempotencyKey,
+}) => {
+    const provider = await loadProvider(providerOrId);
+    const state = await getOrCreateState(provider);
+    assertVerificationConnectionUsable(state);
+    const connectionId = getConnectionIdOrThrow(state);
+    const normalizedAmount = assertPositiveSafeInteger(
+        amount,
+        XENA_ERROR_CODES.MALFORMED_RESPONSE,
+        'Xena recharge amount must be a positive safe integer.'
+    );
+    const normalizedReference = assertNonEmptyString(
+        clientReference,
+        XENA_ERROR_CODES.MALFORMED_RESPONSE,
+        'Xena recharge client reference is required.'
+    );
+    const normalizedIdempotencyKey = assertNonEmptyString(
+        idempotencyKey,
+        XENA_ERROR_CODES.MALFORMED_RESPONSE,
+        'Xena recharge idempotency key is required.'
+    );
+
+    try {
+        const client = buildClient(provider);
+        const result = await client.createRecharge({
+            connectionId,
+            targetUid,
+            amount: normalizedAmount,
+            clientReference: normalizedReference,
+            idempotencyKey: normalizedIdempotencyKey,
+        });
+        const safeResult = normalizeRechargeResponse(result);
+
+        state.lastErrorCode = null;
+        state.lastErrorMessage = null;
+        state.lastCheckedAt = new Date();
+        await state.save();
+
+        return safeResult;
+    } catch (err) {
+        const status = err.code === XENA_ERROR_CODES.REAUTHENTICATION_REQUIRED
+            ? XENA_CONNECTION_STATUSES.REAUTHENTICATION_REQUIRED
+            : undefined;
+        await recordError(state, err, { status });
+        throw err;
+    }
+};
+
 module.exports = {
     XENA_PROVIDER_CODE,
     XENA_ERROR_CODES,
@@ -488,10 +668,15 @@ module.exports = {
     maskUsername,
     normalizeBalance,
     normalizeTargetUserResponse,
+    normalizeRechargeResponse,
+    normalizeRechargeStatus,
+    extractRechargeId,
+    sanitizeXenaPayload,
     challengeConnection,
     reconnectConnection,
     verifyConnection,
     getConnectionStatus,
     refreshBalance,
     verifyTargetUser,
+    createRecharge,
 };

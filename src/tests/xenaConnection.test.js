@@ -83,9 +83,7 @@ describe('Xena provider credentials and adapter registration', () => {
         const adapter = getProviderAdapter(provider, { strict: true });
 
         expect(adapter.constructor.name).toBe('XenaRechargeAdapter');
-        await expect(adapter.placeOrder({})).rejects.toMatchObject({
-            code: 'XENA_RECHARGE_NOT_IMPLEMENTED',
-        });
+        expect(typeof adapter.placeOrder).toBe('function');
     });
 });
 

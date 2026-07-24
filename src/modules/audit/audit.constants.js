@@ -37,6 +37,7 @@ const ORDER_ACTIONS = Object.freeze({
     PARTIAL_REFUNDED: 'ORDER_PARTIAL_REFUNDED', // ← NEW: partial delivery refund
     REFUNDED: 'ORDER_REFUNDED',
     PROCESSING: 'ORDER_PROCESSING',
+    MANUAL_REVIEW: 'ORDER_MANUAL_REVIEW',
 });
 
 /** Actions on the Wallet / financial layer. */

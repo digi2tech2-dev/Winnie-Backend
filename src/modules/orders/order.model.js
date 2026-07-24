@@ -283,6 +283,44 @@ const orderSchema = new mongoose.Schema(
             default: null,
         },
 
+        /** Provider-side trace/debug id, kept separate from providerOrderId. */
+        providerRequestId: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        /** Deterministic provider idempotency key for this fulfillment attempt. */
+        providerIdempotencyKey: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        providerMessage: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        providerErrorCode: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        providerErrorMessage: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        /** Safe snapshot of provider-verified target/account data. */
+        providerTargetSnapshot: {
+            type: mongoose.Schema.Types.Mixed,
+            default: null,
+        },
+
         /** Complete raw JSON body returned by the last provider API call. */
         providerRawResponse: {
             type: mongoose.Schema.Types.Mixed,

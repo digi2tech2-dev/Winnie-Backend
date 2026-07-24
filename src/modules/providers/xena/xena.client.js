@@ -15,6 +15,9 @@ const XENA_ERROR_CODES = Object.freeze({
     BALANCE_UNAVAILABLE: 'XENA_BALANCE_UNAVAILABLE',
     RATE_LIMITED: 'XENA_RATE_LIMITED',
     VERIFICATION_UNAVAILABLE: 'XENA_VERIFICATION_UNAVAILABLE',
+    RECHARGE_ID_MISSING: 'XENA_RECHARGE_ID_MISSING',
+    RECHARGE_FAILED: 'XENA_RECHARGE_FAILED',
+    RECHARGE_UNKNOWN: 'XENA_RECHARGE_UNKNOWN',
     INTEGRATION_UNAVAILABLE: 'XENA_INTEGRATION_UNAVAILABLE',
     MALFORMED_RESPONSE: 'XENA_MALFORMED_RESPONSE',
 });
@@ -24,6 +27,8 @@ const contextUnavailableCode = (context) => (
         ? XENA_ERROR_CODES.BALANCE_UNAVAILABLE
         : context === 'targetVerification'
             ? XENA_ERROR_CODES.VERIFICATION_UNAVAILABLE
+        : context === 'recharge'
+            ? XENA_ERROR_CODES.RECHARGE_UNKNOWN
         : XENA_ERROR_CODES.INTEGRATION_UNAVAILABLE
 );
 
@@ -43,6 +48,12 @@ const safeMessageForCode = (code) => {
             return 'Xena rate limit reached. Please retry later.';
         case XENA_ERROR_CODES.VERIFICATION_UNAVAILABLE:
             return 'Xena target verification is currently unavailable.';
+        case XENA_ERROR_CODES.RECHARGE_ID_MISSING:
+            return 'Xena recharge response is missing a recharge id.';
+        case XENA_ERROR_CODES.RECHARGE_FAILED:
+            return 'Xena recharge failed.';
+        case XENA_ERROR_CODES.RECHARGE_UNKNOWN:
+            return 'Xena recharge outcome is uncertain and requires review.';
         case XENA_ERROR_CODES.MALFORMED_RESPONSE:
             return 'Xena returned a malformed response.';
         case XENA_ERROR_CODES.INTEGRATION_UNAVAILABLE:
@@ -123,9 +134,9 @@ class XenaClient {
         });
     }
 
-    async request(method, path, { data, context } = {}) {
+    async request(method, path, { data, context, headers } = {}) {
         try {
-            const response = await this.http.request({ method, url: path, data });
+            const response = await this.http.request({ method, url: path, data, headers });
             return {
                 data: response.data,
                 status: response.status,
@@ -175,6 +186,21 @@ class XenaClient {
     async verifyTargetUser({ connectionId, targetUid }) {
         return this.request('get', `/v1/connections/${encodeURIComponent(connectionId)}/users/${encodeURIComponent(targetUid)}`, {
             context: 'targetVerification',
+        });
+    }
+
+    async createRecharge({ connectionId, targetUid, amount, clientReference, idempotencyKey }) {
+        return this.request('post', '/v1/recharges', {
+            data: {
+                connectionId,
+                targetUid,
+                amount,
+                clientReference,
+            },
+            headers: {
+                'Idempotency-Key': idempotencyKey,
+            },
+            context: 'recharge',
         });
     }
 }
