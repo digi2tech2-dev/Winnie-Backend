@@ -18,6 +18,8 @@ const XENA_ERROR_CODES = Object.freeze({
     RECHARGE_ID_MISSING: 'XENA_RECHARGE_ID_MISSING',
     RECHARGE_FAILED: 'XENA_RECHARGE_FAILED',
     RECHARGE_UNKNOWN: 'XENA_RECHARGE_UNKNOWN',
+    RECHARGE_NOT_FOUND: 'XENA_RECHARGE_NOT_FOUND',
+    STATUS_UNAVAILABLE: 'XENA_STATUS_UNAVAILABLE',
     INTEGRATION_UNAVAILABLE: 'XENA_INTEGRATION_UNAVAILABLE',
     MALFORMED_RESPONSE: 'XENA_MALFORMED_RESPONSE',
 });
@@ -29,6 +31,8 @@ const contextUnavailableCode = (context) => (
             ? XENA_ERROR_CODES.VERIFICATION_UNAVAILABLE
         : context === 'recharge'
             ? XENA_ERROR_CODES.RECHARGE_UNKNOWN
+        : context === 'rechargeStatus'
+            ? XENA_ERROR_CODES.STATUS_UNAVAILABLE
         : XENA_ERROR_CODES.INTEGRATION_UNAVAILABLE
 );
 
@@ -54,6 +58,10 @@ const safeMessageForCode = (code) => {
             return 'Xena recharge failed.';
         case XENA_ERROR_CODES.RECHARGE_UNKNOWN:
             return 'Xena recharge outcome is uncertain and requires review.';
+        case XENA_ERROR_CODES.RECHARGE_NOT_FOUND:
+            return 'Xena recharge was not found and requires review.';
+        case XENA_ERROR_CODES.STATUS_UNAVAILABLE:
+            return 'Xena recharge status is currently unavailable.';
         case XENA_ERROR_CODES.MALFORMED_RESPONSE:
             return 'Xena returned a malformed response.';
         case XENA_ERROR_CODES.INTEGRATION_UNAVAILABLE:
@@ -83,7 +91,15 @@ const mapXenaErrorCode = (err, context) => {
         return XENA_ERROR_CODES.TARGET_INVALID;
     }
 
+    if (context === 'rechargeStatus' && status === 404) {
+        return XENA_ERROR_CODES.RECHARGE_NOT_FOUND;
+    }
+
     if (context === 'targetVerification' && status === 409) {
+        return XENA_ERROR_CODES.REAUTHENTICATION_REQUIRED;
+    }
+
+    if (context === 'rechargeStatus' && status === 409) {
         return XENA_ERROR_CODES.REAUTHENTICATION_REQUIRED;
     }
 
@@ -201,6 +217,12 @@ class XenaClient {
                 'Idempotency-Key': idempotencyKey,
             },
             context: 'recharge',
+        });
+    }
+
+    async getRecharge({ rechargeId }) {
+        return this.request('get', `/v1/recharges/${encodeURIComponent(rechargeId)}`, {
+            context: 'rechargeStatus',
         });
     }
 }

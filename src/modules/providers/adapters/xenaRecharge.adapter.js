@@ -42,6 +42,22 @@ const buildManualReviewResult = ({
     errorMessage: providerErrorMessage,
 });
 
+const buildStatusPendingResult = ({
+    providerOrderId,
+    providerRequestId = null,
+    providerErrorCode,
+    providerErrorMessage,
+    rawResponse = null,
+}) => ({
+    providerOrderId,
+    providerStatus: 'Pending',
+    providerRequestId,
+    providerErrorCode,
+    providerErrorMessage,
+    rawResponse: rawResponse || { errorCode: providerErrorCode, message: providerErrorMessage },
+    manualReviewOnRetryLimit: true,
+});
+
 class XenaRechargeAdapter extends BaseProviderAdapter {
     async getProducts() {
         const dto = await xenaProductService.buildSyntheticProductDTO({ provider: this.provider });
@@ -181,15 +197,94 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
         });
     }
 
-    async checkOrder() {
-        throw new BusinessRuleError(
-            'Xena recharge polling is not implemented in Phase 1.',
-            'XENA_RECHARGE_POLLING_NOT_IMPLEMENTED'
-        );
+    async checkOrder(orderId) {
+        const rechargeId = typeof orderId === 'string' ? orderId.trim() : '';
+        if (!rechargeId) {
+            return buildManualReviewResult({
+                providerErrorCode: 'XENA_RECHARGE_ID_MISSING',
+                providerErrorMessage: 'Xena recharge id is missing.',
+            });
+        }
+
+        let recharge;
+        try {
+            recharge = await xenaService.getRecharge({
+                provider: this.provider,
+                rechargeId,
+            });
+        } catch (err) {
+            if (['XENA_RECHARGE_NOT_FOUND', 'XENA_PROVIDER_AUTH_FAILED', 'XENA_REAUTHENTICATION_REQUIRED', 'XENA_MALFORMED_RESPONSE'].includes(err.code)) {
+                return buildManualReviewResult({
+                    providerOrderId: rechargeId,
+                    providerStatus: 'Unknown',
+                    providerRequestId: err.requestId || null,
+                    providerErrorCode: err.code,
+                    providerErrorMessage: err.message,
+                    rawResponse: safeErrorPayload(err, err.code),
+                });
+            }
+
+            return buildStatusPendingResult({
+                providerOrderId: rechargeId,
+                providerRequestId: err.requestId || null,
+                providerErrorCode: err.code || 'XENA_STATUS_UNAVAILABLE',
+                providerErrorMessage: 'Xena recharge status is currently unavailable.',
+                rawResponse: safeErrorPayload(err, err.code || 'XENA_STATUS_UNAVAILABLE'),
+            });
+        }
+
+        const baseResult = {
+            providerOrderId: recharge.providerOrderId,
+            providerStatus: recharge.providerStatus,
+            providerRequestId: recharge.providerRequestId,
+            providerMessage: recharge.providerMessage,
+            providerErrorCode: recharge.providerErrorCode,
+            providerErrorMessage: recharge.providerErrorMessage,
+            rawResponse: recharge.rawResponse,
+        };
+
+        if (!recharge.providerOrderId || recharge.providerOrderId !== rechargeId) {
+            return buildManualReviewResult({
+                ...baseResult,
+                providerOrderId: rechargeId,
+                providerStatus: 'Unknown',
+                providerErrorCode: 'XENA_RECHARGE_ID_MISSING',
+                providerErrorMessage: 'Xena recharge status response did not include the trusted recharge id.',
+            });
+        }
+
+        if (recharge.xenaStatus === 'succeeded') {
+            return { ...baseResult, providerStatus: 'Completed' };
+        }
+
+        if (recharge.xenaStatus === 'processing') {
+            return { ...baseResult, providerStatus: 'Pending', manualReviewOnRetryLimit: true };
+        }
+
+        if (recharge.xenaStatus === 'failed') {
+            return {
+                ...baseResult,
+                providerStatus: 'Failed',
+                providerErrorCode: recharge.providerErrorCode || 'XENA_RECHARGE_FAILED',
+                providerErrorMessage: recharge.providerErrorMessage || 'Xena recharge failed.',
+            };
+        }
+
+        return buildManualReviewResult({
+            ...baseResult,
+            providerOrderId: rechargeId,
+            providerStatus: 'Unknown',
+            providerErrorCode: recharge.providerErrorCode || 'XENA_RECHARGE_UNKNOWN',
+            providerErrorMessage: recharge.providerErrorMessage || 'Xena recharge returned an unknown status.',
+        });
     }
 
-    async checkOrders() {
-        return [];
+    async checkOrders(orderIds = []) {
+        const results = [];
+        for (const orderId of orderIds) {
+            results.push(await this.checkOrder(orderId));
+        }
+        return results;
     }
 
     async getBalance() {

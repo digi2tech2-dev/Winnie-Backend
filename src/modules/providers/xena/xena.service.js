@@ -426,6 +426,16 @@ const assertNonEmptyString = (value, code, message) => {
     return value.trim();
 };
 
+const assertRechargeId = (rechargeId) => {
+    if (typeof rechargeId !== 'string' || !rechargeId.trim()) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.RECHARGE_ID_MISSING),
+            XENA_ERROR_CODES.RECHARGE_ID_MISSING
+        );
+    }
+    return rechargeId.trim();
+};
+
 const challengeConnection = async ({ provider: providerOrId, displayName, username, password }) => {
     const provider = await loadProvider(providerOrId);
     const state = await getOrCreateState(provider);
@@ -661,6 +671,21 @@ const createRecharge = async ({
     }
 };
 
+const getRecharge = async ({ provider: providerOrId, rechargeId }) => {
+    const provider = await loadProvider(providerOrId);
+    const normalizedRechargeId = assertRechargeId(rechargeId);
+
+    try {
+        const client = buildClient(provider);
+        const result = await client.getRecharge({ rechargeId: normalizedRechargeId });
+        const safeResult = normalizeRechargeResponse(result);
+
+        return safeResult;
+    } catch (err) {
+        throw err;
+    }
+};
+
 module.exports = {
     XENA_PROVIDER_CODE,
     XENA_ERROR_CODES,
@@ -679,4 +704,5 @@ module.exports = {
     refreshBalance,
     verifyTargetUser,
     createRecharge,
+    getRecharge,
 };

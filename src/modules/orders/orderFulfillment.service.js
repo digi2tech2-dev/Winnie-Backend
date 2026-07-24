@@ -265,6 +265,42 @@ const buildProviderResultUpdate = (result = {}) => {
     return update;
 };
 
+const moveOrderToManualReview = async (order, statusResult = {}, { reason = 'PROVIDER_REQUIRES_MANUAL_REVIEW' } = {}) => {
+    const now = new Date();
+    const manualReviewOrder = await Order.findByIdAndUpdate(order._id, {
+        $set: {
+            status: ORDER_STATUS.MANUAL_REVIEW,
+            ...buildProviderResultUpdate(statusResult),
+            rejectionReason: statusResult.errorMessage
+                ?? statusResult.providerErrorMessage
+                ?? statusResult.rawResponse?.message
+                ?? 'Provider order requires manual review',
+            lastCheckedAt: now,
+        },
+    }, { new: true });
+
+    createAuditLog({
+        actorId: order.userId,
+        actorRole: ACTOR_ROLES.SYSTEM,
+        action: ORDER_ACTIONS.MANUAL_REVIEW,
+        entityType: ENTITY_TYPES.ORDER,
+        entityId: order._id,
+        metadata: {
+            orderId: order._id.toString(),
+            providerOrderId: statusResult.providerOrderId ?? order.providerOrderId,
+            providerRequestId: statusResult.providerRequestId,
+            providerErrorCode: statusResult.providerErrorCode,
+            reason,
+        },
+    });
+
+    notifyOrderManualReview(manualReviewOrder || order, {
+        reason: statusResult.providerErrorCode || reason,
+    });
+
+    return manualReviewOrder;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EXECUTE ORDER (called immediately after createOrder commits)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -478,33 +514,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     const now = new Date();
 
     if (result.manualReview === true) {
-        await Order.findByIdAndUpdate(orderId, {
-            $set: {
-                status: ORDER_STATUS.MANUAL_REVIEW,
-                ...buildProviderResultUpdate(result),
-                rejectionReason: result.errorMessage ?? result.providerErrorMessage ?? 'Provider order requires manual review',
-                lastCheckedAt: now,
-            },
-        });
-
-        createAuditLog({
-            actorId, actorRole, ipAddress, userAgent,
-            action: ORDER_ACTIONS.MANUAL_REVIEW,
-            entityType: ENTITY_TYPES.ORDER,
-            entityId: orderId,
-            metadata: {
-                orderId: orderId.toString(),
-                providerOrderId: result.providerOrderId,
-                providerRequestId: result.providerRequestId,
-                providerErrorCode: result.providerErrorCode,
-                reason: 'PROVIDER_REQUIRES_MANUAL_REVIEW',
-            },
-        });
-
-        const reviewOrder = await Order.findById(orderId);
-        notifyOrderManualReview(reviewOrder, {
-            reason: result.providerErrorCode || 'PROVIDER_REQUIRES_MANUAL_REVIEW',
-        });
+        const reviewOrder = await moveOrderToManualReview(order, result);
 
         return { order: reviewOrder, placed: false, refunded: false };
     }
@@ -718,17 +728,29 @@ const processOrderStatusResult = async (order, statusResult) => {
     const now = new Date();
     const providerStatus = statusResult.providerStatus;
 
+    if (statusResult.manualReview === true) {
+        await moveOrderToManualReview(order, statusResult);
+        return { action: 'manualReview' };
+    }
+
     if (!isTerminal(providerStatus)) {
         // Still pending — bump retry count
         const newRetry = order.retryCount + 1;
 
         if (newRetry >= MAX_RETRY_COUNT) {
             // Exceeded retry limit → force-fail
+            if (statusResult.manualReviewOnRetryLimit === true) {
+                await moveOrderToManualReview(order, {
+                    ...statusResult,
+                    retryCount: newRetry,
+                }, { reason: statusResult.providerErrorCode || 'PROVIDER_OFFLINE_OR_STUCK' });
+                return { action: 'manualReview' };
+            }
+
             await Order.findByIdAndUpdate(order._id, {
                 $set: {
                     status: ORDER_STATUS.FAILED,
-                    providerStatus: providerStatus,
-                    providerRawResponse: statusResult.rawResponse,
+                    ...buildProviderResultUpdate(statusResult),
                     retryCount: newRetry,
                     failedAt: now,
                     lastCheckedAt: now,
@@ -779,8 +801,7 @@ const processOrderStatusResult = async (order, statusResult) => {
         // Not yet at limit — just update retry count and lastCheckedAt
         await Order.findByIdAndUpdate(order._id, {
             $set: {
-                providerStatus: providerStatus,
-                providerRawResponse: statusResult.rawResponse,
+                ...buildProviderResultUpdate(statusResult),
                 retryCount: newRetry,
                 lastCheckedAt: now,
             },
@@ -794,8 +815,7 @@ const processOrderStatusResult = async (order, statusResult) => {
         await Order.findByIdAndUpdate(order._id, {
             $set: {
                 status: ORDER_STATUS.COMPLETED,
-                providerStatus: providerStatus,
-                providerRawResponse: statusResult.rawResponse,
+                ...buildProviderResultUpdate(statusResult),
                 lastCheckedAt: now,
             },
         });
@@ -841,8 +861,7 @@ const processOrderStatusResult = async (order, statusResult) => {
         await Order.findByIdAndUpdate(order._id, {
             $set: {
                 status: ORDER_STATUS.PARTIAL,
-                providerStatus: providerStatus,
-                providerRawResponse: statusResult.rawResponse,
+                ...buildProviderResultUpdate(statusResult),
                 remains: remains,
                 lastCheckedAt: now,
             },
@@ -884,8 +903,7 @@ const processOrderStatusResult = async (order, statusResult) => {
         await Order.findByIdAndUpdate(order._id, {
             $set: {
                 status: ORDER_STATUS.CANCELED,
-                providerStatus: providerStatus,
-                providerRawResponse: statusResult.rawResponse,
+                ...buildProviderResultUpdate(statusResult),
                 failedAt: now,
                 lastCheckedAt: now,
             },
@@ -943,8 +961,7 @@ const processOrderStatusResult = async (order, statusResult) => {
     await Order.findByIdAndUpdate(order._id, {
         $set: {
             status: ORDER_STATUS.FAILED,
-            providerStatus: providerStatus,
-            providerRawResponse: statusResult.rawResponse,
+            ...buildProviderResultUpdate(statusResult),
             failedAt: now,
             lastCheckedAt: now,
         },
@@ -1026,6 +1043,31 @@ const _escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  */
 const pollProcessingOrders = async (providerOverride = null) => {
     const stats = { checked: 0, completed: 0, failed: 0, pending: 0, manualReview: 0, errors: [] };
+
+    const xenaOrdersMissingProviderId = await Order.find({
+        status: ORDER_STATUS.PROCESSING,
+        executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        providerCode: 'xena-recharge',
+        $or: [
+            { providerOrderId: null },
+            { providerOrderId: '' },
+        ],
+    }).limit(200);
+
+    for (const order of xenaOrdersMissingProviderId) {
+        try {
+            await moveOrderToManualReview(order, {
+                providerOrderId: null,
+                providerStatus: 'Unknown',
+                providerErrorCode: 'XENA_RECHARGE_ID_MISSING',
+                providerErrorMessage: 'Xena recharge id is missing; order requires manual reconciliation.',
+                rawResponse: order.providerRawResponse || { errorCode: 'XENA_RECHARGE_ID_MISSING' },
+            }, { reason: 'XENA_RECHARGE_ID_MISSING' });
+            stats.manualReview++;
+        } catch (err) {
+            stats.errors.push(`[XENA_MISSING_ID:${order._id}] ${err.message}`);
+        }
+    }
 
     // ── 1. Fetch all PROCESSING automatic orders with a provider-side ID ──────
     const processingOrders = await Order.find({
@@ -1132,6 +1174,7 @@ const pollProcessingOrders = async (providerOverride = null) => {
                 const { action } = await processOrderStatusResult(order, statusResult);
                 if (action === 'completed') stats.completed++;
                 else if (action === 'failed') stats.failed++;
+                else if (action === 'manualReview') stats.manualReview++;
                 else stats.pending++;
             } catch (err) {
                 stats.errors.push(`[${order._id}] ${err.message}`);
