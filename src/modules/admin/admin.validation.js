@@ -417,6 +417,27 @@ const xenaConnectionVerifySchema = Joi.object({
     }),
 });
 
+const positiveSafeInteger = (field) => Joi.number()
+    .integer()
+    .min(1)
+    .max(Number.MAX_SAFE_INTEGER)
+    .messages({
+        'number.base': `${field} must be a positive safe integer`,
+        'number.integer': `${field} must be a positive safe integer`,
+        'number.min': `${field} must be at least 1`,
+        'number.max': `${field} must be a safe integer`,
+    });
+
+const xenaProductConfigSchema = Joi.object({
+    name: Joi.string().trim().min(1).max(180),
+    minAmount: positiveSafeInteger('minAmount'),
+    maxAmount: positiveSafeInteger('maxAmount'),
+    providerUnitPrice: Joi.string().trim().pattern(/^\d+(\.\d+)?$/).messages({
+        'string.pattern.base': 'providerUnitPrice must be a positive decimal string',
+    }),
+    isActive: Joi.boolean(),
+}).min(1);
+
 const createCurrencySchema = Joi.object({
     code: Joi.string().trim().uppercase().length(3).pattern(/^[A-Z]{3}$/).required().messages({
         'any.required': 'Currency code is required',
@@ -514,6 +535,7 @@ module.exports = {
         updateProvider: updateProviderSchema,
         xenaConnectionChallenge: xenaConnectionChallengeSchema,
         xenaConnectionVerify: xenaConnectionVerifySchema,
+        xenaProductConfig: xenaProductConfigSchema,
         // Orders
         listOrdersQuery,
         updateOrderStatus: updateOrderStatusSchema,

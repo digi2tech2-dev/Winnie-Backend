@@ -3,10 +3,12 @@
 const { BaseProviderAdapter } = require('./base.adapter');
 const { BusinessRuleError } = require('../../../shared/errors/AppError');
 const xenaService = require('../xena/xena.service');
+const xenaProductService = require('../xena/xenaProduct.service');
 
 class XenaRechargeAdapter extends BaseProviderAdapter {
     async getProducts() {
-        return [];
+        const dto = await xenaProductService.buildSyntheticProductDTO({ provider: this.provider });
+        return [this._validateDTO(dto)];
     }
 
     async placeOrder() {

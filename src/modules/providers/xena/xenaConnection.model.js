@@ -17,6 +17,15 @@ const XENA_CONNECTION_STATUSES = Object.freeze({
     UNKNOWN: 'unknown',
 });
 
+const DEFAULT_XENA_SYNTHETIC_PRODUCT = Object.freeze({
+    externalProductId: 'xena-dynamic-recharge',
+    name: 'Xena Dynamic Recharge (Any Amount)',
+    minAmount: 1,
+    maxAmount: 1000000,
+    providerUnitPrice: null,
+    isActive: true,
+});
+
 const xenaConnectionSchema = new mongoose.Schema(
     {
         provider: {
@@ -89,6 +98,47 @@ const xenaConnectionSchema = new mongoose.Schema(
             maxlength: 200,
             default: null,
         },
+        productConfig: {
+            externalProductId: {
+                type: String,
+                trim: true,
+                default: DEFAULT_XENA_SYNTHETIC_PRODUCT.externalProductId,
+                immutable: true,
+            },
+            name: {
+                type: String,
+                trim: true,
+                maxlength: 180,
+                default: DEFAULT_XENA_SYNTHETIC_PRODUCT.name,
+            },
+            minAmount: {
+                type: Number,
+                default: DEFAULT_XENA_SYNTHETIC_PRODUCT.minAmount,
+                min: 1,
+            },
+            maxAmount: {
+                type: Number,
+                default: DEFAULT_XENA_SYNTHETIC_PRODUCT.maxAmount,
+                min: 1,
+            },
+            providerUnitPrice: {
+                type: String,
+                default: DEFAULT_XENA_SYNTHETIC_PRODUCT.providerUnitPrice,
+            },
+            isActive: {
+                type: Boolean,
+                default: DEFAULT_XENA_SYNTHETIC_PRODUCT.isActive,
+            },
+            updatedBy: {
+                type: mongoose.Schema.Types.ObjectId,
+                ref: 'User',
+                default: null,
+            },
+            updatedAt: {
+                type: Date,
+                default: null,
+            },
+        },
     },
     {
         timestamps: true,
@@ -137,4 +187,5 @@ const XenaConnection = mongoose.model('XenaConnection', xenaConnectionSchema);
 module.exports = {
     XenaConnection,
     XENA_CONNECTION_STATUSES,
+    DEFAULT_XENA_SYNTHETIC_PRODUCT,
 };

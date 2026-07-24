@@ -6,6 +6,7 @@
 
 const svc = require('./admin.providers.service');
 const xenaSvc = require('../providers/xena/xena.service');
+const xenaProductSvc = require('../providers/xena/xenaProduct.service');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
@@ -116,6 +117,25 @@ const refreshXenaBalance = catchAsync(async (req, res) => {
     sendSuccess(res, data, 'Xena balance refreshed');
 });
 
+const getXenaProductConfig = catchAsync(async (req, res) => {
+    const data = await xenaProductSvc.getProductConfig({ provider: req.params.id });
+    sendSuccess(res, data, 'Xena product config retrieved');
+});
+
+const updateXenaProductConfig = catchAsync(async (req, res) => {
+    const data = await xenaProductSvc.updateProductConfig({
+        provider: req.params.id,
+        data: req.body,
+        updatedBy: req.user._id,
+    });
+    sendSuccess(res, data, 'Xena product config updated');
+});
+
+const syncXenaSyntheticProduct = catchAsync(async (req, res) => {
+    const data = await xenaProductSvc.syncSyntheticProduct({ provider: req.params.id });
+    sendSuccess(res, data, 'Xena synthetic product synced');
+});
+
 module.exports = {
     listProviders,
     getProviderById,
@@ -133,4 +153,7 @@ module.exports = {
     verifyXenaConnection,
     getXenaConnectionStatus,
     refreshXenaBalance,
+    getXenaProductConfig,
+    updateXenaProductConfig,
+    syncXenaSyntheticProduct,
 };
