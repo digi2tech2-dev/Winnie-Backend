@@ -5,6 +5,7 @@
  */
 
 const svc = require('./admin.providers.service');
+const xenaSvc = require('../providers/xena/xena.service');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
@@ -77,6 +78,44 @@ const checkProviderOrder = catchAsync(async (req, res) => {
     sendSuccess(res, sanitizePricingForSupervisor(data, req.user), 'Order status retrieved');
 });
 
+const challengeXenaConnection = catchAsync(async (req, res) => {
+    const data = await xenaSvc.challengeConnection({
+        provider: req.params.id,
+        displayName: req.body.displayName,
+        username: req.body.username,
+        password: req.body.password,
+    });
+    sendSuccess(res, data, 'Xena challenge started');
+});
+
+const reconnectXenaConnection = catchAsync(async (req, res) => {
+    const data = await xenaSvc.reconnectConnection({
+        provider: req.params.id,
+        displayName: req.body.displayName,
+        username: req.body.username,
+        password: req.body.password,
+    });
+    sendSuccess(res, data, 'Xena reconnect challenge started');
+});
+
+const verifyXenaConnection = catchAsync(async (req, res) => {
+    const data = await xenaSvc.verifyConnection({
+        provider: req.params.id,
+        code: req.body.code,
+    });
+    sendSuccess(res, data, 'Xena connection verified');
+});
+
+const getXenaConnectionStatus = catchAsync(async (req, res) => {
+    const data = await xenaSvc.getConnectionStatus({ provider: req.params.id });
+    sendSuccess(res, data, 'Xena connection status retrieved');
+});
+
+const refreshXenaBalance = catchAsync(async (req, res) => {
+    const data = await xenaSvc.refreshBalance({ provider: req.params.id });
+    sendSuccess(res, data, 'Xena balance refreshed');
+});
+
 module.exports = {
     listProviders,
     getProviderById,
@@ -89,4 +128,9 @@ module.exports = {
     testProviderConnection,
     getProductPrice,
     checkProviderOrder,
+    challengeXenaConnection,
+    reconnectXenaConnection,
+    verifyXenaConnection,
+    getXenaConnectionStatus,
+    refreshXenaBalance,
 };

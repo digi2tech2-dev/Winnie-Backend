@@ -396,6 +396,27 @@ const updateCurrencySchema = Joi.object({
     applyDebtAdjustment: Joi.boolean().default(false),
 }).min(1);
 
+const xenaConnectionChallengeSchema = Joi.object({
+    displayName: Joi.string().trim().min(1).max(120).required().messages({
+        'any.required': 'displayName is required',
+    }),
+    username: Joi.string().trim().email().max(180).required().messages({
+        'any.required': 'username is required',
+        'string.email': 'username must be a valid email address',
+    }),
+    password: Joi.string().min(1).max(4096).required().messages({
+        'any.required': 'password is required',
+        'string.empty': 'password is required',
+    }),
+});
+
+const xenaConnectionVerifySchema = Joi.object({
+    code: Joi.string().trim().min(1).max(32).required().messages({
+        'any.required': 'code is required',
+        'string.empty': 'code is required',
+    }),
+});
+
 const createCurrencySchema = Joi.object({
     code: Joi.string().trim().uppercase().length(3).pattern(/^[A-Z]{3}$/).required().messages({
         'any.required': 'Currency code is required',
@@ -491,6 +512,8 @@ module.exports = {
         // Providers
         createProvider: createProviderSchema,
         updateProvider: updateProviderSchema,
+        xenaConnectionChallenge: xenaConnectionChallengeSchema,
+        xenaConnectionVerify: xenaConnectionVerifySchema,
         // Orders
         listOrdersQuery,
         updateOrderStatus: updateOrderStatusSchema,

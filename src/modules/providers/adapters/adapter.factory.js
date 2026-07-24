@@ -33,6 +33,7 @@ const { MockProviderAdapter } = require('./mock.adapter');
 const { RoyalCrownAdapter } = require('./royalCrown.adapter');
 const { TorosfonAdapter } = require('./toros.adapter');
 const { AlkasrVipAdapter } = require('./alkasr.adapter');
+const { XenaRechargeAdapter } = require('./xenaRecharge.adapter');
 
 // ─── Registry ────────────────────────────────────────────────────────────────
 //
@@ -67,6 +68,10 @@ const registry = new Map([
     ['sultan-card', AlkasrVipAdapter], // slug
     ['sultan card', AlkasrVipAdapter], // name
     ['sultancard', AlkasrVipAdapter],  // compact
+
+    ['xena-recharge', XenaRechargeAdapter],
+    ['xena recharge', XenaRechargeAdapter],
+    ['xenarecharge', XenaRechargeAdapter],
 
     // ── Default test / dev adapter ────────────────────────────────────────────
     ['mock', MockProviderAdapter],
