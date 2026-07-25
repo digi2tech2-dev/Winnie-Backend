@@ -32,6 +32,7 @@ const {
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_RATE_LIMIT_MS = 60 * 1000;
 const TEST_RATE_LIMIT_MS = 60 * 1000;
+const IMMEDIATE_PROCESS_LIMIT = 25;
 const RETRYABLE_TRANSPORT_CODES = new Set([
     'ECONNREFUSED',
     'ENOTFOUND',
@@ -40,6 +41,10 @@ const RETRYABLE_TRANSPORT_CODES = new Set([
     'ECONNABORTED',
     'ESOCKETTIMEDOUT',
 ]);
+
+let processingPendingMessages = false;
+let processPendingAgain = false;
+let processSoonTimer = null;
 
 const getRuntimeOpenWaConfig = () => ({
     enabled: process.env.OPENWA_ENABLED !== undefined
@@ -624,7 +629,7 @@ const queueAdminEvent = async ({ eventType, relatedEntityType = null, relatedEnt
     const preferenceKey = ADMIN_EVENT_PREFERENCE_BY_TYPE[eventType];
     const recipients = await AdminWhatsAppRecipient.find({ enabled: true });
 
-    return Promise.all(recipients.map((recipient) => {
+    const logs = await Promise.all(recipients.map((recipient) => {
         const preferences = mergeAdminPreferences(recipient.eventPreferences);
         const skipReason = !runtime.enabled
             ? 'OPENWA_DISABLED'
@@ -644,9 +649,27 @@ const queueAdminEvent = async ({ eventType, relatedEntityType = null, relatedEnt
             reason: skipReason,
         });
     }));
+
+    if (logs.some((log) => log?.status === LOG_STATUSES.PENDING)) {
+        processPendingMessagesSoon({ limit: Math.max(IMMEDIATE_PROCESS_LIMIT, logs.length) });
+    }
+
+    return logs;
+};
+
+const claimLogForProcessing = async (log) => {
+    if (!log?._id) return null;
+    return WhatsAppNotificationLog.findOneAndUpdate(
+        { _id: log._id, status: log.status },
+        { $set: { status: LOG_STATUSES.PROCESSING } },
+        { new: true }
+    );
 };
 
 const processOneLog = async (log) => {
+    log = await claimLogForProcessing(log);
+    if (!log) return null;
+
     const runtime = getRuntimeOpenWaConfig();
     if (!runtime.enabled) {
         log.status = LOG_STATUSES.SKIPPED;
@@ -708,30 +731,62 @@ const processOneLog = async (log) => {
 };
 
 const processPendingMessages = async ({ limit = 20 } = {}) => {
-    const now = new Date();
-    const logs = await WhatsAppNotificationLog.find({
-        $or: [
-            { status: LOG_STATUSES.PENDING },
-            {
-                status: LOG_STATUSES.RETRY_PENDING,
-                nextRetryAt: { $lte: now },
-                $expr: { $lt: ['$retryCount', '$maxRetries'] },
-            },
-            {
-                status: LOG_STATUSES.FAILED,
-                nextRetryAt: { $lte: now },
-                $expr: { $lt: ['$retryCount', '$maxRetries'] },
-            },
-        ],
-    })
-        .sort({ createdAt: 1 })
-        .limit(limit);
-
-    const results = [];
-    for (const log of logs) {
-        results.push(await processOneLog(log));
+    if (processingPendingMessages) {
+        processPendingAgain = true;
+        return [];
     }
-    return results;
+
+    processingPendingMessages = true;
+    const results = [];
+
+    try {
+        do {
+            processPendingAgain = false;
+            const now = new Date();
+            const logs = await WhatsAppNotificationLog.find({
+                $or: [
+                    { status: LOG_STATUSES.PENDING },
+                    {
+                        status: LOG_STATUSES.RETRY_PENDING,
+                        nextRetryAt: { $lte: now },
+                        $expr: { $lt: ['$retryCount', '$maxRetries'] },
+                    },
+                    {
+                        status: LOG_STATUSES.FAILED,
+                        nextRetryAt: { $lte: now },
+                        $expr: { $lt: ['$retryCount', '$maxRetries'] },
+                    },
+                ],
+            })
+                .sort({ createdAt: 1 })
+                .limit(limit);
+
+            for (const log of logs) {
+                const processed = await processOneLog(log);
+                if (processed) results.push(processed);
+            }
+        } while (processPendingAgain);
+
+        return results;
+    } finally {
+        processingPendingMessages = false;
+    }
+};
+
+const processPendingMessagesSoon = ({ limit = IMMEDIATE_PROCESS_LIMIT } = {}) => {
+    if (processSoonTimer) return;
+
+    processSoonTimer = setTimeout(() => {
+        processSoonTimer = null;
+        void processPendingMessages({ limit }).catch((error) => {
+            const msg = error.message || '';
+            if (!msg.includes('client was closed') && !msg.includes('connection was destroyed')) {
+                console.error('[WhatsAppNotifications] Failed to process pending queue:', msg);
+            }
+        });
+    }, 0);
+
+    processSoonTimer.unref?.();
 };
 
 const listLogs = async ({ status, eventType, recipientType, page = 1, limit = 20 } = {}) => {

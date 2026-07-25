@@ -12,6 +12,7 @@ const axios = require('axios');
 const app = require('../app');
 const config = require('../config/config');
 const whatsappService = require('../modules/notifications/whatsapp/whatsappNotification.service');
+const { notifyDepositRequested } = require('../modules/notifications/notification.events');
 const { WhatsAppNotificationLog } = require('../modules/notifications/whatsapp/whatsappNotificationLog.model');
 const { AdminWhatsAppRecipient } = require('../modules/notifications/whatsapp/adminWhatsAppRecipient.model');
 const { normalizePhoneNumber } = require('../modules/notifications/whatsapp/phoneNormalizer');
@@ -87,6 +88,15 @@ const requestJson = async (path, { token, method = 'GET', body } = {}) => {
         body: body ? JSON.stringify(body) : undefined,
     });
     return { response, payload: await response.json() };
+};
+
+const waitFor = async (predicate, { timeoutMs = 1000, intervalMs = 20 } = {}) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+        if (await predicate()) return;
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    throw new Error('Timed out waiting for condition.');
 };
 
 describe('WhatsApp notifications', () => {
@@ -272,6 +282,114 @@ describe('WhatsApp notifications', () => {
         axios.post.mockClear();
         await whatsappService.processPendingMessages({ limit: 5 });
         expect(axios.post).not.toHaveBeenCalled();
+    });
+
+    it('processes admin manual_deposit_pending logs immediately after queueing', async () => {
+        await AdminWhatsAppRecipient.create({
+            name: 'Ops',
+            phone: '201011111111',
+            enabled: true,
+        });
+
+        const relatedEntityId = new mongoose.Types.ObjectId();
+        const logs = await whatsappService.queueAdminEvent({
+            eventType: 'manual_deposit_pending',
+            relatedEntityType: 'topup',
+            relatedEntityId,
+            payload: {
+                customerName: 'Customer',
+                requestedAmount: 250,
+                currency: 'EGP',
+            },
+        });
+
+        expect(logs).toHaveLength(1);
+        expect(logs[0].status).toBe('pending');
+        expect(logs[0].nextRetryAt).toBeNull();
+
+        await waitFor(() => axios.post.mock.calls.length === 1);
+
+        const sent = await WhatsAppNotificationLog.findById(logs[0]._id).lean();
+        expect(sent.status).toBe('sent');
+        expect(sent.sentAt).toBeInstanceOf(Date);
+    });
+
+    it('does not double-send the same pending log under concurrent processing', async () => {
+        const log = await whatsappService.queueWhatsAppNotification({
+            recipientType: 'admin',
+            phone: '+201022222222',
+            eventType: 'manual_deposit_pending',
+            payload: { amount: 100, currency: 'EGP' },
+        });
+
+        await Promise.all([
+            whatsappService.processPendingMessages({ limit: 1 }),
+            whatsappService.processPendingMessages({ limit: 1 }),
+        ]);
+
+        const sent = await WhatsAppNotificationLog.findById(log._id).lean();
+        expect(axios.post).toHaveBeenCalledTimes(1);
+        expect(sent.status).toBe('sent');
+    });
+
+    it('maxRetries=0 never schedules retry_pending for retryable OpenWA failures', async () => {
+        process.env.OPENWA_MAX_RETRIES = '0';
+        axios.post.mockRejectedValueOnce(new Error('timeout'));
+
+        const log = await whatsappService.queueWhatsAppNotification({
+            recipientType: 'admin',
+            phone: '+201022222222',
+            eventType: 'manual_deposit_pending',
+            payload: { amount: 100, currency: 'EGP' },
+        });
+
+        await whatsappService.processPendingMessages({ limit: 1 });
+
+        const failed = await WhatsAppNotificationLog.findById(log._id).lean();
+        expect(failed.maxRetries).toBe(0);
+        expect(failed.status).toBe('failed');
+        expect(failed.status).not.toBe('retry_pending');
+        expect(failed.nextRetryAt).toBeNull();
+    });
+
+    it('OpenWA 500 stays sent_unconfirmed with no retry when maxRetries=0', async () => {
+        process.env.OPENWA_MAX_RETRIES = '0';
+        const error = new Error('Cannot read properties of undefined (reading id)');
+        error.response = { status: 500, data: { message: error.message } };
+        axios.post.mockRejectedValueOnce(error);
+
+        const log = await whatsappService.queueWhatsAppNotification({
+            recipientType: 'admin',
+            phone: '+201022222222',
+            eventType: 'manual_deposit_pending',
+            payload: { amount: 100, currency: 'EGP' },
+        });
+
+        await whatsappService.processPendingMessages({ limit: 1 });
+
+        const sentUnconfirmed = await WhatsAppNotificationLog.findById(log._id).lean();
+        expect(sentUnconfirmed.maxRetries).toBe(0);
+        expect(sentUnconfirmed.status).toBe('sent_unconfirmed');
+        expect(sentUnconfirmed.reason).toBe('OPENWA_UNKNOWN_DELIVERY');
+        expect(sentUnconfirmed.nextRetryAt).toBeNull();
+    });
+
+    it('admin WhatsApp processing failure does not break deposit notification action', async () => {
+        await AdminWhatsAppRecipient.create({
+            name: 'Ops',
+            phone: '201011111111',
+            enabled: true,
+        });
+        axios.post.mockRejectedValueOnce(new Error('timeout'));
+
+        expect(() => notifyDepositRequested({
+            _id: new mongoose.Types.ObjectId(),
+            requestedAmount: 100,
+            currency: 'EGP',
+            userId: { name: 'Customer', email: 'customer@test.com' },
+        })).not.toThrow();
+
+        await waitFor(() => axios.post.mock.calls.length === 1);
     });
 
     it('marks OpenWA 400 session/validation errors as failed with no duplicate loop', async () => {
