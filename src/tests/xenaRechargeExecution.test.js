@@ -14,6 +14,7 @@ const xenaService = require('../modules/providers/xena/xena.service');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('../modules/orders/order.model');
 const { createOrder } = require('../modules/orders/order.service');
 const { executeOrder } = require('../modules/orders/orderFulfillment.service');
+const validateOrderDynamicFields = require('../modules/orders/validateOrderDynamicFields.middleware');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { User } = require('../modules/users/user.model');
 const {
@@ -122,6 +123,13 @@ const queueSuccessfulVerification = (client, uid = '001234') => {
         headers: { 'x-request-id': 'req-verify' },
     });
 };
+
+const runDynamicFieldMiddleware = (body) => new Promise((resolve) => {
+    const req = { body };
+    validateOrderDynamicFields(req, {}, (error) => {
+        resolve({ error, req });
+    });
+});
 
 beforeAll(async () => {
     process.env.PROVIDER_CREDENTIALS_KEY = TEST_KEY;
@@ -549,5 +557,84 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
 
         expect(updated.orderFields[0].key).toBe('account_id');
         expect(updated.dynamicFields[0].name).toBe('account_id');
+    });
+
+    it('dynamic field middleware accepts target_uid for legacy Xena account_id snapshots', async () => {
+        const { product } = await createXenaOrder({ fieldKey: 'account_id' });
+        await Product.findByIdAndUpdate(product._id, {
+            dynamicFields: [{
+                name: 'account_id',
+                label: 'Account ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+        });
+
+        const { error, req } = await runDynamicFieldMiddleware({
+            productId: product._id.toString(),
+            quantity: 1000,
+            orderFieldsValues: { target_uid: '004454725' },
+        });
+
+        expect(error).toBeUndefined();
+        expect(req.validatedDynamicInput.values.target_uid).toBe('004454725');
+        expect(req.validatedDynamicInput.values.account_id).toBe('004454725');
+    });
+
+    it('dynamic field middleware accepts both Xena aliases without rejecting either key', async () => {
+        const { product } = await createXenaOrder({ fieldKey: 'target_uid' });
+        await Product.findByIdAndUpdate(product._id, {
+            dynamicFields: [{
+                name: 'target_uid',
+                label: 'Xena ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+        });
+
+        const { error, req } = await runDynamicFieldMiddleware({
+            productId: product._id.toString(),
+            quantity: 1000,
+            orderFieldsValues: {
+                target_uid: '004454725',
+                account_id: '004454725',
+            },
+        });
+
+        expect(error).toBeUndefined();
+        expect(req.validatedDynamicInput.values.target_uid).toBe('004454725');
+        expect(req.validatedDynamicInput.values.account_id).toBe('004454725');
+    });
+
+    it('dynamic field middleware still rejects unknown target_uid for non-Xena products', async () => {
+        const product = await Product.create({
+            name: `Manual Dynamic Product ${Date.now()} ${Math.random()}`,
+            basePrice: '1',
+            minQty: 1,
+            maxQty: 1000,
+            isActive: true,
+            executionType: ORDER_EXECUTION_TYPES.MANUAL,
+            dynamicFields: [{
+                name: 'account_id',
+                label: 'Account ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+        });
+
+        const { error } = await runDynamicFieldMiddleware({
+            productId: product._id.toString(),
+            quantity: 1,
+            orderFieldsValues: {
+                target_uid: '004454725',
+                account_id: '004454725',
+            },
+        });
+
+        expect(error).toBeTruthy();
+        expect(error.errors?.[0]?.message || error.message).toContain("'target_uid' is not allowed");
     });
 });
