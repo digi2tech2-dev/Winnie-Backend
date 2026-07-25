@@ -5,12 +5,14 @@ jest.mock('axios');
 const mongoose = require('mongoose');
 const axios = require('axios');
 const adminProviderService = require('../modules/admin/admin.providers.service');
+const productService = require('../modules/products/product.service');
 const { getProviderAdapter } = require('../modules/providers/adapters/adapter.factory');
 const { ProviderProduct } = require('../modules/providers/providerProduct.model');
 const { Product } = require('../modules/products/product.model');
 const { XenaConnection } = require('../modules/providers/xena/xenaConnection.model');
 const xenaService = require('../modules/providers/xena/xena.service');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('../modules/orders/order.model');
+const { createOrder } = require('../modules/orders/order.service');
 const { executeOrder } = require('../modules/orders/orderFulfillment.service');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { User } = require('../modules/users/user.model');
@@ -48,7 +50,12 @@ const connectXenaProvider = async (provider, connectionId = 'con_recharge') => {
     return state;
 };
 
-const createXenaOrder = async ({ targetUid = '001234', quantity = 1000, walletDeducted = 50 } = {}) => {
+const createXenaOrder = async ({
+    targetUid = '001234',
+    quantity = 1000,
+    walletDeducted = 50,
+    fieldKey = 'target_uid',
+} = {}) => {
     const provider = await createXenaProvider();
     await connectXenaProvider(provider, 'con_recharge');
     const { customer, group } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
@@ -76,9 +83,9 @@ const createXenaOrder = async ({ targetUid = '001234', quantity = 1000, walletDe
         provider: provider._id,
         providerProduct: providerProduct._id,
         orderFields: [{
-            id: 'target_uid',
-            key: 'target_uid',
-            label: 'Xena ID',
+            id: fieldKey,
+            key: fieldKey,
+            label: fieldKey === 'target_uid' ? 'Xena ID' : 'Account ID',
             type: 'text',
             required: true,
             isActive: true,
@@ -101,11 +108,11 @@ const createXenaOrder = async ({ targetUid = '001234', quantity = 1000, walletDe
         executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
         providerCode: 'xena-recharge',
         customerInput: {
-            values: { target_uid: targetUid },
-            fieldsSnapshot: [{ key: 'target_uid', label: 'Xena ID', type: 'text' }],
+            values: { [fieldKey]: targetUid },
+            fieldsSnapshot: [{ key: fieldKey, label: fieldKey === 'target_uid' ? 'Xena ID' : 'Account ID', type: 'text' }],
         },
     });
-    return { provider, customer, order };
+    return { provider, customer, order, product, providerProduct };
 };
 
 const queueSuccessfulVerification = (client, uid = '001234') => {
@@ -219,6 +226,37 @@ describe('Xena adapter recharge execution', () => {
         expect(client.request).not.toHaveBeenCalled();
     });
 
+    it('uses legacy account_id as a Xena-only target_uid alias and preserves leading zeroes', async () => {
+        const { provider, order } = await createXenaOrder({ targetUid: '0004454725', fieldKey: 'account_id' });
+        const adapter = getProviderAdapter(provider, { strict: true });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        queueSuccessfulVerification(client, '0004454725');
+        client.request.mockResolvedValueOnce({
+            data: { id: 'rch_legacy', status: 'processing' },
+            status: 200,
+            headers: {},
+        });
+
+        const result = await adapter.placeOrder({
+            localOrderId: order._id.toString(),
+            amount: order.quantity,
+            params: { account_id: '0004454725' },
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.providerOrderId).toBe('rch_legacy');
+        expect(result.rawResponse.legacyTargetField).toBe('account_id');
+        expect(client.request).toHaveBeenLastCalledWith(expect.objectContaining({
+            method: 'post',
+            url: '/v1/recharges',
+            data: expect.objectContaining({
+                targetUid: '0004454725',
+            }),
+        }));
+        expect(typeof client.request.mock.calls[1][0].data.targetUid).toBe('string');
+    });
+
     it('re-verifies target_uid before recharge and does not treat unavailable verification as invalid', async () => {
         const { provider, order } = await createXenaOrder();
         const adapter = getProviderAdapter(provider, { strict: true });
@@ -260,6 +298,50 @@ describe('Xena adapter recharge execution', () => {
 });
 
 describe('Xena fulfillment status mapping and refund behavior', () => {
+    it('order creation accepts canonical target_uid for a legacy account_id Xena product definition', async () => {
+        const { product, customer } = await createXenaOrder({ fieldKey: 'account_id' });
+        await Product.findByIdAndUpdate(product._id, { executionType: ORDER_EXECUTION_TYPES.MANUAL });
+
+        const { order } = await createOrder({
+            userId: customer._id,
+            productId: product._id,
+            quantity: 1,
+            orderFieldsValues: { target_uid: '0001234' },
+            idempotencyKey: `xena-canonical-${product._id.toString()}`,
+        });
+
+        expect(order.customerInput.values).toEqual({ target_uid: '0001234' });
+        expect(order.customerInput.fieldsSnapshot).toHaveLength(1);
+        expect(order.customerInput.fieldsSnapshot[0].key).toBe('target_uid');
+        expect(order.customerInput.values.account_id).toBeUndefined();
+    });
+
+    it('fulfills an already-created legacy account_id Xena order as target_uid', async () => {
+        const { order } = await createXenaOrder({ targetUid: '004454725', fieldKey: 'account_id' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        queueSuccessfulVerification(client, '004454725');
+        client.request.mockResolvedValueOnce({
+            data: { id: 'rch_existing_legacy', status: 'processing' },
+            status: 200,
+            headers: {},
+        });
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(updated.providerOrderId).toBe('rch_existing_legacy');
+        expect(updated.providerRawResponse.legacyTargetField).toBe('account_id');
+        expect(refunded).toBe(false);
+        expect(client.request).toHaveBeenLastCalledWith(expect.objectContaining({
+            method: 'post',
+            url: '/v1/recharges',
+            data: expect.objectContaining({
+                targetUid: '004454725',
+            }),
+        }));
+    });
+
     it('succeeded completes the local order and keeps requestId separate from providerOrderId', async () => {
         const { order } = await createXenaOrder();
         const client = makeClient();
@@ -359,5 +441,51 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
         expect(returned.providerOrderId).toBe('rch_existing');
         expect(placed).toBe(false);
         expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('refunds once when Xena target validation fails before provider POST', async () => {
+        const { order, customer } = await createXenaOrder({ targetUid: 'bad-value', walletDeducted: 50 });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        await executeOrder(order._id);
+        await executeOrder(order._id);
+
+        const updated = await Order.findById(order._id);
+        const refunds = await WalletTransaction.find({ userId: customer._id, type: 'REFUND' });
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(updated.providerOrderId).toBeNull();
+        expect(updated.providerRequestId).toBeNull();
+        expect(updated.providerErrorCode).toBe('XENA_TARGET_INVALID');
+        expect(refunds).toHaveLength(1);
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('product update persists target_uid order and dynamic fields for Xena products', async () => {
+        const { product } = await createXenaOrder({ fieldKey: 'account_id' });
+
+        const updated = await productService.updateProduct(product._id, {
+            orderFields: [{
+                id: 'target_uid',
+                key: 'target_uid',
+                label: 'Xena ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+            dynamicFields: [{
+                name: 'target_uid',
+                label: 'Xena ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+        });
+
+        expect(updated.orderFields).toHaveLength(1);
+        expect(updated.orderFields[0].key).toBe('target_uid');
+        expect(updated.dynamicFields).toHaveLength(1);
+        expect(updated.dynamicFields[0].name).toBe('target_uid');
     });
 });

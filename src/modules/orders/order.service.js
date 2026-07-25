@@ -38,6 +38,68 @@ const {
 const { getLivePrice, invalidate: invalidatePriceCache } = require('../providers/providerPriceCache');
 const { toDecimal, toStr, toFiat, multiply, subtract, add, isPositive, compare } = require('../../shared/utils/decimalPrecision');
 
+const XENA_EXTERNAL_PRODUCT_ID = 'xena-dynamic-recharge';
+const XENA_TARGET_FIELD_KEY = 'target_uid';
+const XENA_LEGACY_TARGET_FIELD_KEY = 'account_id';
+
+const _hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
+
+const _isXenaLinkedProduct = async (product, session) => {
+    if (!product?.providerProduct) return false;
+
+    const providerProduct = await ProviderProduct.findById(product.providerProduct)
+        .select('externalProductId')
+        .session(session)
+        .lean();
+
+    return String(providerProduct?.externalProductId || '').trim() === XENA_EXTERNAL_PRODUCT_ID;
+};
+
+const _canonicalizeXenaOrderFields = async ({ product, orderFieldsValues, session }) => {
+    const submitted = orderFieldsValues && typeof orderFieldsValues === 'object'
+        ? { ...orderFieldsValues }
+        : orderFieldsValues;
+    const fields = Array.isArray(product?.orderFields) ? product.orderFields : [];
+    const hasRelevantField = fields.some((field) =>
+        field?.key === XENA_TARGET_FIELD_KEY || field?.key === XENA_LEGACY_TARGET_FIELD_KEY
+    );
+    const hasRelevantValue = submitted && typeof submitted === 'object' && (
+        _hasOwn(submitted, XENA_TARGET_FIELD_KEY) || _hasOwn(submitted, XENA_LEGACY_TARGET_FIELD_KEY)
+    );
+
+    if ((!hasRelevantField && !hasRelevantValue) || !(await _isXenaLinkedProduct(product, session))) {
+        return { orderFields: fields, orderFieldsValues };
+    }
+
+    const hasTargetField = fields.some((field) => field?.key === XENA_TARGET_FIELD_KEY);
+    const canonicalFields = fields
+        .filter((field) => !(hasTargetField && field?.key === XENA_LEGACY_TARGET_FIELD_KEY))
+        .map((field) => {
+            if (field?.key !== XENA_LEGACY_TARGET_FIELD_KEY) return field;
+            const plain = field.toObject ? field.toObject() : { ...field };
+            return {
+                ...plain,
+                id: plain.id || XENA_TARGET_FIELD_KEY,
+                key: XENA_TARGET_FIELD_KEY,
+                label: plain.label || 'Xena ID',
+                type: plain.type || 'text',
+                required: plain.required !== false,
+                isActive: plain.isActive !== false,
+            };
+        });
+
+    if (!submitted || typeof submitted !== 'object') {
+        return { orderFields: canonicalFields, orderFieldsValues: submitted };
+    }
+
+    if (!_hasOwn(submitted, XENA_TARGET_FIELD_KEY) && _hasOwn(submitted, XENA_LEGACY_TARGET_FIELD_KEY)) {
+        submitted[XENA_TARGET_FIELD_KEY] = submitted[XENA_LEGACY_TARGET_FIELD_KEY];
+    }
+    delete submitted[XENA_LEGACY_TARGET_FIELD_KEY];
+
+    return { orderFields: canonicalFields, orderFieldsValues: submitted };
+};
+
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // JIT PRICE AUTO-UPDATE HELPER
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -394,10 +456,14 @@ const _attemptCreateOrder = async (
         // reach the provider (critical for SMM-panel services).
         let customerInput = validatedCustomerInput;
         if (!customerInput && product.orderFields && product.orderFields.length > 0) {
+            const {
+                orderFields: effectiveOrderFields,
+                orderFieldsValues: effectiveOrderFieldsValues,
+            } = await _canonicalizeXenaOrderFields({ product, orderFieldsValues, session });
             // validateOrderFields throws BusinessRuleError on invalid input
             const { values, fieldsSnapshot } = validateOrderFields(
-                product.orderFields,
-                orderFieldsValues
+                effectiveOrderFields,
+                effectiveOrderFieldsValues
             );
             customerInput = { values, fieldsSnapshot };
         } else if (!customerInput && orderFieldsValues && typeof orderFieldsValues === 'object' && Object.keys(orderFieldsValues).length > 0) {

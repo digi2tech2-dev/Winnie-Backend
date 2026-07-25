@@ -7,6 +7,7 @@ const xenaProductService = require('../xena/xenaProduct.service');
 const { validateTargetUid } = require('../xena/xenaTarget.service');
 
 const XENA_TARGET_FIELD_KEY = 'target_uid';
+const XENA_LEGACY_TARGET_FIELD_KEY = 'account_id';
 
 const firstPresent = (...values) => values.find((value) => value !== undefined && value !== null && value !== '');
 
@@ -76,7 +77,14 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
 
         const providerIdempotencyKey = `provider:xena:${orderId}`;
         const nestedParams = params.params && typeof params.params === 'object' ? params.params : {};
-        const rawTargetUid = firstPresent(nestedParams[XENA_TARGET_FIELD_KEY], params[XENA_TARGET_FIELD_KEY]);
+        const rawTargetUid = firstPresent(
+            nestedParams[XENA_TARGET_FIELD_KEY],
+            params[XENA_TARGET_FIELD_KEY],
+            nestedParams[XENA_LEGACY_TARGET_FIELD_KEY],
+            params[XENA_LEGACY_TARGET_FIELD_KEY]
+        );
+        const usedLegacyTargetField = firstPresent(nestedParams[XENA_TARGET_FIELD_KEY], params[XENA_TARGET_FIELD_KEY]) === undefined
+            && firstPresent(nestedParams[XENA_LEGACY_TARGET_FIELD_KEY], params[XENA_LEGACY_TARGET_FIELD_KEY]) !== undefined;
         let targetUid;
         try {
             targetUid = validateTargetUid(rawTargetUid);
@@ -88,7 +96,10 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
                 providerIdempotencyKey,
                 providerErrorCode: 'XENA_TARGET_INVALID',
                 providerErrorMessage: 'Xena target UID is invalid.',
-                rawResponse: { errorCode: 'XENA_TARGET_INVALID' },
+                rawResponse: {
+                    errorCode: 'XENA_TARGET_INVALID',
+                    ...(usedLegacyTargetField ? { legacyTargetField: XENA_LEGACY_TARGET_FIELD_KEY } : {}),
+                },
                 errorMessage: 'Xena target UID is invalid.',
             };
         }
@@ -155,11 +166,16 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
             providerStatus: recharge.providerStatus,
             providerRequestId: recharge.providerRequestId,
             providerIdempotencyKey,
-            providerMessage: recharge.providerMessage,
+            providerMessage: [
+                recharge.providerMessage,
+                usedLegacyTargetField ? 'Used legacy account_id field as target_uid.' : null,
+            ].filter(Boolean).join(' ') || recharge.providerMessage,
             providerErrorCode: recharge.providerErrorCode,
             providerErrorMessage: recharge.providerErrorMessage,
             providerTargetSnapshot: verification?.user || null,
-            rawResponse: recharge.rawResponse,
+            rawResponse: usedLegacyTargetField
+                ? { ...recharge.rawResponse, legacyTargetField: XENA_LEGACY_TARGET_FIELD_KEY }
+                : recharge.rawResponse,
             errorMessage: recharge.providerErrorMessage,
         };
 
