@@ -26,6 +26,11 @@ const mongoose = require('mongoose');
 
 const { Product, PRICING_MODES, MARKUP_TYPES, EXECUTION_TYPES, PRODUCT_STATUSES, computeFinalPrice } = require('./product.model');
 const { ProviderProduct } = require('../providers/providerProduct.model');
+const {
+    canonicalizeXenaProductForResponse,
+    canonicalizeXenaProductUpdate,
+    isXenaProductLike,
+} = require('../providers/xena/xenaProductFields');
 const { isPositive, add } = require('../../shared/utils/decimalPrecision');
 const {
     NotFoundError,
@@ -134,7 +139,9 @@ const listProducts = async ({
     ]);
 
     return {
-        products,
+        products: products.map((product) => (
+            isXenaProductLike(product) ? canonicalizeXenaProductForResponse(product) : product
+        )),
         pagination: { page: normalizedPage, limit: normalizedLimit, total, pages: Math.ceil(total / normalizedLimit) },
     };
 };
@@ -148,7 +155,7 @@ const getProductById = async (id) => {
         .populate('provider', 'name slug baseUrl isActive')
         .populate('providerProduct', 'rawName translatedName externalProductId rawPrice minQty maxQty isActive lastSyncedAt');
     if (!product) throw new NotFoundError('Product');
-    return product;
+    return isXenaProductLike(product) ? canonicalizeXenaProductForResponse(product) : product;
 };
 
 // =============================================================================
@@ -407,7 +414,9 @@ const publishFromProviderProduct = async ({
  * @returns {Promise<Product>}
  */
 const updateProduct = async (productId, updates) => {
-    const product = await Product.findById(productId).populate('providerProduct', 'rawPrice rawPayload');
+    const product = await Product.findById(productId)
+        .populate('provider', 'name slug code')
+        .populate('providerProduct', 'rawPrice rawPayload externalProductId provider');
     if (!product) throw new NotFoundError('Product');
 
     const ALLOWED = [
@@ -418,7 +427,7 @@ const updateProduct = async (productId, updates) => {
         'provider', 'providerProduct',
         'syncPriceWithProvider', 'enableManualPrice', 'manualPriceAdjustment', 'finalPrice',
     ];
-    const safe = Object.fromEntries(
+    let safe = Object.fromEntries(
         Object.entries(updates).filter(([k]) => ALLOWED.includes(k))
     );
 
@@ -452,10 +461,13 @@ const updateProduct = async (productId, updates) => {
     const providerLinkChanged = incomingProviderProduct != null
         && String(incomingProviderProduct) !== currentProviderProductId;
 
+    let providerLinkTargetProduct = null;
+
     if (providerLinkChanged) {
         const newPP = await ProviderProduct.findById(incomingProviderProduct)
-            .select('rawPrice rawPayload provider');
+            .select('rawPrice rawPayload externalProductId provider');
         if (newPP) {
+            providerLinkTargetProduct = newPP;
             const canonicalRawPrice = String(
                 newPP.rawPrice || newPP.rawPayload?.product_price || 0
             );
@@ -553,6 +565,12 @@ const updateProduct = async (productId, updates) => {
         safe.executionType = EXECUTION_TYPES.MANUAL;
     }
 
+    safe = canonicalizeXenaProductUpdate(safe, {
+        ...product.toObject(),
+        provider: product.provider,
+        providerProduct: providerLinkTargetProduct || product.providerProduct,
+    });
+
     product.set(safe);
     await product.validate();
 
@@ -567,9 +585,12 @@ const updateProduct = async (productId, updates) => {
         { runValidators: true }
     );
 
-    return Product.findById(product._id)
+    const updatedProduct = await Product.findById(product._id)
         .populate('provider', 'name slug')
         .populate('providerProduct', 'rawName translatedName externalProductId rawPrice minQty maxQty isActive');
+    return isXenaProductLike(updatedProduct)
+        ? canonicalizeXenaProductForResponse(updatedProduct)
+        : updatedProduct;
 };
 
 // =============================================================================

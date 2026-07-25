@@ -464,6 +464,15 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
 
     it('product update persists target_uid order and dynamic fields for Xena products', async () => {
         const { product } = await createXenaOrder({ fieldKey: 'account_id' });
+        await Product.findByIdAndUpdate(product._id, {
+            dynamicFields: [{
+                name: 'account_id',
+                label: 'Account ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+        });
 
         const updated = await productService.updateProduct(product._id, {
             orderFields: [{
@@ -487,5 +496,58 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
         expect(updated.orderFields[0].key).toBe('target_uid');
         expect(updated.dynamicFields).toHaveLength(1);
         expect(updated.dynamicFields[0].name).toBe('target_uid');
+
+        const detail = await productService.getProductById(product._id);
+        expect(detail.orderFields).toHaveLength(1);
+        expect(detail.orderFields[0].key).toBe('target_uid');
+        expect(detail.dynamicFields).toHaveLength(1);
+        expect(detail.dynamicFields[0].name).toBe('target_uid');
+    });
+
+    it('does not canonicalize non-Xena account_id product fields', async () => {
+        const product = await Product.create({
+            name: `Manual Account Product ${Date.now()} ${Math.random()}`,
+            basePrice: '1',
+            minQty: 1,
+            maxQty: 1000,
+            isActive: true,
+            executionType: ORDER_EXECUTION_TYPES.MANUAL,
+            orderFields: [{
+                id: 'account_id',
+                key: 'account_id',
+                label: 'Account ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+            dynamicFields: [{
+                name: 'account_id',
+                label: 'Account ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+        });
+
+        const updated = await productService.updateProduct(product._id, {
+            orderFields: [{
+                id: 'account_id',
+                key: 'account_id',
+                label: 'Account ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+            dynamicFields: [{
+                name: 'account_id',
+                label: 'Account ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+        });
+
+        expect(updated.orderFields[0].key).toBe('account_id');
+        expect(updated.dynamicFields[0].name).toBe('account_id');
     });
 });

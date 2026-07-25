@@ -14,6 +14,12 @@ const orderService = require('../orders/order.service');
 const depositService = require('../deposits/deposit.service');
 const productService = require('../products/product.service');
 const { buildCustomerPricingFields } = require('../products/customerPricingPresenter');
+const {
+    canonicalizeXenaProductForResponse,
+    isXenaProductLike,
+    XENA_EXTERNAL_PRODUCT_ID,
+    XENA_PROVIDER_CODE,
+} = require('../providers/xena/xenaProductFields');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
@@ -25,6 +31,20 @@ const {
     mergeSubmittedCustomFieldValues,
     normalizeSubmittedCustomFields,
 } = require('../payments/paymentCustomFields');
+
+const exposeSafeCustomerProduct = (product) => {
+    const plain = product && typeof product.toObject === 'function' ? product.toObject() : { ...(product || {}) };
+    const xenaProduct = isXenaProductLike(plain);
+    const canonical = xenaProduct ? canonicalizeXenaProductForResponse(plain) : plain;
+    delete canonical.providerProduct;
+
+    if (xenaProduct) {
+        canonical.providerCode = XENA_PROVIDER_CODE;
+        canonical.providerProductExternalId = XENA_EXTERNAL_PRODUCT_ID;
+    }
+
+    return canonical;
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -365,7 +385,7 @@ const getProducts = catchAsync(async (req, res) => {
             .sort({ name: 1 })
             .skip(skip)
             .limit(limit)
-            .select('-providerProduct')
+            .populate('providerProduct', 'externalProductId')
             .lean(),
         Product.countDocuments(filter),
     ]);
@@ -379,7 +399,8 @@ const getProducts = catchAsync(async (req, res) => {
     const rate = await getConversionRate(userCurrency);
 
     // ── 3. Apply pipeline: Base → Markup → Currency ───────────────────────────
-    const converted = products.map((p) => {
+    const converted = products.map((product) => {
+        const p = exposeSafeCustomerProduct(product);
         const productFinalUnitPriceUsd = getProductFinalUnitPrice(p);
         const markedUpUSD = calculateFinalPrice(productFinalUnitPriceUsd, markupPercentage);
         const pricingFields = buildCustomerPricingFields({
@@ -424,7 +445,7 @@ const getProduct = catchAsync(async (req, res) => {
         visibleInStore: { $ne: false },
         deletedAt: null,
     })
-        .select('-providerProduct')
+        .populate('providerProduct', 'externalProductId')
         .lean();
 
     if (!product) throw new NotFoundError('Product');
@@ -438,10 +459,11 @@ const getProduct = catchAsync(async (req, res) => {
     const rate = await getConversionRate(userCurrency);
 
     // ── 3. Pipeline: Base → Markup → Currency ─────────────────────────────────
-    const productFinalUnitPriceUsd = getProductFinalUnitPrice(product);
+    const safeProduct = exposeSafeCustomerProduct(product);
+    const productFinalUnitPriceUsd = getProductFinalUnitPrice(safeProduct);
     const markedUpUSD = calculateFinalPrice(productFinalUnitPriceUsd, markupPercentage);
     const pricingFields = buildCustomerPricingFields({
-        product,
+        product: safeProduct,
         productFinalUnitPriceUsd,
         groupPercentage: markupPercentage,
         customerUnitPriceUsd: markedUpUSD,
@@ -450,7 +472,7 @@ const getProduct = catchAsync(async (req, res) => {
     });
 
     sendSuccess(res, sanitizePricingForSupervisor({
-        ...product,
+        ...safeProduct,
         ...pricingFields,
         finalPrice: markedUpUSD,
         sellingPrice: markedUpUSD,
