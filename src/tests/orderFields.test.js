@@ -510,6 +510,86 @@ describe('[4] Admin product API — orderFields management', () => {
         expect(updated.orderFields[0].key).toBe('server');
     });
 
+    it('updateProduct mirrors dynamicFields from edited orderFields', async () => {
+        const product = await productService.createProduct({
+            name: `Mirror-Test-${Date.now()}`,
+            basePrice: 5.00,
+            minQty: 1,
+            maxQty: 10,
+            orderFields: [FIELDS[0]],
+            dynamicFields: [{
+                name: 'account_id',
+                label: 'Account ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+        });
+
+        const updated = await productService.updateProduct(product._id, {
+            orderFields: [FIELDS[1]],
+        });
+
+        expect(updated.orderFields).toHaveLength(1);
+        expect(updated.orderFields[0].key).toBe('server');
+        expect(updated.dynamicFields).toHaveLength(1);
+        expect(updated.dynamicFields[0].name).toBe('server');
+
+        const reloaded = await Product.findById(product._id).lean();
+        expect(reloaded.orderFields.map((field) => field.key)).toEqual(['server']);
+        expect(reloaded.dynamicFields.map((field) => field.name)).toEqual(['server']);
+    });
+
+    it('updateProduct clears stale dynamicFields when orderFields are cleared', async () => {
+        const product = await productService.createProduct({
+            name: `Clear-Dynamic-Test-${Date.now()}`,
+            basePrice: 5.00,
+            minQty: 1,
+            maxQty: 10,
+            orderFields: [FIELDS[0]],
+            dynamicFields: [{
+                name: 'player_id',
+                label: 'Player ID',
+                type: 'text',
+                required: true,
+                isActive: true,
+            }],
+        });
+
+        const updated = await productService.updateProduct(product._id, {
+            orderFields: [],
+        });
+
+        expect(updated.orderFields).toHaveLength(0);
+        expect(updated.dynamicFields).toHaveLength(0);
+    });
+
+    it('updateProduct keeps non-Xena account_id fields as account_id', async () => {
+        const accountField = {
+            id: 'account_id',
+            label: 'Account ID',
+            key: 'account_id',
+            type: 'text',
+            required: true,
+            sortOrder: 0,
+            isActive: true,
+        };
+        const product = await productService.createProduct({
+            name: `Non-Xena-Account-Test-${Date.now()}`,
+            basePrice: 5.00,
+            minQty: 1,
+            maxQty: 10,
+            orderFields: [FIELDS[0]],
+        });
+
+        const updated = await productService.updateProduct(product._id, {
+            orderFields: [accountField],
+        });
+
+        expect(updated.orderFields[0].key).toBe('account_id');
+        expect(updated.dynamicFields[0].name).toBe('account_id');
+    });
+
     it('updateProduct does not touch orderFields when not in payload', async () => {
         const product = await productService.createProduct({
             name: `Preserve-Test-${Date.now()}`,

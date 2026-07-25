@@ -38,6 +38,19 @@ const {
     BusinessRuleError,
 } = require('../../shared/errors/AppError');
 
+const dynamicFieldsFromOrderFields = (orderFields = []) => (
+    (Array.isArray(orderFields) ? orderFields : []).map((field) => ({
+        name: field.key,
+        label: field.label,
+        type: field.type,
+        required: field.required !== false,
+        options: Array.isArray(field.options) ? field.options : [],
+        min: field.min ?? null,
+        max: field.max ?? null,
+        isActive: field.isActive !== false,
+    }))
+);
+
 // =============================================================================
 // USER-FACING QUERIES
 // =============================================================================
@@ -556,6 +569,10 @@ const updateProduct = async (productId, updates) => {
     }
     if (safe.pricingMode !== undefined && safe.syncPriceWithProvider === undefined) {
         safe.syncPriceWithProvider = safe.pricingMode === PRICING_MODES.SYNC;
+    }
+
+    if (Array.isArray(safe.orderFields)) {
+        safe.dynamicFields = dynamicFieldsFromOrderFields(safe.orderFields);
     }
 
     const nextProviderProduct = safe.providerProduct !== undefined
