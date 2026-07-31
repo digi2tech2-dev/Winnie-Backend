@@ -1,6 +1,13 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { PROVIDER_CODES } = require('./provider.constants');
+
+const FULFILLMENT_MODES = Object.freeze({
+    TOPUP_WITH_FIELDS: 'TOPUP_WITH_FIELDS',
+    CODE_DELIVERY: 'CODE_DELIVERY',
+    UNKNOWN: 'UNKNOWN',
+});
 
 /**
  * ProviderProduct — INTERNAL ONLY.
@@ -37,6 +44,14 @@ const providerProductSchema = new mongoose.Schema(
             trim: true,
         },
 
+        providerCode: {
+            type: String,
+            enum: Object.values(PROVIDER_CODES),
+            uppercase: true,
+            trim: true,
+            default: null,
+        },
+
         rawName: {
             type: String,
             required: [true, 'rawName is required'],
@@ -59,6 +74,57 @@ const providerProductSchema = new mongoose.Schema(
             required: [true, 'rawPrice is required'],
             get: (v) => String(v ?? '0'),
             set: (v) => String(v ?? '0'),
+        },
+
+        category: {
+            type: String,
+            trim: true,
+            default: null,
+            index: true,
+        },
+
+        subCategory: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        region: {
+            type: String,
+            trim: true,
+            default: null,
+            index: true,
+        },
+
+        platform: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        currency: {
+            type: String,
+            trim: true,
+            uppercase: true,
+            default: null,
+        },
+
+        costPrice: {
+            type: String,
+            default: null,
+            get: (v) => (v == null ? null : String(v)),
+            set: (v) => (v == null ? null : String(v)),
+        },
+
+        available: {
+            type: Boolean,
+            default: null,
+            index: true,
+        },
+
+        stock: {
+            type: Number,
+            default: null,
         },
 
         minQty: {
@@ -87,6 +153,36 @@ const providerProductSchema = new mongoose.Schema(
         lastSyncedAt: {
             type: Date,
             default: null,
+        },
+
+        fulfillmentMode: {
+            type: String,
+            enum: Object.values(FULFILLMENT_MODES),
+            default: FULFILLMENT_MODES.UNKNOWN,
+            index: true,
+        },
+
+        isSupported: {
+            type: Boolean,
+            default: false,
+            index: true,
+        },
+
+        isBlocked: {
+            type: Boolean,
+            default: false,
+            index: true,
+        },
+
+        blockReason: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        requiredFields: {
+            type: [mongoose.Schema.Types.Mixed],
+            default: [],
         },
 
         /**
@@ -133,6 +229,11 @@ providerProductSchema.index(
     { name: 'last_synced_at' }
 );
 
+providerProductSchema.index(
+    { providerCode: 1, category: 1, region: 1, fulfillmentMode: 1 },
+    { name: 'provider_code_catalog_filters' }
+);
+
 const ProviderProduct = mongoose.model('ProviderProduct', providerProductSchema);
 
-module.exports = { ProviderProduct };
+module.exports = { ProviderProduct, FULFILLMENT_MODES };

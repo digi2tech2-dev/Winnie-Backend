@@ -3,6 +3,7 @@
 const { Provider } = require('./provider.model');
 const { ProviderProduct } = require('./providerProduct.model');
 const { Product, PRICING_MODES } = require('../products/product.model');
+const { PROVIDER_CODES } = require('./provider.constants');
 const {
     NotFoundError,
     ConflictError,
@@ -80,6 +81,23 @@ const listProviderProducts = async (providerId, { page = 1, limit = 50, includeI
     };
 };
 
+const assertProviderProductCanBePublished = (pp) => {
+    const isFazerCards = pp.providerCode === PROVIDER_CODES.FAZER_CARDS
+        || pp.provider?.providerCode === PROVIDER_CODES.FAZER_CARDS
+        || pp.provider?.slug === 'fazer-cards';
+
+    if (isFazerCards) {
+        throw new BusinessRuleError(
+            'FazerCards raw catalog products cannot be published or linked in this phase.',
+            'FAZERCARDS_PURCHASE_UNSUPPORTED'
+        );
+    }
+
+    if (pp.isBlocked) {
+        throw new BusinessRuleError('Cannot publish a blocked provider product.', 'PROVIDER_PRODUCT_BLOCKED');
+    }
+};
+
 // =============================================================================
 // ADMIN PUBLISH FLOW
 // =============================================================================
@@ -122,6 +140,7 @@ const publishProduct = async ({
             'PROVIDER_INACTIVE'
         );
     }
+    assertProviderProductCanBePublished(pp);
 
     // Prevent duplicate publish
     const alreadyPublished = await Product.findOne({ providerProduct: providerProductId });

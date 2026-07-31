@@ -8,6 +8,7 @@ const svc = require('./admin.providers.service');
 const xenaSvc = require('../providers/xena/xena.service');
 const xenaProductSvc = require('../providers/xena/xenaProduct.service');
 const xenaTargetSvc = require('../providers/xena/xenaTarget.service');
+const fazerCardsCatalogSvc = require('../providers/fazercards/fazercardsCatalog.service');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
@@ -145,6 +146,31 @@ const verifyXenaTarget = catchAsync(async (req, res) => {
     sendSuccess(res, data, 'Xena target verified');
 });
 
+const testFazerCardsConnection = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.testConnection();
+    sendSuccess(res, data, 'FazerCards connection successful');
+});
+
+const getFazerCardsBalance = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.getBalance();
+    sendSuccess(res, data, 'FazerCards balance retrieved');
+});
+
+const syncFazerCardsCatalogPage = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.syncCatalogPage(req.body);
+    sendSuccess(res, data, 'FazerCards raw catalog page synced');
+});
+
+const listFazerCardsProviderProducts = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.listProviderProducts(req.query);
+    sendPaginated(res, data.products, data.pagination, 'FazerCards provider products retrieved');
+});
+
+const getFazerCardsProviderProductDetails = catchAsync(async (req, res) => {
+    const product = await fazerCardsCatalogSvc.getProviderProductDetails(req.params.id);
+    sendSuccess(res, { product }, 'FazerCards provider product retrieved');
+});
+
 module.exports = {
     listProviders,
     getProviderById,
@@ -166,4 +192,9 @@ module.exports = {
     updateXenaProductConfig,
     syncXenaSyntheticProduct,
     verifyXenaTarget,
+    testFazerCardsConnection,
+    getFazerCardsBalance,
+    syncFazerCardsCatalogPage,
+    listFazerCardsProviderProducts,
+    getFazerCardsProviderProductDetails,
 };

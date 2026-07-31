@@ -119,6 +119,19 @@ const config = {
         key: process.env.PROVIDER_CREDENTIALS_KEY,
     },
 
+    providers: {
+        fazerCards: {
+            enabled: process.env.FAZERCARDS_ENABLED === 'true',
+            apiBaseUrl: process.env.FAZERCARDS_API_BASE_URL || 'https://api.fzr.cards/api/v2',
+            apiKey: process.env.FAZERCARDS_API_KEY,
+            timeoutMs: parseInt(process.env.FAZERCARDS_TIMEOUT_MS || '20000', 10),
+            blockedRegions: (process.env.FAZERCARDS_BLOCKED_REGIONS || 'RU,RUSSIA,CIS')
+                .split(',')
+                .map((region) => region.trim().toUpperCase())
+                .filter(Boolean),
+        },
+    },
+
     openwa: {
         enabled: process.env.OPENWA_ENABLED === 'true',
         baseUrl: process.env.OPENWA_BASE_URL || 'http://127.0.0.1:2785/api',

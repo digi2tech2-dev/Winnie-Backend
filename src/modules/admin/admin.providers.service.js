@@ -8,6 +8,7 @@
  */
 
 const { Provider, PROVIDER_AUTH_TYPES, PROVIDER_INTEGRATION_TYPES } = require('../providers/provider.model');
+const { PROVIDER_CODES } = require('../providers/provider.constants');
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
@@ -67,9 +68,14 @@ const normalizeProviderPayload = (data = {}, { applyDefaults = false } = {}) => 
     const normalized = {
         ...data,
         slug: data.slug || data.code,
+        providerCode: data.providerCode ? String(data.providerCode).toUpperCase() : undefined,
         integrationType,
         authType,
     };
+
+    if (!normalized.providerCode && String(data.code || data.slug || '').toLowerCase() === 'fazer-cards') {
+        normalized.providerCode = PROVIDER_CODES.FAZER_CARDS;
+    }
 
     if (data.bearerToken !== undefined && data.apiToken === undefined) {
         normalized.apiToken = data.bearerToken;
@@ -142,10 +148,12 @@ const updateProvider = async (id, data, adminId) => {
         authType,
         username,
         password,
+        providerCode,
     } = normalizeProviderPayload(data);
 
     if (name !== undefined) provider.name = name;
     if (slug !== undefined) provider.slug = slug;
+    if (providerCode !== undefined) provider.providerCode = providerCode;
     if (baseUrl !== undefined) provider.baseUrl = baseUrl;
     if (integrationType !== undefined) provider.integrationType = integrationType;
     if (authType !== undefined) provider.authType = authType;

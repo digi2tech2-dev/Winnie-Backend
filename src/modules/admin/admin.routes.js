@@ -183,6 +183,11 @@ router.patch('/users/:id/avatar', authorizeRoles('ADMIN'), avatarUpload.single('
 router.get('/providers', requireAnyPermission('suppliers.manage', 'products.manage', 'manage_providers', 'manage_products'), providersCtrl.listProviders);
 router.post('/providers', requirePermission('suppliers.manage'), validateBody(schemas.createProvider), providersCtrl.createProvider);
 // sub-resource actions BEFORE /:id to avoid param collision
+router.post('/providers/fazercards/test-connection', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.testFazerCardsConnection);
+router.get('/providers/fazercards/balance', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.getFazerCardsBalance);
+router.post('/providers/fazercards/catalog/sync-page', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsCatalogSync), providersCtrl.syncFazerCardsCatalogPage);
+router.get('/providers/fazercards/provider-products', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateQuery(schemas.listFazerCardsProviderProductsQuery), providersCtrl.listFazerCardsProviderProducts);
+router.get('/providers/fazercards/provider-products/:id', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.getFazerCardsProviderProductDetails);
 router.get('/providers/:id/balance', requirePermission('suppliers.manage'), providersCtrl.getProviderBalance);
 router.get('/providers/:id/products', requirePermission('suppliers.manage'), providersCtrl.getProviderLiveProducts);
 router.post('/providers/:id/test-connection', requirePermission('suppliers.manage'), providersCtrl.testProviderConnection);

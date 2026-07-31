@@ -26,6 +26,7 @@ const mongoose = require('mongoose');
 
 const { Product, PRICING_MODES, MARKUP_TYPES, EXECUTION_TYPES, PRODUCT_STATUSES, computeFinalPrice } = require('./product.model');
 const { ProviderProduct } = require('../providers/providerProduct.model');
+const { PROVIDER_CODES } = require('../providers/provider.constants');
 const {
     canonicalizeXenaProductForResponse,
     canonicalizeXenaProductUpdate,
@@ -50,6 +51,24 @@ const dynamicFieldsFromOrderFields = (orderFields = []) => (
         isActive: field.isActive !== false,
     }))
 );
+
+const assertProviderProductAllowedForCustomerCatalog = (pp) => {
+    if (!pp) return;
+
+    const isFazerCards = pp.providerCode === PROVIDER_CODES.FAZER_CARDS
+        || pp.provider?.providerCode === PROVIDER_CODES.FAZER_CARDS
+        || pp.provider?.slug === 'fazer-cards';
+
+    if (isFazerCards) {
+        throw new BusinessRuleError(
+            'FazerCards raw catalog products cannot be published or linked in this phase.',
+            'FAZERCARDS_PURCHASE_UNSUPPORTED'
+        );
+    }
+    if (pp.isBlocked) {
+        throw new BusinessRuleError('Cannot publish or link a blocked provider product.', 'PROVIDER_PRODUCT_BLOCKED');
+    }
+};
 
 // =============================================================================
 // USER-FACING QUERIES
@@ -224,8 +243,11 @@ const createProduct = async ({
 
     if (providerProduct) {
         // Fetch provider product's raw price for markup calculation
-        const pp = await ProviderProduct.findById(providerProduct).select('rawPrice rawPayload');
+        const pp = await ProviderProduct.findById(providerProduct)
+            .select('rawPrice rawPayload providerCode isBlocked isSupported provider')
+            .populate('provider', 'slug providerCode');
         if (pp) {
+            assertProviderProductAllowedForCustomerCatalog(pp);
             const effectiveRawPrice = String(pp.rawPrice || pp.rawPayload?.product_price || 0);
             resolvedProviderPrice = effectiveRawPrice;
 
@@ -337,6 +359,7 @@ const publishFromProviderProduct = async ({
             'PROVIDER_PRODUCT_INACTIVE'
         );
     }
+    assertProviderProductAllowedForCustomerCatalog(pp);
 
     // ── Prevent duplicate publish ─────────────────────────────────────────────
     const alreadyPublished = await Product.findOne({ providerProduct: providerProductId });
@@ -478,8 +501,10 @@ const updateProduct = async (productId, updates) => {
 
     if (providerLinkChanged) {
         const newPP = await ProviderProduct.findById(incomingProviderProduct)
-            .select('rawPrice rawPayload externalProductId provider');
+            .select('rawPrice rawPayload externalProductId provider providerCode isBlocked isSupported')
+            .populate('provider', 'slug providerCode');
         if (newPP) {
+            assertProviderProductAllowedForCustomerCatalog(newPP);
             providerLinkTargetProduct = newPP;
             const canonicalRawPrice = String(
                 newPP.rawPrice || newPP.rawPayload?.product_price || 0
@@ -635,6 +660,7 @@ const syncProductPriceFromProvider = async (productId) => {
             'PROVIDER_PRODUCT_INACTIVE'
         );
     }
+    assertProviderProductAllowedForCustomerCatalog(providerProduct);
     if (providerProduct.provider?.isActive === false) {
         throw new BusinessRuleError('The linked provider is inactive.', 'PROVIDER_INACTIVE');
     }

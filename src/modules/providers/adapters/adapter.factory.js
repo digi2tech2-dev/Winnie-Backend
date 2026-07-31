@@ -34,6 +34,7 @@ const { RoyalCrownAdapter } = require('./royalCrown.adapter');
 const { TorosfonAdapter } = require('./toros.adapter');
 const { AlkasrVipAdapter } = require('./alkasr.adapter');
 const { XenaRechargeAdapter } = require('./xenaRecharge.adapter');
+const { FazerCardsAdapter } = require('../fazercards/fazercards.adapter');
 
 // ─── Registry ────────────────────────────────────────────────────────────────
 //
@@ -73,6 +74,10 @@ const registry = new Map([
     ['xena recharge', XenaRechargeAdapter],
     ['xenarecharge', XenaRechargeAdapter],
 
+    ['fazer-cards', FazerCardsAdapter],
+    ['fazercards', FazerCardsAdapter],
+    ['fazer cards', FazerCardsAdapter],
+
     // ── Default test / dev adapter ────────────────────────────────────────────
     ['mock', MockProviderAdapter],
 ]);
@@ -95,9 +100,11 @@ const registry = new Map([
 const getAdapter = (provider, adapterOptions = {}) => {
     const bySlug = (provider.slug ?? '').toLowerCase().trim();
     const byName = (provider.name ?? '').toLowerCase().trim();
+    const byCode = (provider.providerCode ?? '').toLowerCase().trim();
 
     const AdapterClass = registry.get(bySlug)
         ?? registry.get(byName)
+        ?? registry.get(byCode.replace(/_/g, '-'))
         ?? MockProviderAdapter;
 
     return new AdapterClass(provider, adapterOptions);
@@ -117,8 +124,9 @@ const getAdapter = (provider, adapterOptions = {}) => {
 const getProviderAdapter = (provider, options = {}) => {
     const bySlug = (provider.slug ?? '').toLowerCase().trim();
     const byName = (provider.name ?? '').toLowerCase().trim();
+    const byCode = (provider.providerCode ?? '').toLowerCase().trim();
 
-    const AdapterClass = registry.get(bySlug) ?? registry.get(byName);
+    const AdapterClass = registry.get(bySlug) ?? registry.get(byName) ?? registry.get(byCode.replace(/_/g, '-'));
 
     if (!AdapterClass) {
         if (options.strict) {

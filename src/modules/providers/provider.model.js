@@ -1,6 +1,7 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { PROVIDER_CODES } = require('./provider.constants');
 const {
     encryptSecret,
     getProviderCredential,
@@ -50,6 +51,15 @@ const providerSchema = new mongoose.Schema(
             unique: true,
             sparse: true,
             lowercase: true,
+        },
+
+        providerCode: {
+            type: String,
+            enum: Object.values(PROVIDER_CODES),
+            uppercase: true,
+            trim: true,
+            default: null,
+            sparse: true,
         },
 
         /**

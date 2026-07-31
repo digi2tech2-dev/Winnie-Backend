@@ -238,6 +238,7 @@ const createProviderSchema = Joi.object({
     name: Joi.string().trim().min(2).max(64).required(),
     code: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
     slug: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
+    providerCode: Joi.string().trim().uppercase().valid('FAZER_CARDS'),
     baseUrl: Joi.string().uri().required(),
     integrationType: Joi.string().trim().uppercase().valid('API').default('API'),
     providerType: Joi.string().trim().uppercase().valid('API'),
@@ -256,6 +257,7 @@ const updateProviderSchema = Joi.object({
     name: Joi.string().trim().min(2).max(64),
     code: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
     slug: Joi.string().trim().lowercase().pattern(/^[a-z0-9-]+$/).max(64),
+    providerCode: Joi.string().trim().uppercase().valid('FAZER_CARDS'),
     baseUrl: Joi.string().uri(),
     integrationType: Joi.string().trim().uppercase().valid('API'),
     providerType: Joi.string().trim().uppercase().valid('API'),
@@ -446,6 +448,23 @@ const xenaTargetVerificationSchema = Joi.object({
     }),
 });
 
+const fazerCardsCatalogSyncSchema = Joi.object({
+    limit: Joi.number().integer().min(1).max(500).default(100),
+    cursor: Joi.string().trim().max(2048).allow('', null),
+    category: Joi.string().trim().max(120).allow('', null),
+});
+
+const listFazerCardsProviderProductsQuery = Joi.object({
+    ...pagination,
+    search: Joi.string().trim().max(200).allow('', null),
+    category: Joi.string().trim().max(120).allow('', null),
+    region: Joi.string().trim().max(120).allow('', null),
+    available: Joi.boolean(),
+    supported: Joi.boolean(),
+    blocked: Joi.boolean(),
+    fulfillmentMode: Joi.string().trim().uppercase().valid('TOPUP_WITH_FIELDS', 'CODE_DELIVERY', 'UNKNOWN'),
+});
+
 const createCurrencySchema = Joi.object({
     code: Joi.string().trim().uppercase().length(3).pattern(/^[A-Z]{3}$/).required().messages({
         'any.required': 'Currency code is required',
@@ -545,6 +564,8 @@ module.exports = {
         xenaConnectionVerify: xenaConnectionVerifySchema,
         xenaProductConfig: xenaProductConfigSchema,
         xenaTargetVerification: xenaTargetVerificationSchema,
+        fazerCardsCatalogSync: fazerCardsCatalogSyncSchema,
+        listFazerCardsProviderProductsQuery,
         // Orders
         listOrdersQuery,
         updateOrderStatus: updateOrderStatusSchema,
