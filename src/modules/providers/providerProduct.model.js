@@ -58,6 +58,12 @@ const providerProductSchema = new mongoose.Schema(
             trim: true,
         },
 
+        name: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
         /**
          * Optional human-friendly name set by an admin.
          * Displayed in the admin product-selection UI.
@@ -81,6 +87,25 @@ const providerProductSchema = new mongoose.Schema(
             trim: true,
             default: null,
             index: true,
+        },
+
+        categoryName: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        offerId: {
+            type: String,
+            trim: true,
+            default: null,
+            index: true,
+        },
+
+        offerName: {
+            type: String,
+            trim: true,
+            default: null,
         },
 
         subCategory: {

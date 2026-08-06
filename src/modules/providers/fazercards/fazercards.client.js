@@ -12,6 +12,7 @@ const FAZERCARDS_ERROR_CODES = Object.freeze({
     TIMEOUT: 'FAZERCARDS_TIMEOUT',
     NETWORK_ERROR: 'FAZERCARDS_NETWORK_ERROR',
     MALFORMED_RESPONSE: 'FAZERCARDS_MALFORMED_RESPONSE',
+    SUBSCRIPTION_INACTIVE: 'FAZERCARDS_SUBSCRIPTION_INACTIVE',
 });
 
 const SENSITIVE_KEY_PATTERN = /api[-_]?key|authorization|token|secret|password|credential/i;
@@ -59,12 +60,30 @@ const safeMessage = (err, secrets = []) => (
     )
 );
 
+const getProviderCode = (data = {}) => String(data?.code || data?.error_code || data?.errorCode || '').trim().toLowerCase();
+
+const makeSubscriptionInactiveError = () => new BusinessRuleError(
+    'FazerCards subscription is inactive. Renew it to sync top-up catalog.',
+    FAZERCARDS_ERROR_CODES.SUBSCRIPTION_INACTIVE
+);
+
 const wrapFazerCardsError = (err, context = 'request', secrets = []) => {
     if (err instanceof BusinessRuleError && err.code?.startsWith('FAZERCARDS_')) {
         return err;
     }
 
     const status = err.response?.status ?? null;
+    if (getProviderCode(err.response?.data) === 'subscription_inactive') {
+        const wrapped = makeSubscriptionInactiveError();
+        wrapped.statusCode = 422;
+        wrapped.httpStatus = status;
+        wrapped.context = context;
+        wrapped.requestId = extractRequestId(err.response?.data, err.response?.headers);
+        wrapped.safeUpstreamMessage = safeMessage(err, secrets);
+        wrapped.providerBody = sanitizePayload(err.response?.data ?? null, 0, secrets);
+        return wrapped;
+    }
+
     const isTimeout = err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '');
     const code = isTimeout
         ? FAZERCARDS_ERROR_CODES.TIMEOUT
@@ -124,8 +143,12 @@ class FazerCardsClient {
     async request(method, path, { params, context } = {}) {
         try {
             const response = await this.http.request({ method, url: path, params });
+            const data = sanitizePayload(response.data, 0, this.redactSecrets);
+            if (getProviderCode(data) === 'subscription_inactive') {
+                throw makeSubscriptionInactiveError();
+            }
             return {
-                data: sanitizePayload(response.data, 0, this.redactSecrets),
+                data,
                 status: response.status,
                 requestId: extractRequestId(response.data, response.headers),
             };
@@ -142,11 +165,17 @@ class FazerCardsClient {
         return this.request('get', '/balance', { context: 'balance' });
     }
 
-    fetchCatalogPage({ limit = 100, cursor, category } = {}) {
+    fetchTopupCategoriesPage({ limit = 100, cursor } = {}) {
         const params = { limit };
         if (cursor) params.cursor = cursor;
-        if (category) params.category = category;
-        return this.request('get', '/catalog', { params, context: 'catalog' });
+        return this.request('get', '/topups', { params, context: 'topups' });
+    }
+
+    fetchTopupOffers({ categoryId } = {}) {
+        return this.request('get', '/topups/offers', {
+            params: { category_id: categoryId },
+            context: 'topup_offers',
+        });
     }
 }
 
@@ -156,4 +185,5 @@ module.exports = {
     sanitizePayload,
     redactKnownSecrets,
     wrapFazerCardsError,
+    makeSubscriptionInactiveError,
 };

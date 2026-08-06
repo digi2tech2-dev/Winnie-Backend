@@ -158,7 +158,7 @@ const getFazerCardsBalance = catchAsync(async (req, res) => {
 
 const syncFazerCardsCatalogPage = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.syncCatalogPage(req.body);
-    sendSuccess(res, data, 'FazerCards raw catalog page synced');
+    sendSuccess(res, data, 'FazerCards top-up catalog page synced');
 });
 
 const listFazerCardsProviderProducts = catchAsync(async (req, res) => {

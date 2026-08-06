@@ -31,7 +31,7 @@ const ensureFazerCardsProvider = async () => {
         authType: 'API_KEY',
         syncInterval: 0,
         isActive: config.providers.fazerCards.enabled,
-        supportedFeatures: ['getAccount', 'getBalance', 'fetchCatalogPage'],
+        supportedFeatures: ['getAccount', 'getBalance', 'fetchTopupCategoriesPage', 'fetchTopupOffers'],
     });
 };
 
@@ -56,6 +56,10 @@ const getBalance = async (adapterOptions = {}) => {
 };
 
 const upsertCatalogProduct = async (providerId, dto, now) => {
+    const existed = await ProviderProduct.exists({
+        provider: providerId,
+        externalProductId: dto.externalProductId,
+    });
     const doc = await ProviderProduct.findOneAndUpdate(
         {
             provider: providerId,
@@ -64,12 +68,16 @@ const upsertCatalogProduct = async (providerId, dto, now) => {
         {
             $set: {
                 providerCode: PROVIDER_CODES.FAZER_CARDS,
+                name: dto.name,
                 rawName: dto.rawName,
                 rawPrice: dto.rawPrice,
                 minQty: dto.minQty,
                 maxQty: dto.maxQty,
                 isActive: dto.isActive,
                 category: dto.category,
+                categoryName: dto.categoryName,
+                offerId: dto.offerId,
+                offerName: dto.offerName,
                 subCategory: dto.subCategory,
                 region: dto.region,
                 platform: dto.platform,
@@ -89,10 +97,17 @@ const upsertCatalogProduct = async (providerId, dto, now) => {
         { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
-    const createdMs = doc.createdAt?.getTime() ?? 0;
-    const updatedMs = doc.updatedAt?.getTime() ?? 0;
-    return { doc, isNew: Math.abs(createdMs - updatedMs) < 100 };
+    return { doc, isNew: !existed };
 };
+
+const mergeCategoryFromOfferResponse = (category, offerPage) => ({
+    ...category,
+    ...Object.fromEntries(
+        Object.entries(offerPage.category || {}).filter(([, value]) => value !== undefined && value !== null && value !== '')
+    ),
+});
+
+const getCategoryId = (category = {}) => String(category.category_id || category.categoryId || category.id || '').trim();
 
 const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOptions = {}) => {
     const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
@@ -102,30 +117,83 @@ const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOp
         throw new BusinessRuleError('FazerCards provider is inactive.', 'PROVIDER_INACTIVE');
     }
 
-    const page = await adapter.fetchCatalogPage({ limit: normalizedLimit, cursor, category });
+    const page = await adapter.fetchTopupCategoriesPage({ limit: normalizedLimit, cursor });
     const now = new Date();
-    let upserted = 0;
-    let updated = 0;
+    let providerProductsCreated = 0;
+    let providerProductsUpdated = 0;
+    let offersFetched = 0;
+    let blocked = 0;
+    let unsupported = 0;
     const errors = [];
+    const categoryFilter = String(category || '').trim();
+    const categories = categoryFilter
+        ? page.items.filter((item) => getCategoryId(item) === categoryFilter)
+        : page.items;
 
-    for (const item of page.items) {
+    if (page.malformed) {
+        blocked++;
+        unsupported++;
+        errors.push('FazerCards top-up category response has an unknown shape');
+    }
+
+    for (const categoryItem of categories) {
+        const categoryId = getCategoryId(categoryItem);
+        if (!categoryId) {
+            blocked++;
+            unsupported++;
+            errors.push('FazerCards top-up category is missing category_id');
+            continue;
+        }
+
+        let offerPage;
         try {
-            const dto = adapter.normalizeCatalogProduct(item);
-            const { isNew } = await upsertCatalogProduct(provider._id, dto, now);
-            if (isNew) upserted++;
-            else updated++;
+            offerPage = await adapter.fetchTopupOffers(categoryId);
         } catch (err) {
-            errors.push(err.message || 'Failed to normalize FazerCards catalog product');
+            errors.push(err.message || `Failed to fetch FazerCards offers for ${categoryId}`);
+            continue;
+        }
+
+        if (offerPage.malformed) {
+            blocked++;
+            unsupported++;
+            errors.push(`FazerCards offers response for ${categoryId} has an unknown shape`);
+        }
+
+        offersFetched += offerPage.offers.length;
+        const mergedCategory = mergeCategoryFromOfferResponse(categoryItem, offerPage);
+
+        for (const offer of offerPage.offers) {
+            try {
+                const dto = adapter.normalizeTopupOfferProduct({
+                    category: mergedCategory,
+                    offer,
+                    fields: offerPage.fields,
+                });
+                if (dto.isBlocked) blocked++;
+                if (!dto.isSupported) unsupported++;
+                const { isNew } = await upsertCatalogProduct(provider._id, dto, now);
+                if (isNew) providerProductsCreated++;
+                else providerProductsUpdated++;
+            } catch (err) {
+                blocked++;
+                unsupported++;
+                errors.push(err.message || 'Failed to normalize FazerCards top-up offer');
+            }
         }
     }
 
     return {
         providerId: provider._id.toString(),
         provider: provider.name,
-        endpoint: 'GET /catalog',
-        totalFetched: page.items.length,
-        upserted,
-        updated,
+        endpoints: ['GET /topups', 'GET /topups/offers'],
+        categoriesFetched: categories.length,
+        offersFetched,
+        providerProductsCreated,
+        providerProductsUpdated,
+        blocked,
+        unsupported,
+        nextCursor: page.meta?.next_cursor ?? null,
+        hasMore: Boolean(page.meta?.has_more),
         deleted: 0,
         deactivated: 0,
         errors,
@@ -171,6 +239,9 @@ const listProviderProducts = async ({
             { translatedName: regex },
             { externalProductId: regex },
             { category: regex },
+            { categoryName: regex },
+            { offerId: regex },
+            { offerName: regex },
             { subCategory: regex },
             { region: regex },
         ];

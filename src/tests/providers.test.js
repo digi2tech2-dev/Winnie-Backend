@@ -17,7 +17,7 @@ const fazerCardsCatalogSvc = require('../modules/providers/fazercards/fazercards
 const { FazerCardsClient } = require('../modules/providers/fazercards/fazercards.client');
 const {
     FazerCardsAdapter,
-    normalizeCatalogProduct,
+    normalizeTopupOfferProduct,
 } = require('../modules/providers/fazercards/fazercards.adapter');
 const { PROVIDER_CODES } = require('../modules/providers/provider.constants');
 const {
@@ -141,50 +141,90 @@ describe('FazerCards client foundation', () => {
             code: 'FAZERCARDS_TIMEOUT',
         });
     });
+
+    it('subscription_inactive is mapped to a sync-safe FazerCards error', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockRejectedValueOnce({
+            response: {
+                status: 422,
+                headers: {},
+                data: { ok: false, code: 'subscription_inactive' },
+            },
+            message: 'subscription inactive',
+        });
+
+        const fazer = new FazerCardsClient({ enabled: true, apiKey: 'test-fazer-key' });
+        await expect(fazer.fetchTopupCategoriesPage({ limit: 10 })).rejects.toMatchObject({
+            code: 'FAZERCARDS_SUBSCRIPTION_INACTIVE',
+            message: 'FazerCards subscription is inactive. Renew it to sync top-up catalog.',
+        });
+    });
 });
 
 describe('FazerCards catalog normalization and raw sync', () => {
-    it('catalog product normalization handles missing and unknown fields conservatively', () => {
-        const normalized = normalizeCatalogProduct({});
+    it('top-up offer normalization handles missing and unknown fields conservatively', () => {
+        const normalized = normalizeTopupOfferProduct({});
 
         expect(normalized.providerCode).toBe(PROVIDER_CODES.FAZER_CARDS);
-        expect(normalized.externalProductId).toMatch(/^unknown:/);
-        expect(normalized.rawName).toBe('Unknown FazerCards product');
-        expect(normalized.fulfillmentMode).toBe(FULFILLMENT_MODES.UNKNOWN);
+        expect(normalized.externalProductId).toMatch(/^FAZER_TOPUP:unknown_category:unknown_offer:/);
+        expect(normalized.rawName).toBe('Unknown FazerCards category - Unknown FazerCards offer');
+        expect(normalized.fulfillmentMode).toBe(FULFILLMENT_MODES.TOPUP_WITH_FIELDS);
         expect(normalized.isSupported).toBe(false);
         expect(normalized.isBlocked).toBe(true);
-        expect(normalized.blockReason).toBe('UNSUPPORTED_FULFILLMENT_MODE');
+        expect(normalized.blockReason).toBe('MISSING_CATEGORY_ID');
     });
 
-    it('detects obvious top-up products with target fields as supported metadata only', () => {
-        const normalized = normalizeCatalogProduct({
-            sku_id: 'pubg-uc-global',
-            name: 'PUBG UC Top Up',
-            category: 'game-topups',
-            price_usd: '9.50',
-            currency: 'USD',
-            required_fields: [{ key: 'player_id', label: 'Player ID', required: true }],
+    it('normalizes top-up categories and offers into stable ProviderProduct DTOs', () => {
+        const normalized = normalizeTopupOfferProduct({
+            category: { category_id: '8_ball_pool', name: '8 Ball Pool' },
+            offer: { offer_id: 'golden_spin', name: 'Golden Spin', price_usd: '0.7487' },
+            fields: [{ key: 'user_id', label: 'Unique ID', type: 'text' }],
         });
 
+        expect(normalized.externalProductId).toBe('FAZER_TOPUP:8_ball_pool:golden_spin');
+        expect(normalized.rawName).toBe('8 Ball Pool - Golden Spin');
+        expect(normalized.category).toBe('8_ball_pool');
+        expect(normalized.categoryName).toBe('8 Ball Pool');
+        expect(normalized.offerId).toBe('golden_spin');
+        expect(normalized.offerName).toBe('Golden Spin');
+        expect(normalized.currency).toBe('USD');
+        expect(normalized.costPrice).toBe(0.7487);
         expect(normalized.fulfillmentMode).toBe(FULFILLMENT_MODES.TOPUP_WITH_FIELDS);
         expect(normalized.isSupported).toBe(true);
         expect(normalized.isBlocked).toBe(false);
-        expect(normalized.requiredFields[0].key).toBe('player_id');
+        expect(normalized.requiredFields).toEqual([
+            { key: 'user_id', label: 'Unique ID', required: true, type: 'text', options: [] },
+        ]);
+        expect(normalized.rawPayload).toMatchObject({
+            category: { category_id: '8_ball_pool' },
+            offer: { offer_id: 'golden_spin' },
+            fields: [{ key: 'user_id' }],
+        });
     });
 
-    it('detects code delivery but marks it blocked for this phase', () => {
-        const normalized = normalizeCatalogProduct({
-            sku_id: 'steam-us-10',
-            name: 'Steam $10 Gift Card',
-            category: 'gift-cards',
-            price_usd: '10.00',
-            stock: 20,
+    it('marks top-up offers without category-level fields unsupported and blocked', () => {
+        const normalized = normalizeTopupOfferProduct({
+            category: { category_id: '8_ball_pool', name: '8 Ball Pool' },
+            offer: { offer_id: 'golden_spin', name: 'Golden Spin', price_usd: '0.7487' },
+            fields: [],
         });
 
-        expect(normalized.fulfillmentMode).toBe(FULFILLMENT_MODES.CODE_DELIVERY);
         expect(normalized.isSupported).toBe(false);
         expect(normalized.isBlocked).toBe(true);
-        expect(normalized.blockReason).toBe('CODE_DELIVERY_NOT_SUPPORTED_IN_PHASE_1');
+        expect(normalized.blockReason).toBe('MISSING_REQUIRED_FIELDS');
+    });
+
+    it('marks top-up offers with invalid price unsupported and blocked', () => {
+        const normalized = normalizeTopupOfferProduct({
+            category: { category_id: '8_ball_pool', name: '8 Ball Pool' },
+            offer: { offer_id: 'golden_spin', name: 'Golden Spin', price_usd: 'free' },
+            fields: [{ key: 'user_id', label: 'Unique ID', type: 'text' }],
+        });
+
+        expect(normalized.isSupported).toBe(false);
+        expect(normalized.isBlocked).toBe(true);
+        expect(normalized.blockReason).toBe('INVALID_PRICE_USD');
     });
 
     it('blocked region rules mark products blocked but do not delete them', async () => {
@@ -197,64 +237,183 @@ describe('FazerCards catalog normalization and raw sync', () => {
                 ok: true,
                 items: [
                     {
-                        sku_id: 'steam-cis-10',
-                        name: 'Steam Gift CIS',
-                        category: 'gift-cards',
+                        category_id: 'steam_cis',
+                        name: 'Steam CIS',
                         region: 'CIS',
-                        price_usd: '10.00',
                     },
                 ],
                 meta: { next_cursor: null, has_more: false },
             },
         });
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: {},
+            data: {
+                ok: true,
+                kind: 'topup',
+                category_id: 'steam_cis',
+                name: 'Steam CIS',
+                offers: [{ offer_id: 'gift10', name: '$10', price_usd: '10.00' }],
+                fields: [{ key: 'user_id', label: 'User ID', type: 'text' }],
+            },
+        });
 
         const result = await fazerCardsCatalogSvc.syncCatalogPage({ limit: 100 });
-        const stored = await ProviderProduct.findOne({ externalProductId: 'steam-cis-10' }).lean();
+        const stored = await ProviderProduct.findOne({ externalProductId: 'FAZER_TOPUP:steam_cis:gift10' }).lean();
 
         expect(result.deleted).toBe(0);
         expect(result.deactivated).toBe(0);
+        expect(result.blocked).toBe(1);
+        expect(result.unsupported).toBe(1);
         expect(stored.isBlocked).toBe(true);
         expect(stored.blockReason).toBe('BLOCKED_REGION');
         expect(stored.isActive).toBe(true);
     });
 
-    it('raw catalog sync stores providerproducts without creating Winnie products', async () => {
+    it('top-up sync stores providerproducts without creating Winnie products or orders', async () => {
         const client = makeClient();
         axios.create.mockReturnValue(client);
         client.request.mockResolvedValueOnce({
             status: 200,
-            headers: { 'x-request-id': 'req-catalog' },
+            headers: { 'x-request-id': 'req-topups' },
             data: {
                 ok: true,
+                kind: 'topup',
                 items: [
                     {
-                        sku_id: 'pubg-uc-global',
-                        name: 'PUBG UC Top Up',
-                        category: 'game-topups',
-                        region: 'GLOBAL',
-                        price_usd: '9.50',
-                        required_fields: ['player_id'],
+                        category_id: '8_ball_pool',
+                        name: '8 Ball Pool',
+                        note: '8 Ball Pool top-up',
                     },
                 ],
-                meta: { total: 1, limit: 100, next_cursor: null, has_more: false },
+                meta: { total: 317, limit: 100, next_cursor: 'cursor-2', has_more: true },
+            },
+        });
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: { 'x-request-id': 'req-offers' },
+            data: {
+                ok: true,
+                kind: 'topup',
+                category_id: '8_ball_pool',
+                name: '8 Ball Pool',
+                offers: [
+                    {
+                        offer_id: 'golden_spin',
+                        name: 'Golden Spin',
+                        price_usd: '0.7487',
+                    },
+                ],
+                fields: [
+                    {
+                        key: 'user_id',
+                        label: 'Unique ID',
+                        type: 'text',
+                    },
+                ],
+                note: '8 Ball Pool top-up',
             },
         });
 
-        const result = await fazerCardsCatalogSvc.syncCatalogPage({ limit: 100, category: 'game-topups' });
-        const stored = await ProviderProduct.findOne({ externalProductId: 'pubg-uc-global' }).lean();
+        const result = await fazerCardsCatalogSvc.syncCatalogPage({ limit: 100, cursor: 'cursor-1' });
+        const stored = await ProviderProduct.findOne({ externalProductId: 'FAZER_TOPUP:8_ball_pool:golden_spin' }).lean();
         const productCount = await Product.countDocuments({});
 
         expect(result).toMatchObject({
-            endpoint: 'GET /catalog',
-            totalFetched: 1,
-            upserted: 1,
+            endpoints: ['GET /topups', 'GET /topups/offers'],
+            categoriesFetched: 1,
+            offersFetched: 1,
+            providerProductsCreated: 1,
+            providerProductsUpdated: 0,
+            blocked: 0,
+            unsupported: 0,
+            nextCursor: 'cursor-2',
+            hasMore: true,
             deleted: 0,
             deactivated: 0,
-            requestId: 'req-catalog',
+            requestId: 'req-topups',
         });
         expect(stored.providerCode).toBe(PROVIDER_CODES.FAZER_CARDS);
-        expect(stored.rawPayload).not.toHaveProperty('apiKey');
+        expect(stored.rawName).toBe('8 Ball Pool - Golden Spin');
+        expect(stored.category).toBe('8_ball_pool');
+        expect(stored.categoryName).toBe('8 Ball Pool');
+        expect(stored.offerId).toBe('golden_spin');
+        expect(stored.offerName).toBe('Golden Spin');
+        expect(stored.fulfillmentMode).toBe(FULFILLMENT_MODES.TOPUP_WITH_FIELDS);
+        expect(stored.requiredFields[0]).toMatchObject({
+            key: 'user_id',
+            label: 'Unique ID',
+            type: 'text',
+            required: true,
+        });
+        expect(stored.rawPayload).toMatchObject({
+            category: { category_id: '8_ball_pool' },
+            offer: { offer_id: 'golden_spin' },
+            fields: [{ key: 'user_id' }],
+        });
         expect(productCount).toBe(0);
+        expect(client.request).toHaveBeenNthCalledWith(1, expect.objectContaining({
+            method: 'get',
+            url: '/topups',
+            params: { limit: 100, cursor: 'cursor-1' },
+        }));
+        expect(client.request).toHaveBeenNthCalledWith(2, expect.objectContaining({
+            method: 'get',
+            url: '/topups/offers',
+            params: { category_id: '8_ball_pool' },
+        }));
+        expect(client.request.mock.calls.some(([call]) => call.url === '/catalog')).toBe(false);
+        expect(client.request.mock.calls.some(([call]) => call.url === '/topups/order')).toBe(false);
+    });
+
+    it('top-up sync updates existing ProviderProduct rows only', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        const provider = await fazerCardsCatalogSvc.ensureFazerCardsProvider();
+
+        await ProviderProduct.create({
+            provider: provider._id,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            externalProductId: 'FAZER_TOPUP:8_ball_pool:golden_spin',
+            rawName: 'Old Name',
+            rawPrice: '1.00',
+            category: '8_ball_pool',
+            fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
+            isSupported: true,
+            isBlocked: false,
+        });
+
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: {},
+            data: {
+                ok: true,
+                items: [{ category_id: '8_ball_pool', name: '8 Ball Pool' }],
+                meta: { next_cursor: null, has_more: false },
+            },
+        });
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: {},
+            data: {
+                ok: true,
+                category_id: '8_ball_pool',
+                name: '8 Ball Pool',
+                offers: [{ offer_id: 'golden_spin', name: 'Golden Spin', price_usd: '0.7487' }],
+                fields: [{ key: 'user_id', label: 'Unique ID', type: 'text' }],
+            },
+        });
+
+        const result = await fazerCardsCatalogSvc.syncCatalogPage({ limit: 10 });
+        const providerProductCount = await ProviderProduct.countDocuments({});
+        const productCount = await Product.countDocuments({});
+        const stored = await ProviderProduct.findOne({ externalProductId: 'FAZER_TOPUP:8_ball_pool:golden_spin' }).lean();
+
+        expect(result.providerProductsCreated).toBe(0);
+        expect(result.providerProductsUpdated).toBe(1);
+        expect(providerProductCount).toBe(1);
+        expect(productCount).toBe(0);
+        expect(stored.rawName).toBe('8 Ball Pool - Golden Spin');
     });
 
     it('unknown FazerCards provider products are not purchasable via publish/link', async () => {

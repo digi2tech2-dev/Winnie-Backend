@@ -34,6 +34,8 @@ const parseNumber = (value, fallback = null) => {
     return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const stableHash = (value) => Buffer.from(JSON.stringify(value || {})).toString('base64url').slice(0, 32);
+
 const normalizeRequiredFields = (item = {}) => {
     const rawFields = firstValue(
         item.required_fields,
@@ -125,60 +127,121 @@ const isBlockedRegion = (region, item = {}, blockedRegions = config.providers.fa
     ));
 };
 
-const normalizeCatalogProduct = (item = {}, options = {}) => {
-    const externalProductId = asString(firstValue(
-        item.sku_id,
-        item.skuId,
-        item.id,
-        item.product_id,
-        item.productId,
-        item.card_id,
-        item.key_id
+const normalizeTopupMeta = (data = {}, params = {}) => ({
+    total: data?.meta?.total ?? data?.total ?? null,
+    limit: data?.meta?.limit ?? data?.limit ?? params.limit ?? null,
+    next_cursor: data?.meta?.next_cursor ?? data?.meta?.nextCursor ?? data?.next_cursor ?? data?.nextCursor ?? null,
+    has_more: Boolean(data?.meta?.has_more ?? data?.meta?.hasMore ?? data?.has_more ?? data?.hasMore ?? false),
+});
+
+const normalizeTopupCategoryPage = (data = {}, params = {}) => {
+    const items = Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data?.categories)
+            ? data.categories
+            : Array.isArray(data)
+                ? data
+                : [];
+
+    return {
+        ok: data?.ok !== false,
+        items,
+        meta: normalizeTopupMeta(data, params),
+        malformed: !Array.isArray(data?.items) && !Array.isArray(data?.categories) && !Array.isArray(data),
+    };
+};
+
+const normalizeTopupOffersResponse = (data = {}) => {
+    const offers = Array.isArray(data?.offers)
+        ? data.offers
+        : Array.isArray(data?.items)
+            ? data.items
+            : [];
+    const fields = Array.isArray(data?.fields) ? data.fields : [];
+    const category = {
+        category_id: firstValue(data?.category_id, data?.categoryId, data?.category?.category_id),
+        name: firstValue(data?.name, data?.category_name, data?.categoryName, data?.category?.name),
+        note: data?.note,
+    };
+
+    return {
+        ok: data?.ok !== false,
+        category,
+        offers,
+        fields,
+        note: data?.note,
+        malformed: !Array.isArray(data?.offers),
+        raw: data,
+    };
+};
+
+const normalizeTopupOfferProduct = ({ category = {}, offer = {}, fields = [] } = {}, options = {}) => {
+    const categoryId = asString(firstValue(category.category_id, category.categoryId, category.id));
+    const categoryName = asString(firstValue(category.name, category.title, category.display_name), categoryId || 'Unknown FazerCards category');
+    const offerId = asString(firstValue(offer.offer_id, offer.offerId, offer.id, offer.sku_id, offer.skuId));
+    const offerName = asString(firstValue(offer.name, offer.title, offer.display_name), offerId || 'Unknown FazerCards offer');
+    const name = `${categoryName} - ${offerName}`;
+    const priceSource = firstValue(offer.price_usd, offer.priceUsd, offer.cost_usd, offer.costUsd);
+    const costPrice = parseNumber(priceSource, null);
+    const rawFields = Array.isArray(fields) ? fields : [];
+    const requiredFields = normalizeRequiredFields({ fields: rawFields });
+    const region = asString(firstValue(
+        offer.region,
+        offer.region_code,
+        offer.country,
+        offer.country_code,
+        offer.storefront,
+        category.region,
+        category.region_code,
+        category.country,
+        category.country_code,
+        category.storefront
     ));
-    const title = asString(firstValue(item.title, item.name, item.product_name, item.display_name), 'Unknown FazerCards product');
-    const category = asString(firstValue(item.category, item.category_slug, item.kind, item.type), 'unknown');
-    const subCategory = asString(firstValue(item.subCategory, item.sub_category, item.brand, item.brand_name));
-    const region = asString(firstValue(item.region, item.region_code, item.country, item.country_code, item.storefront));
-    const platform = asString(firstValue(item.platform, item.platform_name, item.device));
-    const currency = asString(firstValue(item.currency, item.price_currency, item.cost_currency), 'USD')?.toUpperCase();
-    const costPrice = asString(firstValue(item.costPrice, item.cost_price, item.price_usd, item.wholesale_price, item.price, item.cost), '0');
-    const stock = parseNumber(firstValue(item.stock, item.quantity_available, item.available_stock, item.qty), null);
-    const explicitAvailable = parseBoolean(firstValue(item.available, item.is_available, item.active, item.enabled, item.status), null);
-    const available = explicitAvailable !== null ? explicitAvailable : (stock === null ? true : stock > 0);
-    const requiredFields = normalizeRequiredFields(item);
-    const fulfillmentMode = classifyFulfillmentMode(item, requiredFields);
-    const regionBlocked = isBlockedRegion(region, item, options.blockedRegions);
-    const isCodeDelivery = fulfillmentMode === FULFILLMENT_MODES.CODE_DELIVERY;
-    const isSupported = fulfillmentMode === FULFILLMENT_MODES.TOPUP_WITH_FIELDS && requiredFields.length > 0;
-    const blockReason = regionBlocked
-        ? 'BLOCKED_REGION'
-        : isCodeDelivery
-            ? 'CODE_DELIVERY_NOT_SUPPORTED_IN_PHASE_1'
-            : !isSupported
-                ? 'UNSUPPORTED_FULFILLMENT_MODE'
-                : null;
+    const platform = asString(firstValue(offer.platform, offer.platform_name, category.platform, category.platform_name));
+    const regionBlocked = isBlockedRegion(region, { ...category, ...offer, title: name }, options.blockedRegions);
+    const hasValidPrice = priceSource !== undefined && priceSource !== null && priceSource !== '' && Number.isFinite(costPrice);
+    const problems = [];
+
+    if (!categoryId) problems.push('MISSING_CATEGORY_ID');
+    if (!offerId) problems.push('MISSING_OFFER_ID');
+    if (!hasValidPrice) problems.push('INVALID_PRICE_USD');
+    if (!Array.isArray(fields) || requiredFields.length === 0) problems.push('MISSING_REQUIRED_FIELDS');
+    if (regionBlocked) problems.push('BLOCKED_REGION');
+
+    const isSupported = problems.length === 0;
+    const blockReason = problems[0] || null;
+    const externalProductId = categoryId && offerId
+        ? `FAZER_TOPUP:${categoryId}:${offerId}`
+        : `FAZER_TOPUP:${categoryId || 'unknown_category'}:${offerId || `unknown_offer:${stableHash({ category, offer })}`}`;
 
     return {
         providerCode: PROVIDER_CODES.FAZER_CARDS,
-        externalProductId: externalProductId || `unknown:${Buffer.from(JSON.stringify(item)).toString('base64url').slice(0, 32)}`,
-        rawName: title,
-        title,
-        category,
-        subCategory,
+        externalProductId,
+        name,
+        rawName: name,
+        category: categoryId || 'unknown',
+        categoryName,
+        offerId,
+        offerName,
+        subCategory: null,
         region,
         platform,
-        currency,
+        currency: 'USD',
         costPrice,
-        rawPrice: costPrice,
-        available,
-        stock,
-        minQty: parseNumber(firstValue(item.min_order_quantity, item.minQty, item.min_qty, item.min), 1) || 1,
-        maxQty: parseNumber(firstValue(item.max_order_quantity, item.maxQty, item.max_qty, item.max), 9999) || 9999,
-        isActive: available,
-        rawPayload: sanitizePayload(item),
-        fulfillmentMode,
+        rawPrice: hasValidPrice ? String(priceSource) : '0',
+        available: true,
+        stock: null,
+        minQty: parseNumber(firstValue(offer.min_order_quantity, offer.minQty, offer.min_qty, offer.min), 1) || 1,
+        maxQty: parseNumber(firstValue(offer.max_order_quantity, offer.maxQty, offer.max_qty, offer.max), 9999) || 9999,
+        isActive: true,
+        rawPayload: {
+            category: sanitizePayload(category),
+            offer: sanitizePayload(offer),
+            fields: sanitizePayload(rawFields),
+        },
+        fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
         isSupported,
-        isBlocked: Boolean(blockReason),
+        isBlocked: !isSupported,
         blockReason,
         requiredFields,
     };
@@ -229,42 +292,50 @@ class FazerCardsAdapter extends BaseProviderAdapter {
         };
     }
 
-    async fetchCatalogPage(params = {}) {
-        const { data, requestId, status } = await this.client.fetchCatalogPage(params);
-        const items = Array.isArray(data?.items)
-            ? data.items
-            : Array.isArray(data?.products)
-                ? data.products
-                : Array.isArray(data)
-                    ? data
-                    : [];
-
-        if (!Array.isArray(items)) {
-            throw new BusinessRuleError('FazerCards catalog response is malformed.', 'FAZERCARDS_MALFORMED_RESPONSE');
-        }
-
+    async fetchTopupCategoriesPage(params = {}) {
+        const { data, requestId, status } = await this.client.fetchTopupCategoriesPage(params);
+        const page = normalizeTopupCategoryPage(data, params);
         return {
-            ok: data?.ok !== false,
-            items,
-            meta: data?.meta || {
-                total: data?.total ?? null,
-                limit: data?.limit ?? params.limit ?? null,
-                next_cursor: data?.next_cursor ?? data?.nextCursor ?? null,
-                has_more: data?.has_more ?? data?.hasMore ?? false,
-            },
+            ...page,
             requestId,
             status,
             raw: data,
         };
     }
 
-    normalizeCatalogProduct(item) {
-        return normalizeCatalogProduct(item, this.options);
+    async fetchTopupOffers(categoryId) {
+        if (!categoryId) {
+            throw new BusinessRuleError('FazerCards top-up category_id is required.', 'FAZERCARDS_MALFORMED_RESPONSE');
+        }
+        const { data, requestId, status } = await this.client.fetchTopupOffers({ categoryId });
+        return {
+            ...normalizeTopupOffersResponse(data),
+            requestId,
+            status,
+        };
+    }
+
+    normalizeTopupOfferProduct(input) {
+        return normalizeTopupOfferProduct(input, this.options);
     }
 
     async getProducts() {
-        const page = await this.fetchCatalogPage({ limit: this.options.limit || 100 });
-        return page.items.map((item) => this.normalizeCatalogProduct(item));
+        const page = await this.fetchTopupCategoriesPage({ limit: this.options.limit || 100 });
+        const products = [];
+        for (const category of page.items) {
+            const categoryId = asString(firstValue(category.category_id, category.categoryId, category.id));
+            if (!categoryId) continue;
+            const offerPage = await this.fetchTopupOffers(categoryId);
+            const mergedCategory = { ...category, ...offerPage.category };
+            for (const offer of offerPage.offers) {
+                products.push(this.normalizeTopupOfferProduct({
+                    category: mergedCategory,
+                    offer,
+                    fields: offerPage.fields,
+                }));
+            }
+        }
+        return products;
     }
 
     async placeOrder() {
@@ -282,7 +353,9 @@ class FazerCardsAdapter extends BaseProviderAdapter {
 
 module.exports = {
     FazerCardsAdapter,
-    normalizeCatalogProduct,
+    normalizeTopupOfferProduct,
+    normalizeTopupCategoryPage,
+    normalizeTopupOffersResponse,
     classifyFulfillmentMode,
     normalizeRequiredFields,
     isBlockedRegion,
