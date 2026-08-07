@@ -226,6 +226,24 @@ providerSchema.set('toObject', {
 
 // ─── Pre-save: auto-generate slug ───────────────────────────────────────────────
 
+providerSchema.pre('validate', async function enforceUniqueProviderIdentity() {
+    if (!this.isNew && !this.isModified('name') && !this.isModified('slug')) return;
+
+    const clauses = [];
+    if (this.name) clauses.push({ name: this.name });
+    if (this.slug) clauses.push({ slug: this.slug });
+    if (!clauses.length) return;
+
+    const existing = await this.constructor.exists({
+        _id: { $ne: this._id },
+        $or: clauses,
+    });
+
+    if (existing) {
+        throw new Error('Provider name or slug must be unique');
+    }
+});
+
 providerSchema.pre('save', function (next) {
     if (!this.slug && this.name) {
         this.slug = this.name

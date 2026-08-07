@@ -171,6 +171,16 @@ const getFazerCardsProviderProductDetails = catchAsync(async (req, res) => {
     sendSuccess(res, { product }, 'FazerCards provider product retrieved');
 });
 
+const previewFazerCardsProviderProductImport = catchAsync(async (req, res) => {
+    const preview = await fazerCardsCatalogSvc.getImportPreview(req.params.id);
+    sendSuccess(res, { preview }, 'FazerCards import preview retrieved');
+});
+
+const importFazerCardsProviderProduct = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.importProviderProduct(req.params.id, req.body, req.user._id);
+    sendCreated(res, data, data.action === 'updated' ? 'FazerCards product import updated' : 'FazerCards product imported as inactive draft');
+});
+
 module.exports = {
     listProviders,
     getProviderById,
@@ -197,4 +207,6 @@ module.exports = {
     syncFazerCardsCatalogPage,
     listFazerCardsProviderProducts,
     getFazerCardsProviderProductDetails,
+    previewFazerCardsProviderProductImport,
+    importFazerCardsProviderProduct,
 };

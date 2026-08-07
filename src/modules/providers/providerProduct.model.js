@@ -259,6 +259,21 @@ providerProductSchema.index(
     { name: 'provider_code_catalog_filters' }
 );
 
+providerProductSchema.pre('validate', async function enforceUniqueProviderProductIdentity() {
+    if (!this.isNew && !this.isModified('provider') && !this.isModified('externalProductId')) return;
+    if (!this.provider || !this.externalProductId) return;
+
+    const existing = await this.constructor.exists({
+        _id: { $ne: this._id },
+        provider: this.provider,
+        externalProductId: this.externalProductId,
+    });
+
+    if (existing) {
+        throw new Error('ProviderProduct externalProductId must be unique per provider');
+    }
+});
+
 const ProviderProduct = mongoose.model('ProviderProduct', providerProductSchema);
 
 module.exports = { ProviderProduct, FULFILLMENT_MODES };

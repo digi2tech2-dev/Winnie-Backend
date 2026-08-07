@@ -234,6 +234,13 @@ const productSchema = new mongoose.Schema(
             set: (v) => v != null ? String(v) : null,
         },
 
+        currency: {
+            type: String,
+            trim: true,
+            uppercase: true,
+            default: null,
+        },
+
         /**
          * Controls whether basePrice tracks the provider's rawPrice.
          *   'manual' (default) → admin-owned price, sync never overwrites.
@@ -252,6 +259,16 @@ const productSchema = new mongoose.Schema(
         syncPriceWithProvider: {
             type: Boolean,
             default: true,
+        },
+
+        syncNameWithProvider: {
+            type: Boolean,
+            default: false,
+        },
+
+        syncAvailabilityWithProvider: {
+            type: Boolean,
+            default: false,
         },
 
         /**
@@ -340,6 +357,26 @@ const productSchema = new mongoose.Schema(
             type: mongoose.Schema.Types.ObjectId,
             ref: 'ProviderProduct',
             default: null,
+        },
+
+        providerCode: {
+            type: String,
+            trim: true,
+            uppercase: true,
+            default: null,
+            index: true,
+        },
+
+        externalProductId: {
+            type: String,
+            trim: true,
+            default: null,
+            index: true,
+        },
+
+        providerExecutionEnabled: {
+            type: Boolean,
+            default: true,
         },
 
         // ── Audit ─────────────────────────────────────────────────────────────

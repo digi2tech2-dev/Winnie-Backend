@@ -462,7 +462,22 @@ const listFazerCardsProviderProductsQuery = Joi.object({
     available: Joi.boolean(),
     supported: Joi.boolean(),
     blocked: Joi.boolean(),
+    imported: Joi.boolean(),
     fulfillmentMode: Joi.string().trim().uppercase().valid('TOPUP_WITH_FIELDS', 'CODE_DELIVERY', 'UNKNOWN'),
+});
+
+const fazerCardsProviderProductImportSchema = Joi.object({
+    name: Joi.string().trim().min(2).max(200).allow('', null),
+    categoryId: Joi.string().trim().max(200).allow('', null),
+    category: Joi.string().trim().max(200).allow('', null),
+    description: Joi.string().trim().max(5000).allow('', null),
+    sellPrice: Joi.number().positive().required(),
+    currency: Joi.string().trim().uppercase().length(3).default('USD'),
+    image: Joi.string().trim().max(2048).allow('', null),
+    syncPriceFromProvider: Joi.boolean().default(false),
+    syncNameFromProvider: Joi.boolean().default(false),
+    syncAvailabilityFromProvider: Joi.boolean().default(true),
+    updateExisting: Joi.boolean().default(false),
 });
 
 const createCurrencySchema = Joi.object({
@@ -565,6 +580,7 @@ module.exports = {
         xenaProductConfig: xenaProductConfigSchema,
         xenaTargetVerification: xenaTargetVerificationSchema,
         fazerCardsCatalogSync: fazerCardsCatalogSyncSchema,
+        fazerCardsProviderProductImport: fazerCardsProviderProductImportSchema,
         listFazerCardsProviderProductsQuery,
         // Orders
         listOrdersQuery,

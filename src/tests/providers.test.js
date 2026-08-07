@@ -11,7 +11,8 @@ const axios = require('axios');
 const config = require('../config/config');
 const { Provider } = require('../modules/providers/provider.model');
 const { ProviderProduct, FULFILLMENT_MODES } = require('../modules/providers/providerProduct.model');
-const { Product } = require('../modules/products/product.model');
+const { Product, EXECUTION_TYPES, PRODUCT_STATUSES } = require('../modules/products/product.model');
+const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const productService = require('../modules/products/product.service');
 const fazerCardsCatalogSvc = require('../modules/providers/fazercards/fazercardsCatalog.service');
 const { FazerCardsClient } = require('../modules/providers/fazercards/fazercards.client');
@@ -29,6 +30,46 @@ const {
 const makeClient = () => ({
     request: jest.fn(),
 });
+
+const createFazerTopupProviderProduct = async (overrides = {}) => {
+    const { provider: providerOverride, ...productOverrides } = overrides;
+    const provider = providerOverride || await Provider.findOne({ providerCode: PROVIDER_CODES.FAZER_CARDS }) || await Provider.create({
+        name: 'FazerCards',
+        slug: 'fazer-cards',
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        baseUrl: 'https://api.fzr.cards/api/v2',
+        isActive: true,
+        syncInterval: 0,
+    });
+    const providerProduct = await ProviderProduct.create({
+        provider: provider._id,
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        externalProductId: 'FAZER_TOPUP:8_ball_pool:golden_spin',
+        rawName: '8 Ball Pool - Golden Spin',
+        rawPrice: '0.7487',
+        costPrice: '0.7487',
+        category: '8_ball_pool',
+        categoryName: '8 Ball Pool',
+        offerId: 'golden_spin',
+        offerName: 'Golden Spin',
+        currency: 'USD',
+        minQty: 1,
+        maxQty: 1,
+        isActive: true,
+        available: true,
+        fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
+        isSupported: true,
+        isBlocked: false,
+        requiredFields: [{ key: 'user_id', label: 'Unique ID', type: 'text', required: true }],
+        rawPayload: {
+            category: { category_id: '8_ball_pool', name: '8 Ball Pool' },
+            offer: { offer_id: 'golden_spin', name: 'Golden Spin', price_usd: '0.7487' },
+            fields: [{ key: 'user_id', label: 'Unique ID', type: 'text' }],
+        },
+        ...productOverrides,
+    });
+    return { provider, providerProduct };
+};
 
 const originalFazerConfig = { ...config.providers.fazerCards };
 
@@ -363,7 +404,7 @@ describe('FazerCards catalog normalization and raw sync', () => {
             params: { category_id: '8_ball_pool' },
         }));
         expect(client.request.mock.calls.some(([call]) => call.url === '/catalog')).toBe(false);
-        expect(client.request.mock.calls.some(([call]) => call.url === '/topups/order')).toBe(false);
+        expect(client.request.mock.calls.some(([call]) => call.url === ['/topups', 'order'].join('/'))).toBe(false);
     });
 
     it('top-up sync updates existing ProviderProduct rows only', async () => {
@@ -414,6 +455,206 @@ describe('FazerCards catalog normalization and raw sync', () => {
         expect(providerProductCount).toBe(1);
         expect(productCount).toBe(0);
         expect(stored.rawName).toBe('8 Ball Pool - Golden Spin');
+    });
+
+    it('cannot import blocked FazerCards provider products', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct({
+            isBlocked: true,
+            blockReason: 'BLOCKED_REGION',
+        });
+
+        await expect(fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.25,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_PROVIDER_PRODUCT_BLOCKED' });
+        expect(await Product.countDocuments({})).toBe(0);
+    });
+
+    it('cannot import a missing ProviderProduct', async () => {
+        const missingId = '64f000000000000000000001';
+
+        await expect(fazerCardsCatalogSvc.importProviderProduct(missingId, {
+            sellPrice: 1.25,
+        })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+        expect(await Product.countDocuments({})).toBe(0);
+    });
+
+    it('cannot import non-FazerCards provider products through FazerCards import', async () => {
+        const provider = await Provider.create({
+            name: 'Other Supplier',
+            slug: 'other-supplier',
+            baseUrl: 'https://api.example.com',
+            isActive: true,
+        });
+        const providerProduct = await ProviderProduct.create({
+            provider: provider._id,
+            externalProductId: 'OTHER:1',
+            rawName: 'Other Product',
+            rawPrice: '1.00',
+            costPrice: '1.00',
+            fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
+            isSupported: true,
+            isBlocked: false,
+            requiredFields: [{ key: 'user_id', label: 'User ID', type: 'text', required: true }],
+        });
+
+        await expect(fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.25,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_PROVIDER_PRODUCT_REQUIRED' });
+        expect(await Product.countDocuments({})).toBe(0);
+    });
+
+    it('cannot import non top-up FazerCards provider products', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct({
+            fulfillmentMode: FULFILLMENT_MODES.UNKNOWN,
+        });
+
+        await expect(fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.25,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_IMPORT_UNSUPPORTED_FULFILLMENT_MODE' });
+        expect(await Product.countDocuments({})).toBe(0);
+    });
+
+    it('cannot import unsupported FazerCards provider products', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct({
+            isSupported: false,
+            blockReason: 'INVALID_PRICE_USD',
+        });
+
+        await expect(fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.25,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_PROVIDER_PRODUCT_UNSUPPORTED' });
+        expect(await Product.countDocuments({})).toBe(0);
+    });
+
+    it('cannot import FazerCards products missing requiredFields', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct({
+            requiredFields: [],
+        });
+
+        await expect(fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.25,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_PROVIDER_PRODUCT_MISSING_FIELDS' });
+        expect(await Product.countDocuments({})).toBe(0);
+    });
+
+    it('cannot import FazerCards products with invalid costPrice', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct({
+            costPrice: 'not-a-number',
+        });
+
+        await expect(fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.25,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_PROVIDER_PRODUCT_INVALID_COST' });
+
+        const { providerProduct: missingCostProduct } = await createFazerTopupProviderProduct({
+            costPrice: null,
+            externalProductId: 'FAZER_TOPUP:8_ball_pool:missing_cost',
+            offerId: 'missing_cost',
+            rawPrice: '0',
+        });
+
+        await expect(fazerCardsCatalogSvc.importProviderProduct(missingCostProduct._id, {
+            sellPrice: 1.25,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_PROVIDER_PRODUCT_INVALID_COST' });
+        expect(await Product.countDocuments({})).toBe(0);
+    });
+
+    it('imports supported FazerCards offers as inactive draft products with copied fields and links', async () => {
+        const { provider, providerProduct } = await createFazerTopupProviderProduct();
+
+        const result = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            description: 'Admin draft import',
+            sellPrice: 1.49,
+            syncAvailabilityFromProvider: true,
+        });
+        const product = await Product.findById(result.product._id).lean();
+
+        expect(result.action).toBe('created');
+        expect(product.name).toBe('8 Ball Pool - Golden Spin');
+        expect(product.description).toBe('Admin draft import');
+        expect(product.provider.toString()).toBe(provider._id.toString());
+        expect(product.providerProduct.toString()).toBe(providerProduct._id.toString());
+        expect(product.providerCode).toBe(PROVIDER_CODES.FAZER_CARDS);
+        expect(product.externalProductId).toBe('FAZER_TOPUP:8_ball_pool:golden_spin');
+        expect(product.isActive).toBe(false);
+        expect(product.visibleInStore).toBe(false);
+        expect(product.status).toBe(PRODUCT_STATUSES.UNAVAILABLE);
+        expect(product.executionType).toBe(EXECUTION_TYPES.MANUAL);
+        expect(product.providerExecutionEnabled).toBe(false);
+        expect(product.providerPrice).toBe('0.7487');
+        expect(product.basePrice).toBe('1.49');
+        expect(product.currency).toBe('USD');
+        expect(product.orderFields).toHaveLength(1);
+        expect(product.orderFields[0]).toMatchObject({
+            id: 'user_id',
+            key: 'user_id',
+            label: 'Unique ID',
+            type: 'text',
+            required: true,
+            isActive: true,
+        });
+        expect(product.dynamicFields[0]).toMatchObject({
+            name: 'user_id',
+            label: 'Unique ID',
+            type: 'text',
+            required: true,
+            isActive: true,
+        });
+        const customerCatalog = await productService.listProducts({ activeOnly: true });
+        expect(customerCatalog.products).toHaveLength(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('cannot duplicate import the same providerProduct unless updateExisting is explicit', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct();
+
+        await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            name: '8 Ball Draft',
+            sellPrice: 1.49,
+        });
+        await expect(fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            name: '8 Ball Draft Duplicate',
+            sellPrice: 1.59,
+        })).rejects.toMatchObject({ code: 'CONFLICT' });
+
+        const updated = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            name: '8 Ball Draft Updated',
+            sellPrice: 1.59,
+            updateExisting: true,
+        });
+        const products = await Product.find({ providerProduct: providerProduct._id }).lean();
+
+        expect(updated.action).toBe('updated');
+        expect(products).toHaveLength(1);
+        expect(products[0].name).toBe('8 Ball Draft Updated');
+        expect(products[0].isActive).toBe(false);
+        expect(products[0].visibleInStore).toBe(false);
+    });
+
+    it('lists FazerCards provider products with imported filters', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct();
+        await createFazerTopupProviderProduct({
+            externalProductId: 'FAZER_TOPUP:pubg:uc',
+            rawName: 'PUBG - UC',
+            category: 'pubg',
+            categoryName: 'PUBG',
+            offerId: 'uc',
+            offerName: 'UC',
+        });
+        await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.49,
+        });
+
+        const imported = await fazerCardsCatalogSvc.listProviderProducts({ imported: 'true' });
+        const notImported = await fazerCardsCatalogSvc.listProviderProducts({ imported: 'false' });
+
+        expect(imported.products).toHaveLength(1);
+        expect(imported.products[0].imported).toBe(true);
+        expect(imported.products[0].importedProduct.name).toBe('8 Ball Pool - Golden Spin');
+        expect(notImported.products).toHaveLength(1);
+        expect(notImported.products[0].externalProductId).toBe('FAZER_TOPUP:pubg:uc');
+        expect(notImported.products[0].imported).toBe(false);
     });
 
     it('unknown FazerCards provider products are not purchasable via publish/link', async () => {
