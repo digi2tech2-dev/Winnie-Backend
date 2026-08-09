@@ -934,3 +934,133 @@ describe('FazerCards controlled top-up order execution', () => {
         }
     });
 });
+
+describe('FazerCards top-up dry-run payload preview', () => {
+    it('builds the exact top-up payload without calling FazerCards, creating orders, or wallet transactions', async () => {
+        const { product, providerProduct } = await createFazerTopupOrder({
+            providerExecutionEnabled: false,
+            customerFields: { user_id: 'not-used-by-dry-run' },
+        });
+        await Order.deleteMany({});
+        await WalletTransaction.deleteMany({});
+
+        const result = await fazerCardsCatalogSvc.buildTopupDryRun({
+            productId: product._id,
+            fields: { user_id: '00123456789' },
+        });
+
+        expect(result).toMatchObject({
+            success: true,
+            dryRun: true,
+            wouldCall: 'POST /topups/order',
+            provider: 'FazerCards',
+            idempotencyKeyPreview: 'fazercards:topup:DRY_RUN_PREVIEW',
+            product: {
+                id: product._id.toString(),
+                name: product.name,
+                providerExecutionEnabled: false,
+            },
+            providerProduct: {
+                id: providerProduct._id.toString(),
+                externalProductId: 'FAZER_TOPUP:8_ball_pool:golden_spin',
+                costPrice: '0.7487',
+                currency: 'USD',
+            },
+            payload: {
+                category_id: '8_ball_pool',
+                offer_id: 'golden_spin',
+                fields: { user_id: '00123456789' },
+            },
+        });
+        expect(result.requiredFields).toHaveLength(1);
+        expect(result.warnings).toContain('Dry run only. No FazerCards order was created.');
+        expect(result.warnings).toContain('Product execution is currently disabled.');
+        expect(axios.create).not.toHaveBeenCalled();
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+    });
+
+    it('preserves numeric-looking IDs as strings in dry-run payloads', async () => {
+        const { product } = await createFazerTopupOrder();
+        await Order.deleteMany({});
+
+        const result = await fazerCardsCatalogSvc.buildTopupDryRun({
+            productId: product._id,
+            fields: { user_id: '000123456789' },
+            orderId: 'preview-order-1',
+        });
+
+        expect(result.idempotencyKeyPreview).toBe('fazercards:topup:preview-order-1');
+        expect(result.payload.fields.user_id).toBe('000123456789');
+        expect(typeof result.payload.fields.user_id).toBe('string');
+        expect(await Order.countDocuments({})).toBe(0);
+    });
+
+    it('fails dry-run when required fields are missing', async () => {
+        const { product } = await createFazerTopupOrder();
+
+        await expect(fazerCardsCatalogSvc.buildTopupDryRun({
+            productId: product._id,
+            fields: {},
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_CUSTOMER_FIELDS_MISSING' });
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('fails dry-run for unsupported or blocked FazerCards provider products', async () => {
+        for (const providerProductOverrides of [
+            { isSupported: false, isBlocked: true, blockReason: 'MISSING_REQUIRED_FIELDS' },
+            { isSupported: true, isBlocked: true, blockReason: 'BLOCKED_REGION' },
+        ]) {
+            await clearCollections();
+            const { product } = await createFazerTopupOrder({ providerProductOverrides });
+
+            await expect(fazerCardsCatalogSvc.buildTopupDryRun({
+                productId: product._id,
+                fields: { user_id: '001234' },
+            })).rejects.toMatchObject({
+                code: providerProductOverrides.isSupported === false
+                    ? 'FAZERCARDS_PROVIDER_PRODUCT_UNSUPPORTED'
+                    : 'FAZERCARDS_PROVIDER_PRODUCT_BLOCKED',
+            });
+        }
+    });
+
+    it('fails dry-run for non-FazerCards products', async () => {
+        const provider = await Provider.create({
+            name: 'Mock Supplier',
+            slug: 'mock',
+            baseUrl: 'https://mock.example',
+            isActive: true,
+            syncInterval: 0,
+        });
+        const providerProduct = await ProviderProduct.create({
+            provider: provider._id,
+            externalProductId: 'mock-topup',
+            rawName: 'Mock Topup',
+            rawPrice: '1.00',
+            minQty: 1,
+            maxQty: 1,
+            isActive: true,
+            fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
+            isSupported: true,
+            isBlocked: false,
+            requiredFields: [{ key: 'user_id', label: 'User ID', type: 'text', required: true }],
+        });
+        const product = await Product.create({
+            name: 'Mock Product',
+            basePrice: '1.50',
+            minQty: 1,
+            maxQty: 1,
+            isActive: true,
+            provider: provider._id,
+            providerProduct: providerProduct._id,
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+        });
+
+        await expect(fazerCardsCatalogSvc.buildTopupDryRun({
+            productId: product._id,
+            fields: { user_id: '001234' },
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_PRODUCT_REQUIRED' });
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+});

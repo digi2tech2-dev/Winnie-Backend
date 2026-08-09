@@ -699,4 +699,6 @@ module.exports = {
     classifyFulfillmentMode,
     normalizeRequiredFields,
     isBlockedRegion,
+    extractTopupIdentifiers,
+    buildTopupFields,
 };

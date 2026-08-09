@@ -454,6 +454,14 @@ const fazerCardsCatalogSyncSchema = Joi.object({
     category: Joi.string().trim().max(120).allow('', null),
 });
 
+const fazerCardsTopupDryRunSchema = Joi.object({
+    productId: objectId().required().messages({
+        'any.required': 'productId is required',
+    }),
+    fields: Joi.object().unknown(true).default({}),
+    orderId: Joi.string().trim().max(128).allow('', null),
+});
+
 const listFazerCardsProviderProductsQuery = Joi.object({
     ...pagination,
     search: Joi.string().trim().max(200).allow('', null),
@@ -580,6 +588,7 @@ module.exports = {
         xenaProductConfig: xenaProductConfigSchema,
         xenaTargetVerification: xenaTargetVerificationSchema,
         fazerCardsCatalogSync: fazerCardsCatalogSyncSchema,
+        fazerCardsTopupDryRun: fazerCardsTopupDryRunSchema,
         fazerCardsProviderProductImport: fazerCardsProviderProductImportSchema,
         listFazerCardsProviderProductsQuery,
         // Orders

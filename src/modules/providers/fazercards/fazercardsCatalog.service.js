@@ -2,12 +2,12 @@
 
 const config = require('../../../config/config');
 const { Provider } = require('../provider.model');
-const { ProviderProduct } = require('../providerProduct.model');
+const { ProviderProduct, FULFILLMENT_MODES } = require('../providerProduct.model');
 const { Product, PRICING_MODES, EXECUTION_TYPES, PRODUCT_STATUSES } = require('../../products/product.model');
 const { Currency } = require('../../currency/currency.model');
 const { PROVIDER_CODES } = require('../provider.constants');
 const { BusinessRuleError, ConflictError, NotFoundError } = require('../../../shared/errors/AppError');
-const { FazerCardsAdapter } = require('./fazercards.adapter');
+const { FazerCardsAdapter, extractTopupIdentifiers, buildTopupFields } = require('./fazercards.adapter');
 
 const FAZERCARDS_SLUG = 'fazer-cards';
 
@@ -529,6 +529,111 @@ const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
     };
 };
 
+const normalizeProviderCode = (value) => String(value || '').trim().toUpperCase();
+
+const assertDryRunProduct = (product, providerProduct) => {
+    if (!product) throw new NotFoundError('Product');
+    if (!providerProduct) throw new NotFoundError('ProviderProduct');
+
+    const providerCode = normalizeProviderCode(
+        product.providerCode
+        || product.provider?.providerCode
+        || product.provider?.code
+        || product.provider?.slug
+        || providerProduct.providerCode
+        || providerProduct.provider?.providerCode
+        || providerProduct.provider?.slug
+    );
+    const slug = String(product.provider?.slug || providerProduct.provider?.slug || '').trim().toLowerCase();
+    if (providerCode !== PROVIDER_CODES.FAZER_CARDS && slug !== FAZERCARDS_SLUG) {
+        throw new BusinessRuleError('Product is not linked to FazerCards.', 'FAZERCARDS_PRODUCT_REQUIRED');
+    }
+    if (providerProduct.providerCode !== PROVIDER_CODES.FAZER_CARDS) {
+        throw new BusinessRuleError('Linked ProviderProduct is not a FazerCards product.', 'FAZERCARDS_PROVIDER_PRODUCT_REQUIRED');
+    }
+    if (providerProduct.fulfillmentMode !== FULFILLMENT_MODES.TOPUP_WITH_FIELDS) {
+        throw new BusinessRuleError('Only FazerCards TOPUP_WITH_FIELDS products can be dry-run.', 'FAZERCARDS_UNSUPPORTED_FULFILLMENT_MODE');
+    }
+    if (providerProduct.isSupported !== true) {
+        throw new BusinessRuleError('Unsupported FazerCards ProviderProduct cannot be dry-run.', 'FAZERCARDS_PROVIDER_PRODUCT_UNSUPPORTED');
+    }
+    if (providerProduct.isBlocked === true) {
+        throw new BusinessRuleError('Blocked FazerCards ProviderProduct cannot be dry-run.', 'FAZERCARDS_PROVIDER_PRODUCT_BLOCKED');
+    }
+    if (!Array.isArray(providerProduct.requiredFields) || providerProduct.requiredFields.length === 0) {
+        throw new BusinessRuleError('FazerCards ProviderProduct is missing required customer fields.', 'FAZERCARDS_REQUIRED_FIELDS_MISSING');
+    }
+
+    const rawCost = providerProduct.costPrice ?? providerProduct.rawPrice;
+    const cost = Number(rawCost);
+    if (rawCost === undefined || rawCost === null || rawCost === '' || !Number.isFinite(cost) || cost <= 0) {
+        throw new BusinessRuleError('FazerCards ProviderProduct has an invalid cost price.', 'FAZERCARDS_PROVIDER_PRODUCT_INVALID_COST');
+    }
+};
+
+const buildTopupDryRun = async ({ productId, fields = {}, orderId = null } = {}) => {
+    const product = await Product.findById(productId)
+        .populate('provider', 'name slug code providerCode')
+        .populate({
+            path: 'providerProduct',
+            select: 'provider providerCode externalProductId rawName costPrice rawPrice currency category offerId fulfillmentMode isSupported isBlocked requiredFields rawPayload',
+            populate: { path: 'provider', select: 'name slug providerCode' },
+        });
+    if (!product) throw new NotFoundError('Product');
+
+    const providerProduct = product.providerProduct;
+    assertDryRunProduct(product, providerProduct);
+
+    const { categoryId, offerId } = extractTopupIdentifiers(providerProduct);
+    if (!categoryId || !offerId) {
+        throw new BusinessRuleError(
+            'FazerCards top-up category_id and offer_id are required.',
+            !categoryId ? 'FAZERCARDS_CATEGORY_ID_MISSING' : 'FAZERCARDS_OFFER_ID_MISSING'
+        );
+    }
+
+    const { fields: payloadFields, missing } = buildTopupFields(fields, providerProduct.requiredFields);
+    if (missing.length > 0) {
+        throw new BusinessRuleError(
+            `Missing FazerCards customer field(s): ${missing.join(', ')}.`,
+            'FAZERCARDS_CUSTOMER_FIELDS_MISSING'
+        );
+    }
+
+    const suppliedOrderId = String(orderId || '').trim();
+    const idempotencyKeyPreview = `fazercards:topup:${suppliedOrderId || 'DRY_RUN_PREVIEW'}`;
+    const executionState = product.providerExecutionEnabled === true ? 'enabled' : 'disabled';
+
+    return {
+        success: true,
+        dryRun: true,
+        wouldCall: 'POST /topups/order',
+        provider: 'FazerCards',
+        idempotencyKeyPreview,
+        product: {
+            id: product._id.toString(),
+            name: product.name,
+            providerExecutionEnabled: product.providerExecutionEnabled === true,
+        },
+        providerProduct: {
+            id: providerProduct._id.toString(),
+            externalProductId: providerProduct.externalProductId,
+            costPrice: String(providerProduct.costPrice ?? providerProduct.rawPrice),
+            currency: providerProduct.currency || 'USD',
+        },
+        payload: {
+            category_id: categoryId,
+            offer_id: offerId,
+            fields: payloadFields,
+        },
+        requiredFields: providerProduct.requiredFields,
+        warnings: [
+            'Dry run only. No FazerCards order was created.',
+            `Product execution is currently ${executionState}.`,
+        ],
+    };
+};
+
 module.exports = {
     FAZERCARDS_SLUG,
     findFazerCardsProvider,
@@ -540,4 +645,5 @@ module.exports = {
     getProviderProductDetails,
     getImportPreview,
     importProviderProduct,
+    buildTopupDryRun,
 };

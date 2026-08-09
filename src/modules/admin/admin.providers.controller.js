@@ -181,6 +181,11 @@ const importFazerCardsProviderProduct = catchAsync(async (req, res) => {
     sendCreated(res, data, data.action === 'updated' ? 'FazerCards product import updated' : 'FazerCards product imported as inactive draft');
 });
 
+const dryRunFazerCardsTopup = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.buildTopupDryRun(req.body);
+    sendSuccess(res, data, 'FazerCards top-up dry run built');
+});
+
 module.exports = {
     listProviders,
     getProviderById,
@@ -209,4 +214,5 @@ module.exports = {
     getFazerCardsProviderProductDetails,
     previewFazerCardsProviderProductImport,
     importFazerCardsProviderProduct,
+    dryRunFazerCardsTopup,
 };
