@@ -637,6 +637,141 @@ const buildTopupDryRun = async ({ productId, fields = {}, orderId = null } = {})
     };
 };
 
+const getConfiguredMaxOrderUsd = () => {
+    const max = Number(config.providers.fazerCards.maxOrderUsd);
+    return Number.isFinite(max) && max > 0 ? max : null;
+};
+
+const loadFazerCardsProduct = async (productId) => {
+    const product = await Product.findById(productId)
+        .populate('provider', 'name slug code providerCode isActive baseUrl authType token encryptedCredentials')
+        .populate({
+            path: 'providerProduct',
+            select: 'provider providerCode externalProductId rawName costPrice rawPrice currency category offerId fulfillmentMode isSupported isBlocked requiredFields rawPayload',
+            populate: { path: 'provider', select: 'name slug code providerCode isActive baseUrl authType token encryptedCredentials' },
+        });
+    if (!product) throw new NotFoundError('Product');
+    return product;
+};
+
+const assertFazerCardsProductLink = (product) => {
+    const providerProduct = product?.providerProduct;
+    const providerCode = product?.providerCode
+        || product?.provider?.providerCode
+        || product?.provider?.code
+        || product?.provider?.slug
+        || providerProduct?.providerCode
+        || providerProduct?.provider?.providerCode
+        || providerProduct?.provider?.slug;
+    const providerSlug = String(product?.provider?.slug || providerProduct?.provider?.slug || '').trim().toLowerCase();
+
+    if (!isFazerCardsProviderCode(providerCode) && providerSlug !== FAZERCARDS_SLUG) {
+        throw new BusinessRuleError('Product is not linked to FazerCards.', 'FAZERCARDS_PRODUCT_REQUIRED');
+    }
+};
+
+const getProductReadiness = async (productId, adapterOptions = {}) => {
+    const product = await loadFazerCardsProduct(productId);
+    assertFazerCardsProductLink(product);
+
+    const providerProduct = product.providerProduct || null;
+    const identifiers = providerProduct ? extractTopupIdentifiers(providerProduct) : {};
+    const rawCost = providerProduct?.costPrice ?? providerProduct?.rawPrice;
+    const cost = Number(rawCost);
+    const costValid = rawCost !== undefined && rawCost !== null && rawCost !== '' && Number.isFinite(cost) && cost > 0;
+    const maxOrderUsd = getConfiguredMaxOrderUsd();
+    let balanceSufficient = 'unknown';
+    let balance = null;
+    const warnings = [];
+
+    if (config.providers.fazerCards.enabled === true && providerProduct && costValid) {
+        try {
+            const providerDoc = product.provider || providerProduct.provider || await findFazerCardsProvider();
+            const adapter = new FazerCardsAdapter(providerDoc, adapterOptions);
+            const balanceResult = await adapter.getBalance();
+            const parsedBalance = Number(balanceResult?.balance);
+            if (Number.isFinite(parsedBalance)) {
+                balance = parsedBalance;
+                balanceSufficient = parsedBalance >= cost;
+            } else {
+                warnings.push('FazerCards balance response did not include a valid balance.');
+            }
+        } catch (_) {
+            warnings.push('FazerCards balance could not be checked.');
+        }
+    } else if (config.providers.fazerCards.enabled !== true) {
+        warnings.push('FazerCards integration is disabled.');
+    }
+
+    const checks = {
+        fazerCardsEnabled: config.providers.fazerCards.enabled === true,
+        globalRealOrdersEnabled: config.providers.fazerCards.realOrdersEnabled === true,
+        productExecutionEnabled: product.providerExecutionEnabled === true,
+        linkedProviderProduct: Boolean(providerProduct),
+        supportedProviderProduct: providerProduct?.isSupported === true,
+        notBlocked: providerProduct ? providerProduct.isBlocked !== true : false,
+        hasCategoryId: Boolean(identifiers.categoryId),
+        hasOfferId: Boolean(identifiers.offerId),
+        hasRequiredFields: Array.isArray(providerProduct?.requiredFields) && providerProduct.requiredFields.length > 0,
+        costValid,
+        underMaxCost: maxOrderUsd === null ? true : costValid && cost <= maxOrderUsd,
+        balanceSufficient,
+        productVisible: product.visibleInStore === true,
+        productActive: product.isActive === true && product.status === PRODUCT_STATUSES.AVAILABLE,
+    };
+
+    if (!checks.globalRealOrdersEnabled) warnings.push('Global real order gate is disabled.');
+    if (!checks.productExecutionEnabled) warnings.push('Product provider execution is disabled.');
+    if (!checks.linkedProviderProduct) warnings.push('Product is not linked to a FazerCards ProviderProduct.');
+    if (!checks.supportedProviderProduct) warnings.push('Linked ProviderProduct is not supported.');
+    if (!checks.notBlocked) warnings.push('Linked ProviderProduct is blocked.');
+    if (!checks.hasCategoryId || !checks.hasOfferId) warnings.push('FazerCards category_id or offer_id is missing.');
+    if (!checks.hasRequiredFields) warnings.push('FazerCards required fields are missing.');
+    if (!checks.costValid) warnings.push('FazerCards ProviderProduct has an invalid cost price.');
+    if (!checks.underMaxCost) warnings.push('FazerCards order blocked by max cost guard.');
+    if (checks.balanceSufficient === false) warnings.push('FazerCards balance is insufficient for this provider cost.');
+    if (!checks.productVisible) warnings.push('Product is hidden from customers.');
+    if (!checks.productActive) warnings.push('Product is inactive or unavailable.');
+    if (!config.providers.fazerCards.topupOrderStatusPath) warnings.push('FazerCards top-up order status endpoint is not confirmed/configured.');
+
+    const readinessChecks = [
+        checks.fazerCardsEnabled,
+        checks.globalRealOrdersEnabled,
+        checks.productExecutionEnabled,
+        checks.linkedProviderProduct,
+        checks.supportedProviderProduct,
+        checks.notBlocked,
+        checks.hasCategoryId,
+        checks.hasOfferId,
+        checks.hasRequiredFields,
+        checks.costValid,
+        checks.underMaxCost,
+        checks.balanceSufficient === true,
+    ];
+
+    return {
+        success: true,
+        productId: product._id.toString(),
+        productName: product.name,
+        readyForLiveExecution: readinessChecks.every(Boolean),
+        checks,
+        providerProduct: providerProduct ? {
+            id: providerProduct._id.toString(),
+            externalProductId: providerProduct.externalProductId,
+            costPrice: String(rawCost ?? ''),
+            currency: providerProduct.currency || 'USD',
+            maxOrderUsd,
+            balance,
+        } : null,
+        warnings: [...new Set(warnings)],
+        nextActions: [
+            'Enable FAZERCARDS_REAL_ORDERS_ENABLED only for a controlled live test.',
+            'Enable providerExecutionEnabled only for one cheap product.',
+            'Use a real valid account ID.',
+        ],
+    };
+};
+
 const isFazerCardsProviderCode = (value) => {
     const normalized = String(value || '').trim();
     return normalized.toUpperCase() === PROVIDER_CODES.FAZER_CARDS
@@ -863,6 +998,7 @@ module.exports = {
     getImportPreview,
     importProviderProduct,
     buildTopupDryRun,
+    getProductReadiness,
     syncOrderStatus,
     getOrderProviderDebug,
 };

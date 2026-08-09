@@ -34,6 +34,11 @@ const parseNumber = (value, fallback = null) => {
     return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const getConfiguredMaxOrderUsd = () => {
+    const max = Number(config.providers.fazerCards.maxOrderUsd);
+    return Number.isFinite(max) && max > 0 ? max : null;
+};
+
 const stableHash = (value) => Buffer.from(JSON.stringify(value || {})).toString('base64url').slice(0, 32);
 
 const toPlainObject = (value) => {
@@ -584,6 +589,76 @@ class FazerCardsAdapter extends BaseProviderAdapter {
                 providerErrorCode: 'FAZERCARDS_CUSTOMER_FIELDS_MISSING',
                 providerErrorMessage: `Missing FazerCards customer field(s): ${missing.join(', ')}.`,
                 rawResponse: { missingFields: missing },
+            });
+        }
+
+        if (config.providers.fazerCards.enabled !== true) {
+            return buildManualReviewResult({
+                providerIdempotencyKey,
+                providerErrorCode: 'FAZERCARDS_DISABLED',
+                providerErrorMessage: 'FazerCards integration is disabled.',
+                rawResponse: { gate: 'FAZERCARDS_ENABLED' },
+            });
+        }
+
+        if (config.providers.fazerCards.realOrdersEnabled !== true) {
+            return buildManualReviewResult({
+                providerIdempotencyKey,
+                providerErrorCode: 'FAZERCARDS_REAL_ORDERS_DISABLED',
+                providerErrorMessage: 'FazerCards real orders are disabled by global safety gate.',
+                rawResponse: { gate: 'FAZERCARDS_REAL_ORDERS_ENABLED' },
+            });
+        }
+
+        const maxOrderUsd = getConfiguredMaxOrderUsd();
+        if (maxOrderUsd !== null && cost > maxOrderUsd) {
+            return buildManualReviewResult({
+                providerIdempotencyKey,
+                providerErrorCode: 'FAZERCARDS_MAX_COST_GUARD',
+                providerErrorMessage: 'FazerCards order blocked by max cost guard.',
+                rawResponse: { gate: 'FAZERCARDS_MAX_ORDER_USD', costPrice: cost, maxOrderUsd },
+            });
+        }
+
+        let balanceResult;
+        try {
+            balanceResult = await this.getBalance();
+        } catch (err) {
+            return buildManualReviewResult({
+                providerIdempotencyKey,
+                providerRequestId: err.requestId || null,
+                providerErrorCode: 'FAZERCARDS_BALANCE_UNKNOWN',
+                providerErrorMessage: 'FazerCards balance could not be checked; provider execution requires manual review.',
+                rawResponse: err.providerBody || {
+                    errorCode: err.code || 'FAZERCARDS_BALANCE_UNKNOWN',
+                    message: err.safeUpstreamMessage || err.message,
+                },
+            });
+        }
+
+        const balance = parseNumber(balanceResult?.balance, null);
+        if (!Number.isFinite(balance)) {
+            return buildManualReviewResult({
+                providerIdempotencyKey,
+                providerRequestId: balanceResult?.requestId || null,
+                providerErrorCode: 'FAZERCARDS_BALANCE_UNKNOWN',
+                providerErrorMessage: 'FazerCards balance response did not include a valid balance.',
+                rawResponse: balanceResult?.raw || { balance: balanceResult?.balance ?? null },
+            });
+        }
+
+        if (balance < cost) {
+            return buildRejectedResult({
+                providerIdempotencyKey,
+                providerStatus: 'Cancelled',
+                providerErrorCode: 'FAZERCARDS_INSUFFICIENT_PROVIDER_BALANCE',
+                providerErrorMessage: 'FazerCards balance is insufficient for this top-up order.',
+                rawResponse: {
+                    gate: 'FAZERCARDS_BALANCE_PREFLIGHT',
+                    balance,
+                    costPrice: cost,
+                    currency: balanceResult?.currency || providerProduct.currency || 'USD',
+                },
             });
         }
 

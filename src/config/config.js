@@ -126,6 +126,10 @@ const config = {
             apiKey: process.env.FAZERCARDS_API_KEY,
             timeoutMs: parseInt(process.env.FAZERCARDS_TIMEOUT_MS || '20000', 10),
             topupOrderStatusPath: process.env.FAZERCARDS_TOPUP_ORDER_STATUS_PATH || null,
+            realOrdersEnabled: process.env.FAZERCARDS_REAL_ORDERS_ENABLED === 'true',
+            maxOrderUsd: process.env.FAZERCARDS_MAX_ORDER_USD === undefined
+                ? 1.00
+                : parseFloat(process.env.FAZERCARDS_MAX_ORDER_USD),
             blockedRegions: (process.env.FAZERCARDS_BLOCKED_REGIONS || 'RU,RUSSIA,CIS')
                 .split(',')
                 .map((region) => region.trim().toUpperCase())

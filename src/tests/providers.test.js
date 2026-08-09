@@ -4,6 +4,7 @@ process.env.FAZERCARDS_ENABLED = 'true';
 process.env.FAZERCARDS_API_KEY = 'test-fazer-key';
 process.env.FAZERCARDS_API_BASE_URL = 'https://api.fzr.cards/api/v2';
 process.env.FAZERCARDS_TIMEOUT_MS = '20000';
+process.env.FAZERCARDS_REAL_ORDERS_ENABLED = 'false';
 
 jest.mock('axios');
 
@@ -153,6 +154,8 @@ beforeEach(async () => {
     config.providers.fazerCards.apiBaseUrl = 'https://api.fzr.cards/api/v2';
     config.providers.fazerCards.timeoutMs = 20000;
     config.providers.fazerCards.topupOrderStatusPath = null;
+    config.providers.fazerCards.realOrdersEnabled = false;
+    config.providers.fazerCards.maxOrderUsd = 1.00;
     config.providers.fazerCards.blockedRegions = ['RU', 'RUSSIA', 'CIS'];
     axios.create.mockReset();
     await clearCollections();
@@ -806,6 +809,23 @@ describe('FazerCards catalog normalization and raw sync', () => {
 });
 
 describe('FazerCards controlled top-up order execution', () => {
+    it('does not call FazerCards order creation when the global real-order gate is disabled', async () => {
+        const { order, customer } = await createFazerTopupOrder();
+        const before = (await User.findById(customer._id)).walletBalance;
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.refunded).toBe(false);
+        expect(updated.providerErrorCode).toBe('FAZERCARDS_REAL_ORDERS_DISABLED');
+        expect(updated.rejectionReason).toBe('FazerCards real orders are disabled by global safety gate.');
+        expect(refunded).toBe(false);
+        expect(client.request).not.toHaveBeenCalled();
+        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+    });
+
     it('does not call FazerCards when providerExecutionEnabled is false', async () => {
         const { order, customer } = await createFazerTopupOrder({ providerExecutionEnabled: false });
         const before = (await User.findById(customer._id)).walletBalance;
@@ -836,18 +856,89 @@ describe('FazerCards controlled top-up order execution', () => {
         expect(client.request).not.toHaveBeenCalled();
     });
 
-    it('builds the exact top-up payload and stable Idempotency-Key while preserving string IDs', async () => {
-        const { order } = await createFazerTopupOrder({ customerFields: { user_id: '00123456789' } });
+    it('blocks real orders when provider cost exceeds FAZERCARDS_MAX_ORDER_USD', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        config.providers.fazerCards.maxOrderUsd = 0.50;
+        const { order, customer } = await createFazerTopupOrder();
+        const before = (await User.findById(customer._id)).walletBalance;
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.refunded).toBe(false);
+        expect(updated.providerErrorCode).toBe('FAZERCARDS_MAX_COST_GUARD');
+        expect(updated.rejectionReason).toBe('FazerCards order blocked by max cost guard.');
+        expect(refunded).toBe(false);
+        expect(client.request).not.toHaveBeenCalled();
+        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+    });
+
+    it('preflight balance blocks provider call and refunds when provider balance is clearly insufficient', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        const { order, customer } = await createFazerTopupOrder({ walletDeducted: 50 });
         const client = makeClient();
         axios.create.mockReturnValue(client);
         client.request.mockResolvedValueOnce({
             status: 200,
-            headers: { 'x-request-id': 'req-topup' },
-            data: {
-                ok: true,
-                order: { id: 'fc_order_1', status: 'processing' },
-            },
+            headers: {},
+            data: { ok: true, balance: '0.10', currency: 'USD' },
         });
+
+        const { order: updated } = await executeOrder(order._id);
+        const refunds = await WalletTransaction.find({ userId: customer._id, type: 'REFUND' });
+
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(updated.providerErrorCode).toBe('FAZERCARDS_INSUFFICIENT_PROVIDER_BALANCE');
+        expect(refunds).toHaveLength(1);
+        expect(client.request).toHaveBeenCalledTimes(1);
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'get',
+            url: '/balance',
+        }));
+        expect(client.request.mock.calls.some(([call]) => call.url === ['/topups', 'order'].join('/'))).toBe(false);
+    });
+
+    it('preflight balance timeout moves to manual review without blind refund or provider order call', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        const { order, customer } = await createFazerTopupOrder({ walletDeducted: 50 });
+        const before = (await User.findById(customer._id)).walletBalance;
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockRejectedValueOnce({ code: 'ECONNABORTED', message: 'timeout of 20000ms exceeded' });
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.refunded).toBe(false);
+        expect(updated.providerErrorCode).toBe('FAZERCARDS_BALANCE_UNKNOWN');
+        expect(refunded).toBe(false);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+        expect(client.request).toHaveBeenCalledTimes(1);
+        expect(client.request.mock.calls.some(([call]) => call.url === ['/topups', 'order'].join('/'))).toBe(false);
+    });
+
+    it('builds the exact top-up payload and stable Idempotency-Key while preserving string IDs', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        const { order } = await createFazerTopupOrder({ customerFields: { user_id: '00123456789' } });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: { ok: true, balance: '10.00', currency: 'USD' },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: { 'x-request-id': 'req-topup' },
+                data: {
+                    ok: true,
+                    order: { id: 'fc_order_1', status: 'processing' },
+                },
+            });
 
         const { order: updated, refunded } = await executeOrder(order._id);
 
@@ -870,14 +961,21 @@ describe('FazerCards controlled top-up order execution', () => {
     });
 
     it('maps completed FazerCards status to completed orders', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
         const { order } = await createFazerTopupOrder();
         const client = makeClient();
         axios.create.mockReturnValue(client);
-        client.request.mockResolvedValueOnce({
-            status: 200,
-            headers: {},
-            data: { ok: true, order: { id: 'fc_done', status: 'succeeded' } },
-        });
+        client.request
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: { ok: true, balance: '10.00', currency: 'USD' },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: { ok: true, order: { id: 'fc_done', status: 'succeeded' } },
+            });
 
         const { order: updated, refunded } = await executeOrder(order._id);
 
@@ -888,14 +986,21 @@ describe('FazerCards controlled top-up order execution', () => {
     });
 
     it('maps failed FazerCards status to failed and refunds once', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
         const { order, customer } = await createFazerTopupOrder({ walletDeducted: 50 });
         const client = makeClient();
         axios.create.mockReturnValue(client);
-        client.request.mockResolvedValueOnce({
-            status: 200,
-            headers: {},
-            data: { ok: false, order: { id: 'fc_failed', status: 'failed', errorMessage: 'Rejected' } },
-        });
+        client.request
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: { ok: true, balance: '10.00', currency: 'USD' },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: { ok: false, order: { id: 'fc_failed', status: 'failed', errorMessage: 'Rejected' } },
+            });
 
         await executeOrder(order._id);
         await executeOrder(order._id);
@@ -924,10 +1029,16 @@ describe('FazerCards controlled top-up order execution', () => {
             },
         ]) {
             await clearCollections();
+            config.providers.fazerCards.realOrdersEnabled = true;
             const { order, customer } = await createFazerTopupOrder();
             const before = (await User.findById(customer._id)).walletBalance;
             const client = makeClient();
             axios.create.mockReturnValue(client);
+            client.request.mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: { ok: true, balance: '10.00', currency: 'USD' },
+            });
             if (scenario.error) {
                 client.request.mockRejectedValueOnce(scenario.error);
             } else {
@@ -1071,6 +1182,110 @@ describe('FazerCards top-up dry-run payload preview', () => {
             productId: product._id,
             fields: { user_id: '001234' },
         })).rejects.toMatchObject({ code: 'FAZERCARDS_PRODUCT_REQUIRED' });
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+});
+
+describe('FazerCards launch readiness gate', () => {
+    it('returns safe readiness checks without creating orders or provider top-up calls', async () => {
+        const { product, providerProduct } = await createFazerTopupOrder({
+            providerExecutionEnabled: false,
+            productOverrides: {
+                isActive: false,
+                visibleInStore: false,
+                status: PRODUCT_STATUSES.UNAVAILABLE,
+            },
+        });
+        await Order.deleteMany({});
+        await WalletTransaction.deleteMany({});
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: {},
+            data: { ok: true, balance: '10.00', currency: 'USD' },
+        });
+
+        const result = await fazerCardsCatalogSvc.getProductReadiness(product._id);
+
+        expect(result).toMatchObject({
+            success: true,
+            productId: product._id.toString(),
+            productName: product.name,
+            readyForLiveExecution: false,
+            checks: {
+                fazerCardsEnabled: true,
+                globalRealOrdersEnabled: false,
+                productExecutionEnabled: false,
+                linkedProviderProduct: true,
+                supportedProviderProduct: true,
+                notBlocked: true,
+                hasCategoryId: true,
+                hasOfferId: true,
+                hasRequiredFields: true,
+                costValid: true,
+                underMaxCost: true,
+                balanceSufficient: true,
+                productVisible: false,
+                productActive: false,
+            },
+            providerProduct: {
+                id: providerProduct._id.toString(),
+                externalProductId: 'FAZER_TOPUP:8_ball_pool:golden_spin',
+                costPrice: '0.7487',
+                currency: 'USD',
+                maxOrderUsd: 1,
+                balance: 10,
+            },
+        });
+        expect(result.warnings).toContain('Global real order gate is disabled.');
+        expect(result.warnings).toContain('Product is hidden from customers.');
+        expect(result.warnings).toContain('FazerCards top-up order status endpoint is not confirmed/configured.');
+        expect(result.nextActions).toContain('Use a real valid account ID.');
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+        expect(client.request).toHaveBeenCalledTimes(1);
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'get',
+            url: '/balance',
+        }));
+        expect(client.request.mock.calls.some(([call]) => call.url === ['/topups', 'order'].join('/'))).toBe(false);
+    });
+
+    it('rejects readiness checks for non-FazerCards products', async () => {
+        const provider = await Provider.create({
+            name: 'Mock Supplier',
+            slug: 'mock',
+            baseUrl: 'https://mock.example',
+            isActive: true,
+            syncInterval: 0,
+        });
+        const providerProduct = await ProviderProduct.create({
+            provider: provider._id,
+            externalProductId: 'mock-topup',
+            rawName: 'Mock Topup',
+            rawPrice: '1.00',
+            minQty: 1,
+            maxQty: 1,
+            isActive: true,
+            fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
+            isSupported: true,
+            isBlocked: false,
+            requiredFields: [{ key: 'user_id', label: 'User ID', type: 'text', required: true }],
+        });
+        const product = await Product.create({
+            name: 'Mock Product',
+            basePrice: '1.50',
+            minQty: 1,
+            maxQty: 1,
+            isActive: true,
+            provider: provider._id,
+            providerProduct: providerProduct._id,
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+        });
+
+        await expect(fazerCardsCatalogSvc.getProductReadiness(product._id))
+            .rejects.toMatchObject({ code: 'FAZERCARDS_PRODUCT_REQUIRED' });
         expect(axios.create).not.toHaveBeenCalled();
     });
 });
