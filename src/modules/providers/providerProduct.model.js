@@ -6,7 +6,21 @@ const { PROVIDER_CODES } = require('./provider.constants');
 const FULFILLMENT_MODES = Object.freeze({
     TOPUP_WITH_FIELDS: 'TOPUP_WITH_FIELDS',
     CODE_DELIVERY: 'CODE_DELIVERY',
+    STEAM_GIFT_INVITE: 'STEAM_GIFT_INVITE',
+    STEAM_TOPUP_WITH_LOGIN: 'STEAM_TOPUP_WITH_LOGIN',
+    TELEGRAM_STARS_TOPUP: 'TELEGRAM_STARS_TOPUP',
+    TELEGRAM_PREMIUM: 'TELEGRAM_PREMIUM',
+    MANUAL_SERVICE: 'MANUAL_SERVICE',
     UNKNOWN: 'UNKNOWN',
+});
+
+const SUPPORT_LEVELS = Object.freeze({
+    FULL_TOPUP_SUPPORTED: 'FULL_TOPUP_SUPPORTED',
+    CATALOG_ONLY: 'CATALOG_ONLY',
+    NEEDS_CODE_DELIVERY: 'NEEDS_CODE_DELIVERY',
+    NEEDS_SPECIAL_FIELDS: 'NEEDS_SPECIAL_FIELDS',
+    UNSUPPORTED: 'UNSUPPORTED',
+    DISCOVERY_UNCONFIRMED: 'DISCOVERY_UNCONFIRMED',
 });
 
 /**
@@ -187,6 +201,27 @@ const providerProductSchema = new mongoose.Schema(
             index: true,
         },
 
+        familyKey: {
+            type: String,
+            trim: true,
+            uppercase: true,
+            default: null,
+            index: true,
+        },
+
+        supportLevel: {
+            type: String,
+            enum: Object.values(SUPPORT_LEVELS),
+            default: null,
+            index: true,
+        },
+
+        executionBlocked: {
+            type: Boolean,
+            default: false,
+            index: true,
+        },
+
         isSupported: {
             type: Boolean,
             default: false,
@@ -259,6 +294,11 @@ providerProductSchema.index(
     { name: 'provider_code_catalog_filters' }
 );
 
+providerProductSchema.index(
+    { providerCode: 1, familyKey: 1, supportLevel: 1, blockReason: 1 },
+    { name: 'provider_code_family_filters' }
+);
+
 providerProductSchema.pre('validate', async function enforceUniqueProviderProductIdentity() {
     if (!this.isNew && !this.isModified('provider') && !this.isModified('externalProductId')) return;
     if (!this.provider || !this.externalProductId) return;
@@ -276,4 +316,4 @@ providerProductSchema.pre('validate', async function enforceUniqueProviderProduc
 
 const ProviderProduct = mongoose.model('ProviderProduct', providerProductSchema);
 
-module.exports = { ProviderProduct, FULFILLMENT_MODES };
+module.exports = { ProviderProduct, FULFILLMENT_MODES, SUPPORT_LEVELS };

@@ -161,6 +161,21 @@ const syncFazerCardsCatalogPage = catchAsync(async (req, res) => {
     sendSuccess(res, data, 'FazerCards top-up catalog page synced');
 });
 
+const listFazerCardsCatalogFamilies = catchAsync(async (req, res) => {
+    const data = fazerCardsCatalogSvc.listFamilies();
+    sendSuccess(res, data, 'FazerCards catalog families retrieved');
+});
+
+const syncFazerCardsCatalogFamily = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.syncCatalogFamily(req.body);
+    sendSuccess(res, data, 'FazerCards catalog family synced');
+});
+
+const getFazerCardsCatalogSummary = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.getCatalogSummary();
+    sendSuccess(res, data, 'FazerCards catalog summary retrieved');
+});
+
 const listFazerCardsProviderProducts = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.listProviderProducts(req.query);
     sendPaginated(res, data.products, data.pagination, 'FazerCards provider products retrieved');
@@ -225,6 +240,9 @@ module.exports = {
     testFazerCardsConnection,
     getFazerCardsBalance,
     syncFazerCardsCatalogPage,
+    listFazerCardsCatalogFamilies,
+    syncFazerCardsCatalogFamily,
+    getFazerCardsCatalogSummary,
     listFazerCardsProviderProducts,
     getFazerCardsProviderProductDetails,
     previewFazerCardsProviderProductImport,

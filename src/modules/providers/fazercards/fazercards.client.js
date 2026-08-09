@@ -182,6 +182,10 @@ class FazerCardsClient {
         });
     }
 
+    fetchCatalogPath(path, params = {}, context = 'catalog_family') {
+        return this.request('get', path, { params, context });
+    }
+
     createTopupOrder({ categoryId, offerId, fields, idempotencyKey } = {}) {
         return this.request('post', '/topups/order', {
             data: {

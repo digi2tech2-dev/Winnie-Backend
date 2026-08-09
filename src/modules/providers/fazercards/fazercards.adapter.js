@@ -358,6 +358,9 @@ const normalizeTopupOfferProduct = ({ category = {}, offer = {}, fields = [] } =
 
     return {
         providerCode: PROVIDER_CODES.FAZER_CARDS,
+        familyKey: 'TOPUPS',
+        supportLevel: 'FULL_TOPUP_SUPPORTED',
+        executionBlocked: false,
         externalProductId,
         name,
         rawName: name,
@@ -456,6 +459,11 @@ class FazerCardsAdapter extends BaseProviderAdapter {
             requestId,
             status,
         };
+    }
+
+    async fetchCatalogPath(path, params = {}, context = 'catalog_family') {
+        const { data, requestId, status } = await this.client.fetchCatalogPath(path, params, context);
+        return { data, requestId, status };
     }
 
     normalizeTopupOfferProduct(input) {

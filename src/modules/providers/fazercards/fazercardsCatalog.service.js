@@ -2,7 +2,7 @@
 
 const config = require('../../../config/config');
 const { Provider } = require('../provider.model');
-const { ProviderProduct, FULFILLMENT_MODES } = require('../providerProduct.model');
+const { ProviderProduct, FULFILLMENT_MODES, SUPPORT_LEVELS } = require('../providerProduct.model');
 const { Product, PRICING_MODES, EXECUTION_TYPES, PRODUCT_STATUSES } = require('../../products/product.model');
 const { Order, ORDER_STATUS } = require('../../orders/order.model');
 const { refundFailedOrder } = require('../../orders/orderFulfillment.service');
@@ -11,6 +11,7 @@ const { PROVIDER_CODES } = require('../provider.constants');
 const { BusinessRuleError, ConflictError, NotFoundError } = require('../../../shared/errors/AppError');
 const { FazerCardsAdapter, extractTopupIdentifiers, buildTopupFields } = require('./fazercards.adapter');
 const { sanitizePayload } = require('./fazercards.client');
+const { getFazerCardsFamily, listFazerCardsFamilies } = require('./fazercardsFamilies');
 
 const FAZERCARDS_SLUG = 'fazer-cards';
 
@@ -93,6 +94,9 @@ const upsertCatalogProduct = async (providerId, dto, now) => {
                 rawPayload: dto.rawPayload,
                 lastSyncedAt: now,
                 fulfillmentMode: dto.fulfillmentMode,
+                familyKey: dto.familyKey || null,
+                supportLevel: dto.supportLevel || null,
+                executionBlocked: dto.executionBlocked === true,
                 isSupported: dto.isSupported,
                 isBlocked: dto.isBlocked,
                 blockReason: dto.blockReason,
@@ -208,6 +212,348 @@ const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOp
     };
 };
 
+const firstValue = (...values) => values.find((value) => value !== undefined && value !== null && value !== '');
+
+const parseNumber = (value, fallback = null) => {
+    if (value === null || value === undefined || value === '') return fallback;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizeMeta = (data = {}, params = {}) => ({
+    total: data?.meta?.total ?? data?.total ?? null,
+    limit: data?.meta?.limit ?? data?.limit ?? params.limit ?? null,
+    next_cursor: data?.meta?.next_cursor ?? data?.meta?.nextCursor ?? data?.next_cursor ?? data?.nextCursor ?? null,
+    has_more: Boolean(data?.meta?.has_more ?? data?.meta?.hasMore ?? data?.has_more ?? data?.hasMore ?? false),
+});
+
+const listFamilies = () => ({
+    families: listFazerCardsFamilies().map((family) => ({
+        familyKey: family.familyKey,
+        displayName: family.displayName,
+        status: family.status,
+        catalogAvailable: family.catalogAvailable,
+        catalogEndpoints: family.catalogEndpoints,
+        optionalCatalogEndpoints: family.optionalCatalogEndpoints || [],
+        executionAvailable: family.executionAvailable,
+        executionEnabled: family.executionEnabled,
+        executionGloballyGated: family.executionGloballyGated === true,
+        fulfillmentMode: family.suggestedFulfillmentMode,
+        supportLevel: family.supportLevel,
+        warning: family.warning || null,
+    })),
+});
+
+const makeBlockedFamilyProduct = (family, overrides = {}) => ({
+    providerCode: PROVIDER_CODES.FAZER_CARDS,
+    familyKey: family.familyKey,
+    supportLevel: family.supportLevel,
+    executionBlocked: true,
+    fulfillmentMode: family.suggestedFulfillmentMode,
+    isSupported: false,
+    isBlocked: true,
+    blockReason: family.blockReason || 'EXECUTION_NOT_IMPLEMENTED',
+    isActive: true,
+    available: overrides.available ?? true,
+    minQty: overrides.minQty || 1,
+    maxQty: overrides.maxQty || 9999,
+    stock: overrides.stock ?? null,
+    currency: overrides.currency || 'USD',
+    requiredFields: overrides.requiredFields || [],
+    ...overrides,
+    rawPayload: sanitizePayload(overrides.rawPayload || {}),
+});
+
+const normalizeGiftCardProduct = (category = {}, offer = {}) => {
+    const family = getFazerCardsFamily('GIFTCARDS');
+    const categoryId = String(firstValue(category.category_id, category.categoryId, category.id, 'unknown_category'));
+    const cardId = String(firstValue(offer.card_id, offer.cardId, offer.id, 'unknown_card'));
+    const categoryName = String(firstValue(category.name, category.title, categoryId));
+    const offerName = String(firstValue(offer.name, offer.title, cardId));
+    const costPrice = parseNumber(firstValue(offer.price_usd, offer.priceUsd, offer.cost_usd), null);
+    return makeBlockedFamilyProduct(family, {
+        externalProductId: `FAZER_GIFTCARD:${categoryId}:${cardId}`,
+        name: `${categoryName} - ${offerName}`,
+        rawName: `${categoryName} - ${offerName}`,
+        rawPrice: costPrice === null ? '0' : String(firstValue(offer.price_usd, offer.priceUsd, offer.cost_usd)),
+        costPrice,
+        category: categoryId,
+        categoryName,
+        offerId: cardId,
+        offerName,
+        stock: parseNumber(offer.stock, null),
+        minQty: parseNumber(firstValue(offer.min_order_quantity, offer.minQty, offer.min), 1) || 1,
+        maxQty: parseNumber(firstValue(offer.max_order_quantity, offer.maxQty, offer.max), 9999) || 9999,
+        rawPayload: { family: family.familyKey, category, offer },
+    });
+};
+
+const normalizeGameKeyProduct = (game = {}, key = {}) => {
+    const family = getFazerCardsFamily('GAME_KEYS');
+    const gameId = String(firstValue(game.game_id, game.gameId, game.id, 'unknown_game'));
+    const keyId = String(firstValue(key.key_id, key.keyId, key.id, 'unknown_key'));
+    const gameName = String(firstValue(game.GameName, game.name, game.title, gameId));
+    const keyName = String(firstValue(key.name, key.title, keyId));
+    const costPrice = parseNumber(firstValue(key.price_usd, key.priceUsd, key.cost_usd), null);
+    return makeBlockedFamilyProduct(family, {
+        externalProductId: `FAZER_GAMEKEY:${gameId}:${keyId}`,
+        name: `${gameName} - ${keyName}`,
+        rawName: `${gameName} - ${keyName}`,
+        rawPrice: costPrice === null ? '0' : String(firstValue(key.price_usd, key.priceUsd, key.cost_usd)),
+        costPrice,
+        category: gameId,
+        categoryName: gameName,
+        offerId: keyId,
+        offerName: keyName,
+        region: firstValue(game.region, key.region, null),
+        platform: firstValue(game.platform, key.platform, null),
+        stock: parseNumber(key.stock, null),
+        minQty: parseNumber(firstValue(key.min_order_quantity, key.minQty, key.min), 1) || 1,
+        maxQty: parseNumber(firstValue(key.max_order_quantity, key.maxQty, key.max), 9999) || 9999,
+        rawPayload: { family: family.familyKey, game, key },
+    });
+};
+
+const normalizeSteamGiftProducts = (game = {}, details = {}) => {
+    const family = getFazerCardsFamily('STEAM_GIFTS');
+    const appId = String(firstValue(details.appid, game.appid, game.app_id, game.id, 'unknown_app'));
+    const gameName = String(firstValue(game.name, details.name, appId));
+    const offers = Array.isArray(details.offers) ? details.offers : [];
+    const products = [];
+    for (const offer of offers) {
+        const subId = String(firstValue(offer.sub_id, offer.subId, offer.id, 'unknown_sub'));
+        const offerName = String(firstValue(offer.name, gameName));
+        const regions = Array.isArray(offer.regions) && offer.regions.length ? offer.regions : [{ region: firstValue(offer.region, null), price: firstValue(offer.price, offer.price_usd, null) }];
+        for (const regionOffer of regions) {
+            const region = String(firstValue(regionOffer.region, 'GLOBAL'));
+            const costPrice = parseNumber(firstValue(regionOffer.price, regionOffer.price_usd, offer.price_usd), null);
+            products.push(makeBlockedFamilyProduct(family, {
+                externalProductId: `FAZER_STEAM_GIFT:${appId}:${subId}:${region}`,
+                name: `${gameName} - ${offerName} (${region})`,
+                rawName: `${gameName} - ${offerName} (${region})`,
+                rawPrice: costPrice === null ? '0' : String(firstValue(regionOffer.price, regionOffer.price_usd, offer.price_usd)),
+                costPrice,
+                category: appId,
+                categoryName: gameName,
+                offerId: subId,
+                offerName,
+                region,
+                platform: 'steam',
+                rawPayload: { family: family.familyKey, game, offer, region: regionOffer },
+            }));
+        }
+    }
+    return products;
+};
+
+const normalizeSteamTopupProducts = (ratesData = {}) => {
+    const family = getFazerCardsFamily('STEAM_TOPUP');
+    const rates = ratesData.rates && typeof ratesData.rates === 'object' ? ratesData.rates : {};
+    return Object.entries(rates).map(([currency, rate]) => makeBlockedFamilyProduct(family, {
+        externalProductId: `FAZER_STEAM_TOPUP:${String(currency).toUpperCase()}`,
+        name: `Steam Wallet Top-up - ${String(currency).toUpperCase()}`,
+        rawName: `Steam Wallet Top-up - ${String(currency).toUpperCase()}`,
+        rawPrice: '1',
+        costPrice: '1',
+        category: 'steam_topup',
+        categoryName: 'Steam Wallet Top-up',
+        offerId: String(currency).toUpperCase(),
+        offerName: String(currency).toUpperCase(),
+        currency: 'USD',
+        requiredFields: [{ key: 'steamLogin', label: 'Steam Login', type: 'text', required: true }],
+        rawPayload: { family: family.familyKey, rateCurrency: currency, rate, response: ratesData },
+    }));
+};
+
+const normalizeTelegramProducts = (starsData = {}, premiumData = {}) => {
+    const family = getFazerCardsFamily('TELEGRAM');
+    const products = [];
+    if (starsData?.price_per_star || starsData?.pricePerStar) {
+        const price = firstValue(starsData.price_per_star, starsData.pricePerStar);
+        products.push(makeBlockedFamilyProduct(family, {
+            externalProductId: 'FAZER_TELEGRAM:STARS',
+            name: 'Telegram Stars',
+            rawName: 'Telegram Stars',
+            rawPrice: String(price),
+            costPrice: parseNumber(price, null),
+            category: 'telegram',
+            categoryName: 'Telegram',
+            offerId: 'stars',
+            offerName: 'Stars',
+            fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
+            minQty: parseNumber(firstValue(starsData.min_amount, starsData.minAmount), 1) || 1,
+            maxQty: parseNumber(firstValue(starsData.max_amount, starsData.maxAmount), 9999) || 9999,
+            requiredFields: [{ key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true }],
+            rawPayload: { family: family.familyKey, kind: 'telegram_stars', response: starsData },
+        }));
+    }
+    for (const plan of Array.isArray(premiumData?.plans) ? premiumData.plans : []) {
+        const months = String(firstValue(plan.months, 'unknown'));
+        const price = firstValue(plan.price_usd, plan.priceUsd);
+        products.push(makeBlockedFamilyProduct(family, {
+            externalProductId: `FAZER_TELEGRAM:PREMIUM:${months}`,
+            name: `Telegram Premium - ${months} months`,
+            rawName: `Telegram Premium - ${months} months`,
+            rawPrice: String(price || '0'),
+            costPrice: parseNumber(price, null),
+            category: 'telegram',
+            categoryName: 'Telegram',
+            offerId: `premium_${months}`,
+            offerName: `${months} months`,
+            fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_PREMIUM,
+            requiredFields: [{ key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true }],
+            rawPayload: { family: family.familyKey, kind: 'telegram_premium', plan, response: premiumData },
+        }));
+    }
+    return products;
+};
+
+const normalizeManualServiceProduct = (category = {}, offer = {}) => {
+    const family = getFazerCardsFamily('MANUAL_SERVICES');
+    const serviceId = String(firstValue(category.id, category.manual_service_id, category.manualServiceId, 'unknown_service'));
+    const offerId = String(firstValue(offer.id, offer.product_id, offer.productId, 'unknown_offer'));
+    const categoryName = String(firstValue(category.name, category.title, serviceId));
+    const offerName = String(firstValue(offer.name, offer.title, offerId));
+    const price = firstValue(offer.price_usd, offer.priceUsd);
+    return makeBlockedFamilyProduct(family, {
+        externalProductId: `FAZER_MANUAL_SERVICE:${serviceId}:${offerId}`,
+        name: `${categoryName} - ${offerName}`,
+        rawName: `${categoryName} - ${offerName}`,
+        rawPrice: String(price || '0'),
+        costPrice: parseNumber(price, null),
+        category: serviceId,
+        categoryName,
+        offerId,
+        offerName,
+        subCategory: firstValue(category.kind, null),
+        requiredFields: [],
+        rawPayload: { family: family.familyKey, category, offer },
+    });
+};
+
+const syncFamilyDtos = async (family, adapter, { limit, cursor } = {}) => {
+    const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
+    if (family.familyKey === 'GIFTCARDS') {
+        const page = await adapter.fetchCatalogPath('/giftcards', { limit: normalizedLimit, cursor }, 'giftcards');
+        const categories = Array.isArray(page.data?.items) ? page.data.items : [];
+        const products = [];
+        for (const category of categories) {
+            const categoryId = getCategoryId(category);
+            if (!categoryId) continue;
+            const cards = await adapter.fetchCatalogPath('/giftcards/cards', { category_id: categoryId }, 'giftcards_cards');
+            const offers = Array.isArray(cards.data?.offers) ? cards.data.offers : [];
+            for (const offer of offers) products.push(normalizeGiftCardProduct({ ...category, ...cards.data }, offer));
+        }
+        return { products, categoriesFetched: categories.length, offersFetched: products.length, meta: normalizeMeta(page.data, { limit: normalizedLimit }), requestId: page.requestId };
+    }
+
+    if (family.familyKey === 'GAME_KEYS') {
+        const page = await adapter.fetchCatalogPath('/gamekeys', { limit: normalizedLimit, cursor }, 'gamekeys');
+        const games = Array.isArray(page.data?.items) ? page.data.items : [];
+        const products = [];
+        for (const game of games) {
+            const gameId = String(firstValue(game.game_id, game.gameId, game.id, '')).trim();
+            if (!gameId) continue;
+            const keys = await adapter.fetchCatalogPath('/gamekeys/keys', { game_id: gameId }, 'gamekeys_keys');
+            const keyItems = Array.isArray(keys.data?.keys) ? keys.data.keys : [];
+            const mergedGame = { ...game, ...keys.data };
+            for (const key of keyItems) products.push(normalizeGameKeyProduct(mergedGame, key));
+        }
+        return { products, categoriesFetched: games.length, offersFetched: products.length, meta: normalizeMeta(page.data, { limit: normalizedLimit }), requestId: page.requestId };
+    }
+
+    if (family.familyKey === 'STEAM_GIFTS') {
+        const page = await adapter.fetchCatalogPath('/steam-gifts/games', { limit: normalizedLimit }, 'steam_gifts_games');
+        const games = Array.isArray(page.data?.games) ? page.data.games : [];
+        const products = [];
+        for (const game of games) {
+            const appId = String(firstValue(game.appid, game.app_id, game.id, '')).trim();
+            if (!appId) continue;
+            const details = await adapter.fetchCatalogPath(`/steam-gifts/games/${encodeURIComponent(appId)}`, {}, 'steam_gifts_game_details');
+            products.push(...normalizeSteamGiftProducts(game, details.data));
+        }
+        return { products, categoriesFetched: games.length, offersFetched: products.length, meta: page.data?.meta || {}, requestId: page.requestId };
+    }
+
+    if (family.familyKey === 'STEAM_TOPUP') {
+        const rates = await adapter.fetchCatalogPath('/steam-topup/rates', {}, 'steam_topup_rates');
+        const products = normalizeSteamTopupProducts(rates.data);
+        return { products, categoriesFetched: 1, offersFetched: products.length, meta: {}, requestId: rates.requestId };
+    }
+
+    if (family.familyKey === 'TELEGRAM') {
+        const stars = await adapter.fetchCatalogPath('/telegram/stars', {}, 'telegram_stars');
+        const premium = await adapter.fetchCatalogPath('/telegram/premium', {}, 'telegram_premium');
+        const products = normalizeTelegramProducts(stars.data, premium.data);
+        return { products, categoriesFetched: 2, offersFetched: products.length, meta: {}, requestId: stars.requestId || premium.requestId };
+    }
+
+    if (family.familyKey === 'MANUAL_SERVICES') {
+        const page = await adapter.fetchCatalogPath('/manual-services', {}, 'manual_services');
+        const categories = Array.isArray(page.data?.items) ? page.data.items.slice(0, normalizedLimit) : [];
+        const products = [];
+        for (const category of categories) {
+            const serviceId = String(firstValue(category.id, category.manual_service_id, '')).trim();
+            if (!serviceId) continue;
+            const offers = await adapter.fetchCatalogPath(`/manual-services/${encodeURIComponent(serviceId)}/offers`, {}, 'manual_service_offers');
+            const offerItems = Array.isArray(offers.data?.items) ? offers.data.items : [];
+            const mergedCategory = { ...category, ...(offers.data?.category || {}) };
+            for (const offer of offerItems) products.push(normalizeManualServiceProduct(mergedCategory, offer));
+        }
+        return { products, categoriesFetched: categories.length, offersFetched: products.length, meta: {}, requestId: page.requestId };
+    }
+
+    throw new BusinessRuleError(`FazerCards family '${family.familyKey}' is not syncable yet.`, 'FAZERCARDS_FAMILY_DISCOVERY_UNCONFIRMED');
+};
+
+const syncCatalogFamily = async ({ family, limit = 20, cursor } = {}, adapterOptions = {}) => {
+    const registryEntry = getFazerCardsFamily(family);
+    if (!registryEntry || registryEntry.familyKey === 'UNKNOWN') {
+        throw new BusinessRuleError('Unknown FazerCards catalog family.', 'FAZERCARDS_UNKNOWN_FAMILY');
+    }
+    if (registryEntry.familyKey === 'TOPUPS') {
+        return syncCatalogPage({ limit, cursor }, adapterOptions);
+    }
+
+    const { provider, adapter } = await getConfiguredAdapter(adapterOptions);
+    if (!provider.isActive) {
+        throw new BusinessRuleError('FazerCards provider is inactive.', 'PROVIDER_INACTIVE');
+    }
+
+    const now = new Date();
+    const { products, categoriesFetched, offersFetched, meta, requestId } = await syncFamilyDtos(registryEntry, adapter, { limit, cursor });
+    let providerProductsCreated = 0;
+    let providerProductsUpdated = 0;
+    for (const dto of products) {
+        const { isNew } = await upsertCatalogProduct(provider._id, dto, now);
+        if (isNew) providerProductsCreated++;
+        else providerProductsUpdated++;
+    }
+
+    return {
+        providerId: provider._id.toString(),
+        provider: provider.name,
+        familyKey: registryEntry.familyKey,
+        displayName: registryEntry.displayName,
+        endpoints: registryEntry.catalogEndpoints,
+        categoriesFetched,
+        offersFetched,
+        providerProductsCreated,
+        providerProductsUpdated,
+        blocked: products.filter((product) => product.isBlocked).length,
+        unsupported: products.filter((product) => !product.isSupported).length,
+        nextCursor: meta?.next_cursor ?? null,
+        hasMore: Boolean(meta?.has_more),
+        deleted: 0,
+        deactivated: 0,
+        errors: [],
+        meta,
+        requestId,
+        syncedAt: now,
+        catalogOnly: registryEntry.executionAvailable !== true,
+    };
+};
+
 const parseBooleanFilter = (value) => {
     if (value === undefined || value === null || value === '') return undefined;
     return ['true', '1', 'yes'].includes(String(value).trim().toLowerCase());
@@ -226,11 +572,17 @@ const listProviderProducts = async ({
     blocked,
     imported,
     fulfillmentMode,
+    familyKey,
+    supportLevel,
+    blockReason,
 } = {}) => {
     const query = { providerCode: PROVIDER_CODES.FAZER_CARDS };
     if (category) query.category = String(category).trim();
     if (region) query.region = String(region).trim();
     if (fulfillmentMode) query.fulfillmentMode = String(fulfillmentMode).trim().toUpperCase();
+    if (familyKey) query.familyKey = String(familyKey).trim().toUpperCase();
+    if (supportLevel) query.supportLevel = String(supportLevel).trim().toUpperCase();
+    if (blockReason) query.blockReason = String(blockReason).trim().toUpperCase();
 
     const availableFilter = parseBooleanFilter(available);
     if (availableFilter !== undefined) query.available = availableFilter;
@@ -316,6 +668,46 @@ const listProviderProducts = async ({
             total,
             pages: Math.ceil(total / normalizedLimit),
         },
+    };
+};
+
+const getCatalogSummary = async () => {
+    const products = await ProviderProduct.find({ providerCode: PROVIDER_CODES.FAZER_CARDS })
+        .select('_id familyKey isSupported isBlocked')
+        .lean();
+    const importedProducts = await Product.find({
+        providerProduct: { $in: products.map((product) => product._id) },
+        deletedAt: null,
+    }).select('providerProduct').lean();
+    const importedIds = new Set(importedProducts.map((product) => String(product.providerProduct)));
+    const byFamily = {};
+
+    for (const family of listFazerCardsFamilies()) {
+        byFamily[family.familyKey] = { total: 0, supported: 0, blocked: 0, imported: 0 };
+    }
+
+    for (const product of products) {
+        const familyKey = product.familyKey || 'UNKNOWN';
+        if (!byFamily[familyKey]) byFamily[familyKey] = { total: 0, supported: 0, blocked: 0, imported: 0 };
+        byFamily[familyKey].total++;
+        if (product.isSupported === true) byFamily[familyKey].supported++;
+        if (product.isBlocked === true) byFamily[familyKey].blocked++;
+        if (importedIds.has(String(product._id))) byFamily[familyKey].imported++;
+    }
+
+    const nextRecommendedFamilies = listFazerCardsFamilies()
+        .filter((family) => family.familyKey !== 'TOPUPS' && family.familyKey !== 'UNKNOWN' && byFamily[family.familyKey]?.total > 0)
+        .map((family) => ({
+            familyKey: family.familyKey,
+            displayName: family.displayName,
+            supportLevel: family.supportLevel,
+            blocker: family.blockReason || null,
+        }));
+
+    return {
+        totalProviderProducts: products.length,
+        byFamily,
+        nextRecommendedFamilies,
     };
 };
 
@@ -993,6 +1385,9 @@ module.exports = {
     testConnection,
     getBalance,
     syncCatalogPage,
+    listFamilies,
+    syncCatalogFamily,
+    getCatalogSummary,
     listProviderProducts,
     getProviderProductDetails,
     getImportPreview,

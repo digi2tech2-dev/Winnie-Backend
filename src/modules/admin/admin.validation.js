@@ -454,6 +454,20 @@ const fazerCardsCatalogSyncSchema = Joi.object({
     category: Joi.string().trim().max(120).allow('', null),
 });
 
+const fazerCardsCatalogSyncFamilySchema = Joi.object({
+    family: Joi.string().trim().uppercase().valid(
+        'TOPUPS',
+        'GIFTCARDS',
+        'GAME_KEYS',
+        'STEAM_TOPUP',
+        'STEAM_GIFTS',
+        'TELEGRAM',
+        'MANUAL_SERVICES'
+    ).required(),
+    limit: Joi.number().integer().min(1).max(100).default(20),
+    cursor: Joi.string().trim().max(2048).allow('', null),
+});
+
 const fazerCardsTopupDryRunSchema = Joi.object({
     productId: objectId().required().messages({
         'any.required': 'productId is required',
@@ -471,7 +485,19 @@ const listFazerCardsProviderProductsQuery = Joi.object({
     supported: Joi.boolean(),
     blocked: Joi.boolean(),
     imported: Joi.boolean(),
-    fulfillmentMode: Joi.string().trim().uppercase().valid('TOPUP_WITH_FIELDS', 'CODE_DELIVERY', 'UNKNOWN'),
+    fulfillmentMode: Joi.string().trim().uppercase().valid(
+        'TOPUP_WITH_FIELDS',
+        'CODE_DELIVERY',
+        'STEAM_GIFT_INVITE',
+        'STEAM_TOPUP_WITH_LOGIN',
+        'TELEGRAM_STARS_TOPUP',
+        'TELEGRAM_PREMIUM',
+        'MANUAL_SERVICE',
+        'UNKNOWN'
+    ),
+    familyKey: Joi.string().trim().uppercase().max(80),
+    supportLevel: Joi.string().trim().uppercase().max(80),
+    blockReason: Joi.string().trim().uppercase().max(120),
 });
 
 const fazerCardsProviderProductImportSchema = Joi.object({
@@ -588,6 +614,7 @@ module.exports = {
         xenaProductConfig: xenaProductConfigSchema,
         xenaTargetVerification: xenaTargetVerificationSchema,
         fazerCardsCatalogSync: fazerCardsCatalogSyncSchema,
+        fazerCardsCatalogSyncFamily: fazerCardsCatalogSyncFamilySchema,
         fazerCardsTopupDryRun: fazerCardsTopupDryRunSchema,
         fazerCardsProviderProductImport: fazerCardsProviderProductImportSchema,
         listFazerCardsProviderProductsQuery,

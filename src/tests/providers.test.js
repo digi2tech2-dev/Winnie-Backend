@@ -808,6 +808,170 @@ describe('FazerCards catalog normalization and raw sync', () => {
     });
 });
 
+describe('FazerCards multi-family catalog discovery', () => {
+    it('family discovery returns known catalog families with non-topup execution disabled', () => {
+        const result = fazerCardsCatalogSvc.listFamilies();
+
+        expect(result.families.map((family) => family.familyKey)).toEqual(expect.arrayContaining([
+            'TOPUPS',
+            'GIFTCARDS',
+            'GAME_KEYS',
+            'STEAM_TOPUP',
+            'STEAM_GIFTS',
+            'TELEGRAM',
+            'MANUAL_SERVICES',
+            'UNKNOWN',
+        ]));
+        const topups = result.families.find((family) => family.familyKey === 'TOPUPS');
+        const giftcards = result.families.find((family) => family.familyKey === 'GIFTCARDS');
+        expect(topups).toMatchObject({
+            status: 'implemented',
+            catalogAvailable: true,
+            executionAvailable: true,
+            executionGloballyGated: true,
+            fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
+        });
+        expect(giftcards).toMatchObject({
+            status: 'catalog_only',
+            catalogAvailable: true,
+            executionAvailable: false,
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            supportLevel: 'NEEDS_CODE_DELIVERY',
+        });
+    });
+
+    it('sync-family rejects unknown families', async () => {
+        await expect(fazerCardsCatalogSvc.syncCatalogFamily({ family: 'NOPE' }))
+            .rejects.toMatchObject({ code: 'FAZERCARDS_UNKNOWN_FAMILY' });
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('syncs gift cards as blocked ProviderProducts without creating Products, Orders, or wallet transactions', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: { 'x-request-id': 'req-giftcats' },
+                data: {
+                    ok: true,
+                    kind: 'gift_card',
+                    items: [{ category_id: 'gc_steam_1', name: 'Steam USD' }],
+                    meta: { total: 1, limit: 20, next_cursor: null, has_more: false },
+                },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: {
+                    ok: true,
+                    kind: 'gift_card',
+                    category_id: 'gc_steam_1',
+                    name: 'Steam USD',
+                    offers: [{
+                        card_id: 'card_10usd',
+                        name: 'Steam - $10',
+                        price_usd: '10.5000',
+                        stock: 100,
+                        min_order_quantity: 1,
+                        max_order_quantity: 10,
+                    }],
+                },
+            });
+
+        const result = await fazerCardsCatalogSvc.syncCatalogFamily({ family: 'GIFTCARDS', limit: 20 });
+        const stored = await ProviderProduct.findOne({ externalProductId: 'FAZER_GIFTCARD:gc_steam_1:card_10usd' }).lean();
+
+        expect(result).toMatchObject({
+            familyKey: 'GIFTCARDS',
+            endpoints: ['GET /giftcards', 'GET /giftcards/cards'],
+            providerProductsCreated: 1,
+            providerProductsUpdated: 0,
+            blocked: 1,
+            unsupported: 1,
+            catalogOnly: true,
+            requestId: 'req-giftcats',
+        });
+        expect(stored).toMatchObject({
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            familyKey: 'GIFTCARDS',
+            supportLevel: 'NEEDS_CODE_DELIVERY',
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            isSupported: false,
+            isBlocked: true,
+            executionBlocked: true,
+            blockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+            rawName: 'Steam USD - Steam - $10',
+            category: 'gc_steam_1',
+            offerId: 'card_10usd',
+            costPrice: '10.5',
+        });
+        await expect(fazerCardsCatalogSvc.importProviderProduct(stored._id, { sellPrice: 12 }))
+            .rejects.toMatchObject({ code: 'FAZERCARDS_IMPORT_UNSUPPORTED_FULFILLMENT_MODE' });
+        expect(await Product.countDocuments({})).toBe(0);
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+        expect(client.request.mock.calls.some(([call]) => String(call.url).includes('/order'))).toBe(false);
+    });
+
+    it('syncs game keys as catalog-only code-delivery ProviderProducts and supports family filters', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: {
+                    ok: true,
+                    kind: 'game_key',
+                    items: [{ game_id: 'gk_example_1', name: 'Example Game', region: 'GLOBAL', platform: 'steam' }],
+                    meta: { total: 1, limit: 20, next_cursor: null, has_more: false },
+                },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: {
+                    ok: true,
+                    kind: 'game_key',
+                    game_id: 'gk_example_1',
+                    GameName: 'Example Game',
+                    region: 'GLOBAL',
+                    platform: 'steam',
+                    keys: [{
+                        key_id: 'key_sku_1',
+                        name: 'Standard edition',
+                        price_usd: '19.9900',
+                        stock: 5,
+                    }],
+                },
+            });
+
+        await fazerCardsCatalogSvc.syncCatalogFamily({ family: 'GAME_KEYS', limit: 20 });
+        const listed = await fazerCardsCatalogSvc.listProviderProducts({ familyKey: 'GAME_KEYS' });
+        const summary = await fazerCardsCatalogSvc.getCatalogSummary();
+
+        expect(listed.products).toHaveLength(1);
+        expect(listed.products[0]).toMatchObject({
+            familyKey: 'GAME_KEYS',
+            supportLevel: 'NEEDS_CODE_DELIVERY',
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            blockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+            imported: false,
+        });
+        expect(summary.byFamily.GAME_KEYS).toMatchObject({
+            total: 1,
+            supported: 0,
+            blocked: 1,
+            imported: 0,
+        });
+        expect(summary.nextRecommendedFamilies.map((family) => family.familyKey)).toContain('GAME_KEYS');
+        expect(await Product.countDocuments({})).toBe(0);
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(client.request.mock.calls.some(([call]) => String(call.url).includes('/order'))).toBe(false);
+    });
+});
+
 describe('FazerCards controlled top-up order execution', () => {
     it('does not call FazerCards order creation when the global real-order gate is disabled', async () => {
         const { order, customer } = await createFazerTopupOrder();
