@@ -561,6 +561,84 @@ const parseBooleanFilter = (value) => {
 
 const parseImportedFilter = parseBooleanFilter;
 
+const hasTopupPayloadShape = (product = {}) => Boolean(
+    product.rawPayload?.category
+    && product.rawPayload?.offer
+    && (
+        product.rawPayload.category.category_id
+        || product.rawPayload.category.categoryId
+        || product.rawPayload.category.id
+    )
+    && (
+        product.rawPayload.offer.offer_id
+        || product.rawPayload.offer.offerId
+        || product.rawPayload.offer.id
+    )
+);
+
+const isLegacyTopupProviderProduct = (product = {}) => (
+    product.providerCode === PROVIDER_CODES.FAZER_CARDS
+    && (
+        String(product.externalProductId || '').startsWith('FAZER_TOPUP:')
+        || product.fulfillmentMode === FULFILLMENT_MODES.TOPUP_WITH_FIELDS
+        || hasTopupPayloadShape(product)
+    )
+);
+
+const inferFazerCardsFamilyKey = (product = {}) => {
+    const explicit = String(product.familyKey || '').trim().toUpperCase();
+    if (explicit && explicit !== 'UNKNOWN') return explicit;
+    if (isLegacyTopupProviderProduct(product)) return 'TOPUPS';
+    return explicit || 'UNKNOWN';
+};
+
+const addAndCondition = (query, condition) => {
+    if (!condition || Object.keys(condition).length === 0) return;
+    if (!query.$and) query.$and = [];
+    query.$and.push(condition);
+};
+
+const buildFamilyFilter = (familyKey) => {
+    const normalized = String(familyKey || '').trim().toUpperCase();
+    if (!normalized) return null;
+    if (normalized === 'TOPUPS') {
+        return {
+            $or: [
+                { familyKey: 'TOPUPS' },
+                { externalProductId: /^FAZER_TOPUP:/ },
+                { fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS },
+                {
+                    'rawPayload.category': { $exists: true },
+                    'rawPayload.offer': { $exists: true },
+                },
+            ],
+        };
+    }
+    if (normalized === 'UNKNOWN') {
+        return {
+            $and: [
+                {
+                    $or: [
+                        { familyKey: { $exists: false } },
+                        { familyKey: null },
+                        { familyKey: '' },
+                        { familyKey: 'UNKNOWN' },
+                    ],
+                },
+                { externalProductId: { $not: /^FAZER_TOPUP:/ } },
+                { fulfillmentMode: { $ne: FULFILLMENT_MODES.TOPUP_WITH_FIELDS } },
+                {
+                    $nor: [{
+                        'rawPayload.category': { $exists: true },
+                        'rawPayload.offer': { $exists: true },
+                    }],
+                },
+            ],
+        };
+    }
+    return { familyKey: normalized };
+};
+
 const listProviderProducts = async ({
     page = 1,
     limit = 50,
@@ -580,7 +658,7 @@ const listProviderProducts = async ({
     if (category) query.category = String(category).trim();
     if (region) query.region = String(region).trim();
     if (fulfillmentMode) query.fulfillmentMode = String(fulfillmentMode).trim().toUpperCase();
-    if (familyKey) query.familyKey = String(familyKey).trim().toUpperCase();
+    addAndCondition(query, buildFamilyFilter(familyKey));
     if (supportLevel) query.supportLevel = String(supportLevel).trim().toUpperCase();
     if (blockReason) query.blockReason = String(blockReason).trim().toUpperCase();
 
@@ -609,7 +687,7 @@ const listProviderProducts = async ({
     if (search) {
         const escaped = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const regex = new RegExp(escaped, 'i');
-        query.$or = [
+        addAndCondition(query, { $or: [
             { rawName: regex },
             { translatedName: regex },
             { externalProductId: regex },
@@ -619,7 +697,7 @@ const listProviderProducts = async ({
             { offerName: regex },
             { subCategory: regex },
             { region: regex },
-        ];
+        ] });
     }
 
     const normalizedPage = Math.max(parseInt(page, 10) || 1, 1);
@@ -673,7 +751,7 @@ const listProviderProducts = async ({
 
 const getCatalogSummary = async () => {
     const products = await ProviderProduct.find({ providerCode: PROVIDER_CODES.FAZER_CARDS })
-        .select('_id familyKey isSupported isBlocked')
+        .select('_id providerCode externalProductId familyKey fulfillmentMode rawPayload isSupported isBlocked')
         .lean();
     const importedProducts = await Product.find({
         providerProduct: { $in: products.map((product) => product._id) },
@@ -687,7 +765,7 @@ const getCatalogSummary = async () => {
     }
 
     for (const product of products) {
-        const familyKey = product.familyKey || 'UNKNOWN';
+        const familyKey = inferFazerCardsFamilyKey(product);
         if (!byFamily[familyKey]) byFamily[familyKey] = { total: 0, supported: 0, blocked: 0, imported: 0 };
         byFamily[familyKey].total++;
         if (product.isSupported === true) byFamily[familyKey].supported++;
@@ -708,6 +786,58 @@ const getCatalogSummary = async () => {
         totalProviderProducts: products.length,
         byFamily,
         nextRecommendedFamilies,
+    };
+};
+
+const backfillLegacyFamilies = async () => {
+    const matcher = {
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        $or: [
+            { externalProductId: /^FAZER_TOPUP:/ },
+            { fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS },
+            {
+                'rawPayload.category': { $exists: true },
+                'rawPayload.offer': { $exists: true },
+            },
+        ],
+    };
+    const candidates = await ProviderProduct.find(matcher)
+        .select('_id providerCode externalProductId familyKey supportLevel executionBlocked fulfillmentMode rawPayload')
+        .lean();
+
+    let matched = 0;
+    let updated = 0;
+    let skipped = 0;
+    const byFamily = { TOPUPS: 0 };
+
+    for (const product of candidates) {
+        if (!isLegacyTopupProviderProduct(product)) {
+            continue;
+        }
+        matched++;
+        byFamily.TOPUPS++;
+
+        const set = {};
+        const explicitFamily = String(product.familyKey || '').trim().toUpperCase();
+        if (!explicitFamily || explicitFamily === 'UNKNOWN') set.familyKey = 'TOPUPS';
+        if (!product.supportLevel) set.supportLevel = SUPPORT_LEVELS.FULL_TOPUP_SUPPORTED;
+        if (product.executionBlocked !== false) set.executionBlocked = false;
+
+        if (Object.keys(set).length === 0) {
+            skipped++;
+            continue;
+        }
+
+        const result = await ProviderProduct.updateOne({ _id: product._id }, { $set: set });
+        if ((result.modifiedCount || 0) > 0) updated++;
+    }
+
+    return {
+        success: true,
+        matched,
+        updated,
+        skipped,
+        byFamily,
     };
 };
 
@@ -1388,6 +1518,7 @@ module.exports = {
     listFamilies,
     syncCatalogFamily,
     getCatalogSummary,
+    backfillLegacyFamilies,
     listProviderProducts,
     getProviderProductDetails,
     getImportPreview,

@@ -970,6 +970,125 @@ describe('FazerCards multi-family catalog discovery', () => {
         expect(await Order.countDocuments({})).toBe(0);
         expect(client.request.mock.calls.some(([call]) => String(call.url).includes('/order'))).toBe(false);
     });
+
+    it('counts legacy top-up ProviderProducts under TOPUPS summary before backfill', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct();
+        await ProviderProduct.findByIdAndUpdate(providerProduct._id, {
+            $unset: { familyKey: '', supportLevel: '' },
+            $set: { executionBlocked: false },
+        });
+
+        const summary = await fazerCardsCatalogSvc.getCatalogSummary();
+
+        expect(summary.totalProviderProducts).toBe(1);
+        expect(summary.byFamily.TOPUPS).toMatchObject({
+            total: 1,
+            supported: 1,
+            blocked: 0,
+            imported: 0,
+        });
+        expect(summary.byFamily.UNKNOWN.total).toBe(0);
+    });
+
+    it('familyKey=TOPUPS listing includes legacy rows and UNKNOWN excludes them', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct();
+        await ProviderProduct.findByIdAndUpdate(providerProduct._id, {
+            $unset: { familyKey: '', supportLevel: '' },
+        });
+        await ProviderProduct.create({
+            provider: providerProduct.provider,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            externalProductId: 'FAZER_UNKNOWN:one',
+            rawName: 'Unknown Fazer Product',
+            rawPrice: '1.00',
+            isActive: true,
+            fulfillmentMode: FULFILLMENT_MODES.UNKNOWN,
+            isSupported: false,
+            isBlocked: true,
+            blockReason: 'DISCOVERY_UNCONFIRMED',
+        });
+
+        const topups = await fazerCardsCatalogSvc.listProviderProducts({ familyKey: 'TOPUPS' });
+        const unknown = await fazerCardsCatalogSvc.listProviderProducts({ familyKey: 'UNKNOWN' });
+
+        expect(topups.products).toHaveLength(1);
+        expect(topups.products[0].externalProductId).toBe('FAZER_TOPUP:8_ball_pool:golden_spin');
+        expect(unknown.products).toHaveLength(1);
+        expect(unknown.products[0].externalProductId).toBe('FAZER_UNKNOWN:one');
+    });
+
+    it('backfills legacy top-up classification without creating Products, Orders, or Wallet transactions', async () => {
+        const { provider, providerProduct } = await createFazerTopupProviderProduct();
+        const original = await ProviderProduct.findByIdAndUpdate(providerProduct._id, {
+            $unset: { familyKey: '', supportLevel: '' },
+            $set: { executionBlocked: true },
+        }, { new: true }).lean();
+        const originalRawPayload = JSON.stringify(original.rawPayload);
+
+        const result = await fazerCardsCatalogSvc.backfillLegacyFamilies();
+        const updated = await ProviderProduct.findById(providerProduct._id).lean();
+
+        expect(result).toMatchObject({
+            success: true,
+            matched: 1,
+            updated: 1,
+            skipped: 0,
+            byFamily: { TOPUPS: 1 },
+        });
+        expect(updated.familyKey).toBe('TOPUPS');
+        expect(updated.supportLevel).toBe('FULL_TOPUP_SUPPORTED');
+        expect(updated.executionBlocked).toBe(false);
+        expect(updated.provider.toString()).toBe(provider._id.toString());
+        expect(updated.rawPrice).toBe(original.rawPrice);
+        expect(updated.costPrice).toBe(original.costPrice);
+        expect(JSON.stringify(updated.rawPayload)).toBe(originalRawPayload);
+        expect(updated.requiredFields).toEqual(original.requiredFields);
+        expect(updated.isSupported).toBe(original.isSupported);
+        expect(updated.isBlocked).toBe(original.isBlocked);
+        expect(updated.blockReason).toBe(original.blockReason);
+        expect(await Product.countDocuments({})).toBe(0);
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('backfill leaves gift card rows blocked and catalog-only', async () => {
+        const { provider } = await createFazerTopupProviderProduct();
+        await ProviderProduct.deleteMany({});
+        await ProviderProduct.create({
+            provider: provider._id,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            externalProductId: 'FAZER_GIFTCARD:gc_steam_1:card_10usd',
+            rawName: 'Steam USD - Steam - $10',
+            rawPrice: '10.5000',
+            costPrice: '10.5',
+            familyKey: 'GIFTCARDS',
+            supportLevel: 'NEEDS_CODE_DELIVERY',
+            executionBlocked: true,
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            isSupported: false,
+            isBlocked: true,
+            blockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+            rawPayload: {
+                family: 'GIFTCARDS',
+                category: { category_id: 'gc_steam_1' },
+                offer: { card_id: 'card_10usd' },
+            },
+        });
+
+        const result = await fazerCardsCatalogSvc.backfillLegacyFamilies();
+        const giftcard = await ProviderProduct.findOne({ familyKey: 'GIFTCARDS' }).lean();
+
+        expect(result).toMatchObject({ matched: 0, updated: 0, skipped: 0 });
+        expect(giftcard).toMatchObject({
+            familyKey: 'GIFTCARDS',
+            supportLevel: 'NEEDS_CODE_DELIVERY',
+            executionBlocked: true,
+            isSupported: false,
+            isBlocked: true,
+            blockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+        });
+    });
 });
 
 describe('FazerCards controlled top-up order execution', () => {
