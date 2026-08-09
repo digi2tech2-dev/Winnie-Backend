@@ -13,6 +13,7 @@ const FAZERCARDS_ERROR_CODES = Object.freeze({
     NETWORK_ERROR: 'FAZERCARDS_NETWORK_ERROR',
     MALFORMED_RESPONSE: 'FAZERCARDS_MALFORMED_RESPONSE',
     SUBSCRIPTION_INACTIVE: 'FAZERCARDS_SUBSCRIPTION_INACTIVE',
+    STATUS_ENDPOINT_UNCONFIRMED: 'FAZERCARDS_STATUS_ENDPOINT_UNCONFIRMED',
 });
 
 const SENSITIVE_KEY_PATTERN = /api[-_]?key|authorization|token|secret|password|credential/i;
@@ -128,6 +129,9 @@ class FazerCardsClient {
 
         const resolvedBaseUrl = String(options.baseUrl || cfg.apiBaseUrl).replace(/\/+$/, '');
         const resolvedTimeout = Number(options.timeoutMs || cfg.timeoutMs);
+        this.topupOrderStatusPath = Object.prototype.hasOwnProperty.call(options, 'topupOrderStatusPath')
+            ? options.topupOrderStatusPath
+            : cfg.topupOrderStatusPath;
 
         this.http = axios.create({
             baseURL: resolvedBaseUrl,
@@ -187,6 +191,32 @@ class FazerCardsClient {
             },
             headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
             context: 'topup_order',
+        });
+    }
+
+    getTopupOrderStatus({ providerOrderId } = {}) {
+        const id = String(providerOrderId || '').trim();
+        if (!id) {
+            throw new BusinessRuleError('FazerCards providerOrderId is required.', 'FAZERCARDS_PROVIDER_ORDER_ID_REQUIRED');
+        }
+
+        const configuredPath = String(this.topupOrderStatusPath || '').trim();
+        if (!configuredPath) {
+            throw new BusinessRuleError(
+                'FazerCards top-up order status endpoint is not confirmed/configured.',
+                FAZERCARDS_ERROR_CODES.STATUS_ENDPOINT_UNCONFIRMED
+            );
+        }
+
+        const normalizedPath = configuredPath.startsWith('/') ? configuredPath : `/${configuredPath}`;
+        const hasPlaceholder = normalizedPath.includes('{providerOrderId}');
+        const path = hasPlaceholder
+            ? normalizedPath.split('{providerOrderId}').join(encodeURIComponent(id))
+            : normalizedPath;
+
+        return this.request('get', path, {
+            params: hasPlaceholder ? undefined : { order_id: id },
+            context: 'topup_order_status',
         });
     }
 }

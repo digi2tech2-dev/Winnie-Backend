@@ -392,6 +392,7 @@ class FazerCardsAdapter extends BaseProviderAdapter {
             baseUrl: options.baseUrl || provider.baseUrl || config.providers.fazerCards.apiBaseUrl,
             apiKey: options.apiKey || this._resolveToken() || config.providers.fazerCards.apiKey,
             timeoutMs: options.timeoutMs || config.providers.fazerCards.timeoutMs,
+            topupOrderStatusPath: options.topupOrderStatusPath || config.providers.fazerCards.topupOrderStatusPath,
         };
         if (Object.prototype.hasOwnProperty.call(options, 'enabled')) {
             clientOptions.enabled = options.enabled;
@@ -675,19 +676,95 @@ class FazerCardsAdapter extends BaseProviderAdapter {
         };
     }
 
-    async checkOrder() {
-        return buildManualReviewResult({
-            providerErrorCode: 'FAZERCARDS_STATUS_CHECK_NOT_IMPLEMENTED',
-            providerErrorMessage: 'FazerCards top-up status checks are not implemented in this phase.',
-        });
+    async getTopupOrderStatus({ providerOrderId } = {}) {
+        const normalizedProviderOrderId = asString(providerOrderId);
+        if (!normalizedProviderOrderId) {
+            return buildManualReviewResult({
+                providerErrorCode: 'FAZERCARDS_ORDER_NOT_SENT',
+                providerErrorMessage: 'FazerCards providerOrderId is required for status checks.',
+            });
+        }
+
+        let response;
+        try {
+            response = await this.client.getTopupOrderStatus({ providerOrderId: normalizedProviderOrderId });
+        } catch (err) {
+            const statusUnknown = err.code === 'FAZERCARDS_TIMEOUT'
+                || err.code === 'FAZERCARDS_NETWORK_ERROR'
+                || err.code === 'FAZERCARDS_HTTP_ERROR';
+            const errorCode = statusUnknown
+                ? 'FAZERCARDS_STATUS_UNKNOWN'
+                : err.code || 'FAZERCARDS_STATUS_UNKNOWN';
+            return buildManualReviewResult({
+                providerOrderId: normalizedProviderOrderId,
+                providerRequestId: err.requestId || null,
+                providerErrorCode: errorCode,
+                providerErrorMessage: err.code === 'FAZERCARDS_STATUS_ENDPOINT_UNCONFIRMED'
+                    ? 'FazerCards top-up order status endpoint is not confirmed/configured.'
+                    : 'FazerCards top-up status is unknown and requires manual review.',
+                rawResponse: err.providerBody || {
+                    errorCode,
+                    message: err.safeUpstreamMessage || err.message,
+                },
+            });
+        }
+
+        const data = response?.data || {};
+        const order = extractTopupOrderNode(data);
+        const providerOrderIdFromResponse = asString(extractTopupOrderId(data, order), normalizedProviderOrderId);
+        const rawStatus = firstValue(
+            order?.status,
+            data?.status,
+            order?.state,
+            data?.state,
+            order?.provider_status,
+            data?.provider_status
+        );
+        const mapped = normalizeTopupOrderStatus(rawStatus);
+        const providerRequestId = extractTopupProviderRequestId(data, response?.requestId);
+        const baseResult = {
+            providerOrderId: providerOrderIdFromResponse,
+            providerStatus: mapped.status,
+            providerRequestId,
+            providerMessage: firstValue(order?.message, data?.message, null),
+            providerErrorCode: firstValue(order?.errorCode, order?.error_code, data?.errorCode, data?.error_code, null),
+            providerErrorMessage: firstValue(order?.errorMessage, order?.error_message, data?.errorMessage, data?.error_message, null),
+            rawResponse: data,
+            errorMessage: firstValue(order?.errorMessage, order?.error_message, data?.errorMessage, data?.error_message, null),
+        };
+
+        if (!mapped.known) {
+            return buildManualReviewResult({
+                ...baseResult,
+                providerErrorCode: baseResult.providerErrorCode || 'FAZERCARDS_STATUS_UNKNOWN',
+                providerErrorMessage: baseResult.providerErrorMessage || 'FazerCards top-up order returned an unknown status.',
+            });
+        }
+
+        if (mapped.terminalFailure) {
+            return {
+                ...baseResult,
+                success: false,
+                providerStatus: 'Cancelled',
+                providerErrorCode: baseResult.providerErrorCode || 'FAZERCARDS_TOPUP_ORDER_FAILED',
+                providerErrorMessage: baseResult.providerErrorMessage || 'FazerCards top-up order failed.',
+                errorMessage: baseResult.errorMessage || 'FazerCards top-up order failed.',
+            };
+        }
+
+        return {
+            ...baseResult,
+            success: true,
+        };
+    }
+
+    async checkOrder(providerOrderId) {
+        return this.getTopupOrderStatus({ providerOrderId });
     }
 
     async checkOrders(orderIds = []) {
-        return (Array.isArray(orderIds) ? orderIds : []).map((providerOrderId) => buildManualReviewResult({
-            providerOrderId,
-            providerErrorCode: 'FAZERCARDS_STATUS_CHECK_NOT_IMPLEMENTED',
-            providerErrorMessage: 'FazerCards top-up status checks are not implemented in this phase.',
-        }));
+        const ids = Array.isArray(orderIds) ? orderIds : [];
+        return Promise.all(ids.map((providerOrderId) => this.checkOrder(providerOrderId)));
     }
 }
 
@@ -701,4 +778,5 @@ module.exports = {
     isBlockedRegion,
     extractTopupIdentifiers,
     buildTopupFields,
+    normalizeTopupOrderStatus,
 };

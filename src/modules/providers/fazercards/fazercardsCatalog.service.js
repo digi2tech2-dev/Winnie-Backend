@@ -4,10 +4,13 @@ const config = require('../../../config/config');
 const { Provider } = require('../provider.model');
 const { ProviderProduct, FULFILLMENT_MODES } = require('../providerProduct.model');
 const { Product, PRICING_MODES, EXECUTION_TYPES, PRODUCT_STATUSES } = require('../../products/product.model');
+const { Order, ORDER_STATUS } = require('../../orders/order.model');
+const { refundFailedOrder } = require('../../orders/orderFulfillment.service');
 const { Currency } = require('../../currency/currency.model');
 const { PROVIDER_CODES } = require('../provider.constants');
 const { BusinessRuleError, ConflictError, NotFoundError } = require('../../../shared/errors/AppError');
 const { FazerCardsAdapter, extractTopupIdentifiers, buildTopupFields } = require('./fazercards.adapter');
+const { sanitizePayload } = require('./fazercards.client');
 
 const FAZERCARDS_SLUG = 'fazer-cards';
 
@@ -634,6 +637,220 @@ const buildTopupDryRun = async ({ productId, fields = {}, orderId = null } = {})
     };
 };
 
+const isFazerCardsProviderCode = (value) => {
+    const normalized = String(value || '').trim();
+    return normalized.toUpperCase() === PROVIDER_CODES.FAZER_CARDS
+        || normalized.toLowerCase() === FAZERCARDS_SLUG;
+};
+
+const loadOrderForFazerCardsReconcile = async (orderId) => {
+    const order = await Order.findById(orderId)
+        .populate({
+            path: 'productId',
+            select: 'name provider providerProduct providerCode providerExecutionEnabled fulfillmentMode',
+            populate: [
+                { path: 'provider', select: 'name slug code providerCode isActive baseUrl authType token encryptedCredentials' },
+                {
+                    path: 'providerProduct',
+                    select: 'provider providerCode externalProductId rawName costPrice rawPrice currency category offerId fulfillmentMode isSupported isBlocked requiredFields rawPayload',
+                    populate: { path: 'provider', select: 'name slug code providerCode isActive baseUrl authType token encryptedCredentials' },
+                },
+            ],
+        });
+    if (!order) throw new NotFoundError('Order');
+    return order;
+};
+
+const getOrderProduct = (order) => order?.productId || null;
+
+const getOrderProviderProduct = (order) => {
+    const product = getOrderProduct(order);
+    return product?.providerProduct || null;
+};
+
+const assertFazerCardsOrder = (order) => {
+    const product = getOrderProduct(order);
+    const providerProduct = getOrderProviderProduct(order);
+    const providerCode = order.providerCode
+        || product?.providerCode
+        || product?.provider?.providerCode
+        || product?.provider?.slug
+        || providerProduct?.providerCode
+        || providerProduct?.provider?.providerCode
+        || providerProduct?.provider?.slug;
+
+    if (!isFazerCardsProviderCode(providerCode)) {
+        throw new BusinessRuleError('Order is not linked to FazerCards.', 'INVALID_PROVIDER_ORDER');
+    }
+    if (!providerProduct || !isFazerCardsProviderCode(providerProduct.providerCode)) {
+        throw new BusinessRuleError('Order is not linked to a FazerCards ProviderProduct.', 'INVALID_PROVIDER_ORDER');
+    }
+};
+
+const assertFazerCardsOrderSent = (order) => {
+    if (order.providerOrderId === null || order.providerOrderId === undefined || order.providerOrderId === '') {
+        throw new BusinessRuleError('FazerCards order has not been sent to the provider.', 'FAZERCARDS_ORDER_NOT_SENT');
+    }
+};
+
+const buildProviderResultUpdate = (result = {}, fallbackProviderOrderId = null) => {
+    const update = {
+        providerOrderId: result.providerOrderId ?? fallbackProviderOrderId,
+        providerStatus: result.providerStatus,
+        providerRawResponse: sanitizePayload(result.rawResponse),
+        lastCheckedAt: new Date(),
+    };
+
+    for (const key of [
+        'providerRequestId',
+        'providerIdempotencyKey',
+        'providerMessage',
+        'providerErrorCode',
+        'providerErrorMessage',
+    ]) {
+        if (result[key] !== undefined) update[key] = result[key];
+    }
+
+    return update;
+};
+
+const updateOrderFromFazerCardsStatus = async (order, result) => {
+    const now = new Date();
+    const update = buildProviderResultUpdate(result, order.providerOrderId);
+
+    if (result.manualReview === true) {
+        const updated = await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                status: ORDER_STATUS.MANUAL_REVIEW,
+                ...update,
+                rejectionReason: result.errorMessage
+                    || result.providerErrorMessage
+                    || 'FazerCards provider status is unknown and requires manual review.',
+            },
+        }, { new: true });
+        return { order: updated, action: 'manualReview', refunded: false };
+    }
+
+    if (result.success === false) {
+        await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                status: ORDER_STATUS.FAILED,
+                ...update,
+                rejectionReason: result.errorMessage
+                    || result.providerErrorMessage
+                    || 'FazerCards provider reported the order failed.',
+                failedAt: order.failedAt || now,
+            },
+        });
+        const failedOrder = await Order.findById(order._id);
+        const refunded = await refundFailedOrder(failedOrder, {
+            source: 'fazercards_status_sync',
+            reason: 'PROVIDER_FAILED',
+            providerRejected: true,
+        });
+        return { order: await Order.findById(order._id), action: 'failed', refunded };
+    }
+
+    const nextStatus = result.providerStatus === 'Completed'
+        ? ORDER_STATUS.COMPLETED
+        : ORDER_STATUS.PROCESSING;
+    const updated = await Order.findByIdAndUpdate(order._id, {
+        $set: {
+            status: nextStatus,
+            ...update,
+        },
+    }, { new: true });
+
+    return {
+        order: updated,
+        action: nextStatus === ORDER_STATUS.COMPLETED ? 'completed' : 'processing',
+        refunded: updated?.refunded === true,
+    };
+};
+
+const summarizeOrder = (order) => ({
+    id: order?._id?.toString(),
+    status: order?.status,
+    providerOrderId: order?.providerOrderId ?? null,
+    providerStatus: order?.providerStatus ?? null,
+    refunded: order?.refunded === true,
+    lastCheckedAt: order?.lastCheckedAt ?? null,
+});
+
+const syncOrderStatus = async (orderId, adapterOptions = {}) => {
+    const order = await loadOrderForFazerCardsReconcile(orderId);
+    assertFazerCardsOrder(order);
+    assertFazerCardsOrderSent(order);
+
+    const product = getOrderProduct(order);
+    const providerProduct = getOrderProviderProduct(order);
+    const providerDoc = product?.provider || providerProduct?.provider || await findFazerCardsProvider();
+    const adapter = new FazerCardsAdapter(providerDoc, adapterOptions);
+    const result = await adapter.getTopupOrderStatus({ providerOrderId: order.providerOrderId });
+    const applied = await updateOrderFromFazerCardsStatus(order, result);
+
+    return {
+        success: applied.action !== 'manualReview',
+        action: applied.action,
+        statusEndpointConfirmed: result.providerErrorCode !== 'FAZERCARDS_STATUS_ENDPOINT_UNCONFIRMED',
+        providerResult: {
+            providerOrderId: result.providerOrderId ?? order.providerOrderId,
+            providerStatus: result.providerStatus,
+            providerRequestId: result.providerRequestId ?? null,
+            providerErrorCode: result.providerErrorCode ?? null,
+            providerErrorMessage: result.providerErrorMessage ?? null,
+            manualReview: result.manualReview === true,
+        },
+        refunded: applied.refunded === true,
+        order: summarizeOrder(applied.order),
+        warnings: result.manualReview === true
+            ? ['Provider status could not be confirmed. Order moved to manual review without an automatic refund.']
+            : [],
+    };
+};
+
+const getOrderProviderDebug = async (orderId) => {
+    const order = await loadOrderForFazerCardsReconcile(orderId);
+    assertFazerCardsOrder(order);
+
+    const product = getOrderProduct(order);
+    const providerProduct = getOrderProviderProduct(order);
+    const identifiers = extractTopupIdentifiers(providerProduct);
+    const requiredFields = Array.isArray(providerProduct?.requiredFields) ? providerProduct.requiredFields : [];
+    const warnings = [];
+
+    if (!order.providerOrderId) warnings.push('FazerCards order has not been sent to the provider.');
+    if (!config.providers.fazerCards.topupOrderStatusPath) {
+        warnings.push('FazerCards top-up order status endpoint is not confirmed/configured.');
+    }
+    if (product?.providerExecutionEnabled !== true) {
+        warnings.push('Product provider execution is currently disabled.');
+    }
+    if (!identifiers.categoryId || !identifiers.offerId) {
+        warnings.push('FazerCards category_id or offer_id is missing from the linked ProviderProduct.');
+    }
+
+    return {
+        localOrderId: order._id.toString(),
+        localStatus: order.status,
+        providerOrderId: order.providerOrderId ?? null,
+        providerStatus: order.providerStatus ?? null,
+        providerCode: order.providerCode || product?.providerCode || providerProduct?.providerCode || null,
+        providerProduct: providerProduct ? {
+            id: providerProduct._id.toString(),
+            externalProductId: providerProduct.externalProductId,
+        } : null,
+        categoryId: identifiers.categoryId,
+        offerId: identifiers.offerId,
+        requiredFieldKeys: requiredFields
+            .map((field) => (typeof field === 'string' ? field : field?.key || field?.name || field?.id))
+            .filter(Boolean),
+        providerExecutionEnabled: product?.providerExecutionEnabled === true,
+        lastProviderRawResponse: sanitizePayload(order.providerRawResponse),
+        warnings,
+    };
+};
+
 module.exports = {
     FAZERCARDS_SLUG,
     findFazerCardsProvider,
@@ -646,4 +863,6 @@ module.exports = {
     getImportPreview,
     importProviderProduct,
     buildTopupDryRun,
+    syncOrderStatus,
+    getOrderProviderDebug,
 };

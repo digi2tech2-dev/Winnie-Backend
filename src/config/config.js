@@ -125,6 +125,7 @@ const config = {
             apiBaseUrl: process.env.FAZERCARDS_API_BASE_URL || 'https://api.fzr.cards/api/v2',
             apiKey: process.env.FAZERCARDS_API_KEY,
             timeoutMs: parseInt(process.env.FAZERCARDS_TIMEOUT_MS || '20000', 10),
+            topupOrderStatusPath: process.env.FAZERCARDS_TOPUP_ORDER_STATUS_PATH || null,
             blockedRegions: (process.env.FAZERCARDS_BLOCKED_REGIONS || 'RU,RUSSIA,CIS')
                 .split(',')
                 .map((region) => region.trim().toUpperCase())
