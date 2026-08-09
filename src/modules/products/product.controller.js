@@ -24,6 +24,7 @@ const SENSITIVE_FIELDS = [
     'enableManualPrice',
     'manualPriceAdjustment',
     'executionType',
+    'providerExecutionEnabled',
     'createdBy',
     'deletedAt',
     'internalNotes',

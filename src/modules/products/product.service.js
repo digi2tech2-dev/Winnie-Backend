@@ -459,7 +459,7 @@ const updateProduct = async (productId, updates) => {
         'name', 'description', 'image', 'category', 'displayOrder', 'isActive',
         'visibleInStore', 'isPaused', 'status',
         'basePrice', 'minQty', 'maxQty', 'pricingMode', 'markupType', 'markupValue',
-        'executionType', 'orderFields', 'dynamicFields', 'providerMapping',
+        'executionType', 'providerExecutionEnabled', 'orderFields', 'dynamicFields', 'providerMapping',
         'provider', 'providerProduct',
         'syncPriceWithProvider', 'enableManualPrice', 'manualPriceAdjustment', 'finalPrice',
     ];

@@ -333,7 +333,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     try {
 
     const order = await Order.findById(orderId)
-        .populate('productId', 'name providerProduct providerMapping provider');
+        .populate('productId', 'name providerProduct providerMapping provider providerCode providerExecutionEnabled fulfillmentMode');
     if (!order) {
         console.error(`[Fulfillment] executeOrder: order ${orderId} not found`);
         return { order: null, placed: false, refunded: false };
@@ -421,7 +421,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     try {
         if (order.productId?.providerProduct) {
             providerProduct = await ProviderProduct.findById(order.productId.providerProduct)
-                .select('externalProductId rawPayload')
+                .select('externalProductId rawPayload providerCode category offerId fulfillmentMode isSupported isBlocked requiredFields costPrice rawPrice')
                 .lean();
             externalProductId = providerProduct?.externalProductId ?? null;
         }
@@ -464,6 +464,8 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             orderUuid: stableOrderUuid,
             order_uuid: stableOrderUuid,
             params: mappedCustomerFields,
+            product: order.productId,
+            providerProduct,
             ...mappedCustomerFields,   // ← spread translated customer fields onto params
         });
     } catch (err) {

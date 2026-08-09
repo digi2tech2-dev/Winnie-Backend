@@ -140,15 +140,15 @@ class FazerCardsClient {
         });
     }
 
-    async request(method, path, { params, context } = {}) {
+    async request(method, path, { params, data, headers, context } = {}) {
         try {
-            const response = await this.http.request({ method, url: path, params });
-            const data = sanitizePayload(response.data, 0, this.redactSecrets);
-            if (getProviderCode(data) === 'subscription_inactive') {
+            const response = await this.http.request({ method, url: path, params, data, headers });
+            const safeData = sanitizePayload(response.data, 0, this.redactSecrets);
+            if (getProviderCode(safeData) === 'subscription_inactive') {
                 throw makeSubscriptionInactiveError();
             }
             return {
-                data,
+                data: safeData,
                 status: response.status,
                 requestId: extractRequestId(response.data, response.headers),
             };
@@ -175,6 +175,18 @@ class FazerCardsClient {
         return this.request('get', '/topups/offers', {
             params: { category_id: categoryId },
             context: 'topup_offers',
+        });
+    }
+
+    createTopupOrder({ categoryId, offerId, fields, idempotencyKey } = {}) {
+        return this.request('post', '/topups/order', {
+            data: {
+                category_id: categoryId,
+                offer_id: offerId,
+                fields: fields || {},
+            },
+            headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+            context: 'topup_order',
         });
     }
 }

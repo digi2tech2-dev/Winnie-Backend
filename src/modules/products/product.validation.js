@@ -97,6 +97,10 @@ const createProductValidation = [
         .isIn(Object.values(EXECUTION_TYPES))
         .withMessage(`executionType must be one of: ${Object.values(EXECUTION_TYPES).join(', ')}`),
 
+    body('providerExecutionEnabled')
+        .optional()
+        .isBoolean().withMessage('providerExecutionEnabled must be a boolean'),
+
     body('provider')
         .optional({ nullable: true })
         .isMongoId().withMessage('provider must be a valid ObjectId'),
@@ -207,6 +211,10 @@ const publishProductValidation = [
         .optional()
         .isIn(Object.values(EXECUTION_TYPES))
         .withMessage(`executionType must be one of: ${Object.values(EXECUTION_TYPES).join(', ')}`),
+
+    body('providerExecutionEnabled')
+        .optional()
+        .isBoolean().withMessage('providerExecutionEnabled must be a boolean'),
 ];
 
 // ─── Admin: update product ────────────────────────────────────────────────────
@@ -294,6 +302,10 @@ const updateProductValidation = [
         .optional()
         .isIn(Object.values(EXECUTION_TYPES))
         .withMessage(`executionType must be one of: ${Object.values(EXECUTION_TYPES).join(', ')}`),
+
+    body('providerExecutionEnabled')
+        .optional()
+        .isBoolean().withMessage('providerExecutionEnabled must be a boolean'),
 
     body('provider')
         .optional({ nullable: true })
