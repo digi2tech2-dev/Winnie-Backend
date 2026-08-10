@@ -12,6 +12,7 @@ const { BusinessRuleError, ConflictError, NotFoundError } = require('../../../sh
 const { FazerCardsAdapter, extractTopupIdentifiers, buildTopupFields } = require('./fazercards.adapter');
 const { sanitizePayload } = require('./fazercards.client');
 const { getFazerCardsFamily, listFazerCardsFamilies } = require('./fazercardsFamilies');
+const { ProviderDeliveredCode } = require('./providerDeliveredCode.model');
 
 const FAZERCARDS_SLUG = 'fazer-cards';
 
@@ -918,23 +919,55 @@ const buildProviderMapping = (orderFields = []) => (
     )
 );
 
+const CODE_DELIVERY_IMPORT_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
+
+const getProviderProductFamilyKey = (providerProduct = {}) => {
+    const explicit = String(providerProduct.familyKey || providerProduct.rawPayload?.family || '').trim().toUpperCase();
+    if (explicit) return explicit;
+    const external = String(providerProduct.externalProductId || '').trim();
+    if (external.startsWith('FAZER_GIFTCARD:')) return 'GIFTCARDS';
+    if (external.startsWith('FAZER_GAMEKEY:')) return 'GAME_KEYS';
+    return inferFazerCardsFamilyKey(providerProduct);
+};
+
+const isCodeDeliveryImportCandidate = (providerProduct = {}) => (
+    providerProduct.providerCode === PROVIDER_CODES.FAZER_CARDS
+    && providerProduct.fulfillmentMode === FULFILLMENT_MODES.CODE_DELIVERY
+    && CODE_DELIVERY_IMPORT_FAMILIES.has(getProviderProductFamilyKey(providerProduct))
+);
+
+const isTopupImportCandidate = (providerProduct = {}) => (
+    providerProduct.fulfillmentMode === FULFILLMENT_MODES.TOPUP_WITH_FIELDS
+);
+
 const assertImportableProviderProduct = (providerProduct) => {
     if (!providerProduct) throw new NotFoundError('ProviderProduct');
     if (providerProduct.providerCode !== PROVIDER_CODES.FAZER_CARDS) {
         throw new BusinessRuleError('Only FazerCards provider products can be imported here.', 'FAZERCARDS_PROVIDER_PRODUCT_REQUIRED');
     }
-    if (providerProduct.fulfillmentMode !== 'TOPUP_WITH_FIELDS') {
-        throw new BusinessRuleError('Only FazerCards top-up offers can be imported.', 'FAZERCARDS_IMPORT_UNSUPPORTED_FULFILLMENT_MODE');
+
+    const isTopup = isTopupImportCandidate(providerProduct);
+    const isCodeDelivery = isCodeDeliveryImportCandidate(providerProduct);
+    if (!isTopup && !isCodeDelivery) {
+        throw new BusinessRuleError('Only FazerCards top-up, gift card, and game key offers can be imported.', 'FAZERCARDS_IMPORT_UNSUPPORTED_FULFILLMENT_MODE');
     }
-    if (providerProduct.isSupported !== true) {
-        throw new BusinessRuleError('Unsupported FazerCards provider products cannot be imported.', 'FAZERCARDS_PROVIDER_PRODUCT_UNSUPPORTED');
+
+    if (isTopup) {
+        if (providerProduct.isSupported !== true) {
+            throw new BusinessRuleError('Unsupported FazerCards provider products cannot be imported.', 'FAZERCARDS_PROVIDER_PRODUCT_UNSUPPORTED');
+        }
+        if (providerProduct.isBlocked === true) {
+            throw new BusinessRuleError('Blocked FazerCards provider products cannot be imported.', 'FAZERCARDS_PROVIDER_PRODUCT_BLOCKED');
+        }
+        if (!Array.isArray(providerProduct.requiredFields) || providerProduct.requiredFields.length === 0) {
+            throw new BusinessRuleError('FazerCards provider product is missing required fields.', 'FAZERCARDS_PROVIDER_PRODUCT_MISSING_FIELDS');
+        }
     }
-    if (providerProduct.isBlocked === true) {
-        throw new BusinessRuleError('Blocked FazerCards provider products cannot be imported.', 'FAZERCARDS_PROVIDER_PRODUCT_BLOCKED');
+
+    if (isCodeDelivery && providerProduct.blockReason !== 'CODE_DELIVERY_NOT_IMPLEMENTED') {
+        throw new BusinessRuleError('Only catalog-only FazerCards code delivery products can be imported safely.', 'FAZERCARDS_CODE_DELIVERY_IMPORT_BLOCKED');
     }
-    if (!Array.isArray(providerProduct.requiredFields) || providerProduct.requiredFields.length === 0) {
-        throw new BusinessRuleError('FazerCards provider product is missing required fields.', 'FAZERCARDS_PROVIDER_PRODUCT_MISSING_FIELDS');
-    }
+
     const rawCostPrice = providerProduct.costPrice ?? providerProduct.rawPrice;
     const costPrice = Number(rawCostPrice);
     if (rawCostPrice === undefined || rawCostPrice === null || rawCostPrice === '' || !Number.isFinite(costPrice) || costPrice <= 0) {
@@ -958,16 +991,30 @@ const normalizeImportCurrency = async (currency) => {
 
 const buildImportPreview = (providerProduct) => {
     const orderFields = buildOrderFieldsFromProviderFields(providerProduct.requiredFields);
+    const familyKey = getProviderProductFamilyKey(providerProduct);
+    const isCodeDelivery = isCodeDeliveryImportCandidate(providerProduct);
     return {
         providerProductId: providerProduct._id.toString(),
         providerProductName: providerProduct.rawName,
         externalProductId: providerProduct.externalProductId,
+        familyKey,
+        fulfillmentMode: providerProduct.fulfillmentMode,
+        supportLevel: providerProduct.supportLevel || null,
+        executionBlocked: providerProduct.executionBlocked === true,
+        blockReason: providerProduct.blockReason || null,
         costPrice: String(providerProduct.costPrice ?? providerProduct.rawPrice),
         currency: providerProduct.currency || 'USD',
         requiredFields: providerProduct.requiredFields,
+        stock: providerProduct.stock ?? null,
+        minQty: providerProduct.minQty || 1,
+        maxQty: providerProduct.maxQty || 9999,
+        region: providerProduct.region || null,
+        platform: providerProduct.platform || null,
         suggestedProductName: providerProduct.translatedName || providerProduct.rawName,
         suggestedOrderFields: orderFields.map(({ providerKey, ...field }) => field),
-        warning: 'Imported product will be created inactive and not visible to customers.',
+        warning: isCodeDelivery
+            ? 'Code delivery execution is not implemented yet. Imported product will be created inactive and not visible to customers.'
+            : 'Imported product will be created inactive and not visible to customers.',
     };
 };
 
@@ -1008,6 +1055,8 @@ const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
     }
 
     const costPrice = String(providerProduct.costPrice ?? providerProduct.rawPrice);
+    const familyKey = getProviderProductFamilyKey(providerProduct);
+    const isCodeDelivery = isCodeDeliveryImportCandidate(providerProduct);
     const orderFieldsWithProviderKeys = buildOrderFieldsFromProviderFields(providerProduct.requiredFields);
     const providerMapping = buildProviderMapping(orderFieldsWithProviderKeys);
     const orderFields = orderFieldsWithProviderKeys.map(({ providerKey, ...field }) => field);
@@ -1034,10 +1083,21 @@ const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
         syncNameWithProvider: payload.syncNameFromProvider === true,
         syncAvailabilityWithProvider: payload.syncAvailabilityFromProvider !== false,
         providerExecutionEnabled: false,
+        providerExecutionBlocked: isCodeDelivery,
+        providerBlockReason: isCodeDelivery ? (providerProduct.blockReason || 'CODE_DELIVERY_NOT_IMPLEMENTED') : null,
         provider: providerProduct.provider._id,
         providerProduct: providerProduct._id,
         providerCode: PROVIDER_CODES.FAZER_CARDS,
         externalProductId: providerProduct.externalProductId,
+        familyKey,
+        fulfillmentMode: providerProduct.fulfillmentMode,
+        providerCategory: providerProduct.category || null,
+        providerCategoryName: providerProduct.categoryName || null,
+        providerOfferId: providerProduct.offerId || null,
+        providerOfferName: providerProduct.offerName || null,
+        providerRegion: providerProduct.region || null,
+        providerPlatform: providerProduct.platform || null,
+        providerStock: Number.isFinite(Number(providerProduct.stock)) ? Number(providerProduct.stock) : null,
         orderFields,
         dynamicFields,
         providerMapping,
@@ -1154,6 +1214,194 @@ const buildTopupDryRun = async ({ productId, fields = {}, orderId = null } = {})
         requiredFields: providerProduct.requiredFields,
         warnings: [
             'Dry run only. No FazerCards order was created.',
+            `Product execution is currently ${executionState}.`,
+        ],
+    };
+};
+
+const asTrimmedString = (value) => String(value || '').trim();
+
+const extractExternalParts = (externalProductId, prefix) => {
+    const external = asTrimmedString(externalProductId);
+    if (!external.startsWith(prefix)) return [];
+    return external.slice(prefix.length).split(':').map((part) => part.trim()).filter(Boolean);
+};
+
+const extractCodeDeliveryIdentifiers = (providerProduct = {}) => {
+    const familyKey = getProviderProductFamilyKey(providerProduct);
+    const raw = providerProduct.rawPayload || {};
+    if (familyKey === 'GIFTCARDS') {
+        const externalParts = extractExternalParts(providerProduct.externalProductId, 'FAZER_GIFTCARD:');
+        return {
+            familyKey,
+            categoryId: asTrimmedString(firstValue(
+                providerProduct.category,
+                raw.category?.category_id,
+                raw.category?.categoryId,
+                raw.category_id,
+                externalParts[0]
+            )),
+            itemId: asTrimmedString(firstValue(
+                providerProduct.offerId,
+                raw.offer?.card_id,
+                raw.offer?.cardId,
+                raw.offer?.id,
+                raw.card_id,
+                externalParts[1]
+            )),
+        };
+    }
+    if (familyKey === 'GAME_KEYS') {
+        const externalParts = extractExternalParts(providerProduct.externalProductId, 'FAZER_GAMEKEY:');
+        return {
+            familyKey,
+            categoryId: asTrimmedString(firstValue(
+                providerProduct.category,
+                raw.game?.game_id,
+                raw.game?.gameId,
+                raw.game_id,
+                externalParts[0]
+            )),
+            itemId: asTrimmedString(firstValue(
+                providerProduct.offerId,
+                raw.key?.key_id,
+                raw.key?.keyId,
+                raw.key?.id,
+                raw.key_id,
+                externalParts[1]
+            )),
+        };
+    }
+    return { familyKey, categoryId: null, itemId: null };
+};
+
+const loadCodeDeliveryProduct = async (productId) => {
+    const product = await Product.findById(productId)
+        .populate('provider', 'name slug code providerCode')
+        .populate({
+            path: 'providerProduct',
+            select: 'provider providerCode externalProductId rawName costPrice rawPrice currency category categoryName offerId offerName familyKey fulfillmentMode supportLevel executionBlocked isSupported isBlocked blockReason requiredFields rawPayload stock minQty maxQty region platform',
+            populate: { path: 'provider', select: 'name slug providerCode' },
+        });
+    if (!product) throw new NotFoundError('Product');
+    return product;
+};
+
+const assertCodeDeliveryProduct = (product, providerProduct) => {
+    if (!product) throw new NotFoundError('Product');
+    if (!providerProduct) throw new NotFoundError('ProviderProduct');
+    assertFazerCardsProductLink(product);
+
+    if (providerProduct.providerCode !== PROVIDER_CODES.FAZER_CARDS) {
+        throw new BusinessRuleError('Linked ProviderProduct is not a FazerCards product.', 'FAZERCARDS_PROVIDER_PRODUCT_REQUIRED');
+    }
+    const familyKey = getProviderProductFamilyKey(providerProduct);
+    if (!CODE_DELIVERY_IMPORT_FAMILIES.has(familyKey)) {
+        throw new BusinessRuleError('Only FazerCards GiftCards and GameKeys can use code-delivery dry-run.', 'FAZERCARDS_CODE_DELIVERY_FAMILY_UNSUPPORTED');
+    }
+    if (providerProduct.fulfillmentMode !== FULFILLMENT_MODES.CODE_DELIVERY) {
+        throw new BusinessRuleError('Only FazerCards CODE_DELIVERY products can use this dry-run.', 'FAZERCARDS_UNSUPPORTED_FULFILLMENT_MODE');
+    }
+
+    const rawCost = providerProduct.costPrice ?? providerProduct.rawPrice;
+    const cost = Number(rawCost);
+    if (rawCost === undefined || rawCost === null || rawCost === '' || !Number.isFinite(cost) || cost <= 0) {
+        throw new BusinessRuleError('FazerCards ProviderProduct has an invalid cost price.', 'FAZERCARDS_PROVIDER_PRODUCT_INVALID_COST');
+    }
+
+    return familyKey;
+};
+
+const normalizeCodeDeliveryQuantity = (quantity, providerProduct = {}) => {
+    const parsed = Number(quantity ?? 1);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+        throw new BusinessRuleError('quantity must be a positive integer.', 'FAZERCARDS_CODE_DELIVERY_QUANTITY_INVALID');
+    }
+    const minQty = Number(providerProduct.minQty || 1);
+    const maxQty = Number(providerProduct.maxQty || 9999);
+    if (Number.isFinite(minQty) && parsed < minQty) {
+        throw new BusinessRuleError('quantity is below the provider minimum.', 'FAZERCARDS_CODE_DELIVERY_QUANTITY_INVALID');
+    }
+    if (Number.isFinite(maxQty) && parsed > maxQty) {
+        throw new BusinessRuleError('quantity exceeds the provider maximum.', 'FAZERCARDS_CODE_DELIVERY_QUANTITY_INVALID');
+    }
+    const stock = Number(providerProduct.stock);
+    if (Number.isFinite(stock) && stock >= 0 && parsed > stock) {
+        throw new BusinessRuleError('quantity exceeds available provider stock.', 'FAZERCARDS_CODE_DELIVERY_STOCK_INSUFFICIENT');
+    }
+    return parsed;
+};
+
+const buildCodeDeliveryPayload = (providerProduct, quantity) => {
+    const { familyKey, categoryId, itemId } = extractCodeDeliveryIdentifiers(providerProduct);
+    if (!categoryId || !itemId) {
+        throw new BusinessRuleError(
+            'FazerCards code-delivery product identifiers are missing.',
+            !categoryId ? 'FAZERCARDS_CODE_DELIVERY_CATEGORY_ID_MISSING' : 'FAZERCARDS_CODE_DELIVERY_ITEM_ID_MISSING'
+        );
+    }
+    if (familyKey === 'GIFTCARDS') {
+        return {
+            wouldCall: 'POST /giftcards/order',
+            payload: {
+                category_id: categoryId,
+                card_id: itemId,
+                quantity,
+            },
+        };
+    }
+    if (familyKey === 'GAME_KEYS') {
+        return {
+            wouldCall: 'POST /gamekeys/order',
+            payload: {
+                game_id: categoryId,
+                key_id: itemId,
+                quantity,
+            },
+        };
+    }
+    throw new BusinessRuleError('Unsupported FazerCards code-delivery family.', 'FAZERCARDS_CODE_DELIVERY_FAMILY_UNSUPPORTED');
+};
+
+const buildCodeDeliveryDryRun = async ({ productId, quantity = 1 } = {}) => {
+    const product = await loadCodeDeliveryProduct(productId);
+    const providerProduct = product.providerProduct;
+    const familyKey = assertCodeDeliveryProduct(product, providerProduct);
+    const normalizedQuantity = normalizeCodeDeliveryQuantity(quantity, providerProduct);
+    const { wouldCall, payload } = buildCodeDeliveryPayload(providerProduct, normalizedQuantity);
+    const executionState = product.providerExecutionEnabled === true ? 'enabled' : 'disabled';
+
+    return {
+        success: true,
+        dryRun: true,
+        wouldCall,
+        provider: 'FazerCards',
+        product: {
+            id: product._id.toString(),
+            name: product.name,
+            familyKey: product.familyKey || familyKey,
+            fulfillmentMode: product.fulfillmentMode || providerProduct.fulfillmentMode,
+            providerExecutionEnabled: product.providerExecutionEnabled === true,
+            providerExecutionBlocked: product.providerExecutionBlocked === true,
+        },
+        providerProduct: {
+            id: providerProduct._id.toString(),
+            externalProductId: providerProduct.externalProductId,
+            familyKey,
+            fulfillmentMode: providerProduct.fulfillmentMode,
+            costPrice: String(providerProduct.costPrice ?? providerProduct.rawPrice),
+            currency: providerProduct.currency || 'USD',
+            stock: providerProduct.stock ?? null,
+            minQty: providerProduct.minQty || 1,
+            maxQty: providerProduct.maxQty || 9999,
+            region: providerProduct.region || null,
+            platform: providerProduct.platform || null,
+        },
+        payload,
+        requiredFields: [],
+        warnings: [
+            'Dry run only. No FazerCards order was created.',
+            'Code delivery live execution is not implemented yet.',
             `Product execution is currently ${executionState}.`,
         ],
     };
@@ -1290,6 +1538,80 @@ const getProductReadiness = async (productId, adapterOptions = {}) => {
             'Enable FAZERCARDS_REAL_ORDERS_ENABLED only for a controlled live test.',
             'Enable providerExecutionEnabled only for one cheap product.',
             'Use a real valid account ID.',
+        ],
+    };
+};
+
+const getCodeDeliveryReadiness = async (productId) => {
+    const product = await loadCodeDeliveryProduct(productId);
+    assertFazerCardsProductLink(product);
+
+    const providerProduct = product.providerProduct || null;
+    const familyKey = providerProduct ? getProviderProductFamilyKey(providerProduct) : null;
+    const identifiers = providerProduct ? extractCodeDeliveryIdentifiers(providerProduct) : {};
+    const rawCost = providerProduct?.costPrice ?? providerProduct?.rawPrice;
+    const cost = Number(rawCost);
+    const costValid = rawCost !== undefined && rawCost !== null && rawCost !== '' && Number.isFinite(cost) && cost > 0;
+    const stock = Number(providerProduct?.stock);
+    const minQty = Number(providerProduct?.minQty || 1);
+    const maxQty = Number(providerProduct?.maxQty || 9999);
+    const quantitySupported = Number.isFinite(minQty) && Number.isFinite(maxQty) && minQty <= 1 && maxQty >= 1;
+    const stockSufficient = Number.isFinite(stock) && stock >= 0 ? stock >= 1 : 'unknown';
+    const codeDeliveryStorageReady = Boolean(ProviderDeliveredCode?.modelName);
+
+    const checks = {
+        productExists: true,
+        linkedToFazerCards: true,
+        familySupportedForPreview: CODE_DELIVERY_IMPORT_FAMILIES.has(familyKey),
+        fulfillmentModeCodeDelivery: providerProduct?.fulfillmentMode === FULFILLMENT_MODES.CODE_DELIVERY,
+        providerProductExists: Boolean(providerProduct),
+        stockSufficient,
+        costValid,
+        quantitySupported,
+        globalRealOrdersEnabled: config.providers.fazerCards.realOrdersEnabled === true,
+        providerExecutionEnabled: product.providerExecutionEnabled === true,
+        codeDeliveryStorageReady,
+        productHidden: product.visibleInStore !== true,
+        productInactive: product.isActive !== true || product.status !== PRODUCT_STATUSES.AVAILABLE,
+        hasCategoryId: Boolean(identifiers.categoryId),
+        hasItemId: Boolean(identifiers.itemId),
+    };
+
+    const warnings = [
+        'Code delivery live execution is not implemented yet.',
+    ];
+    if (!checks.globalRealOrdersEnabled) warnings.push('Global real order gate is disabled.');
+    if (!checks.providerExecutionEnabled) warnings.push('Product provider execution is disabled.');
+    if (!checks.productHidden) warnings.push('Product is visible; keep it hidden until code delivery execution is implemented.');
+    if (!checks.productInactive) warnings.push('Product is active; keep it inactive until code delivery execution is implemented.');
+    if (checks.stockSufficient === 'unknown') warnings.push('Provider stock is unknown.');
+    if (checks.stockSufficient === false) warnings.push('Provider stock is insufficient for quantity 1.');
+    if (!checks.codeDeliveryStorageReady) warnings.push('Encrypted provider code storage is not ready.');
+
+    return {
+        success: true,
+        productId: product._id.toString(),
+        productName: product.name,
+        readyForLiveExecution: false,
+        familyKey,
+        fulfillmentMode: providerProduct?.fulfillmentMode || product.fulfillmentMode || null,
+        providerProduct: providerProduct ? {
+            id: providerProduct._id.toString(),
+            externalProductId: providerProduct.externalProductId,
+            costPrice: String(rawCost ?? ''),
+            currency: providerProduct.currency || 'USD',
+            stock: providerProduct.stock ?? null,
+            minQty: providerProduct.minQty || 1,
+            maxQty: providerProduct.maxQty || 9999,
+            region: providerProduct.region || null,
+            platform: providerProduct.platform || null,
+        } : null,
+        checks,
+        warnings: [...new Set(warnings)],
+        nextActions: [
+            'Keep product hidden and inactive until code delivery execution is implemented.',
+            'Use dry-run preview to confirm the provider payload.',
+            'Implement admin/customer code reveal only after encrypted delivery storage is wired into live execution.',
         ],
     };
 };
@@ -1524,7 +1846,9 @@ module.exports = {
     getImportPreview,
     importProviderProduct,
     buildTopupDryRun,
+    buildCodeDeliveryDryRun,
     getProductReadiness,
+    getCodeDeliveryReadiness,
     syncOrderStatus,
     getOrderProviderDebug,
 };

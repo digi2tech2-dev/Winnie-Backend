@@ -379,6 +379,74 @@ const productSchema = new mongoose.Schema(
             default: true,
         },
 
+        providerExecutionBlocked: {
+            type: Boolean,
+            default: false,
+        },
+
+        providerBlockReason: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        familyKey: {
+            type: String,
+            trim: true,
+            uppercase: true,
+            default: null,
+            index: true,
+        },
+
+        fulfillmentMode: {
+            type: String,
+            trim: true,
+            uppercase: true,
+            default: null,
+            index: true,
+        },
+
+        providerCategory: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        providerCategoryName: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        providerOfferId: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        providerOfferName: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        providerRegion: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        providerPlatform: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        providerStock: {
+            type: Number,
+            default: null,
+        },
+
         // ── Audit ─────────────────────────────────────────────────────────────
 
         /** Admin user who created this product. */

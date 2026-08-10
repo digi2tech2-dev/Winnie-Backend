@@ -206,9 +206,19 @@ const dryRunFazerCardsTopup = catchAsync(async (req, res) => {
     sendSuccess(res, data, 'FazerCards top-up dry run built');
 });
 
+const dryRunFazerCardsCodeDelivery = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.buildCodeDeliveryDryRun(req.body);
+    sendSuccess(res, data, 'FazerCards code-delivery dry run built');
+});
+
 const getFazerCardsProductReadiness = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.getProductReadiness(req.params.productId);
     sendSuccess(res, data, 'FazerCards product readiness retrieved');
+});
+
+const getFazerCardsCodeDeliveryReadiness = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.getCodeDeliveryReadiness(req.params.productId);
+    sendSuccess(res, data, 'FazerCards code-delivery readiness retrieved');
 });
 
 const syncFazerCardsOrderStatus = catchAsync(async (req, res) => {
@@ -254,7 +264,9 @@ module.exports = {
     previewFazerCardsProviderProductImport,
     importFazerCardsProviderProduct,
     dryRunFazerCardsTopup,
+    dryRunFazerCardsCodeDelivery,
     getFazerCardsProductReadiness,
+    getFazerCardsCodeDeliveryReadiness,
     syncFazerCardsOrderStatus,
     getFazerCardsOrderProviderDebug,
 };

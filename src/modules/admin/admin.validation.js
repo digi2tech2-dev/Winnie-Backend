@@ -476,6 +476,13 @@ const fazerCardsTopupDryRunSchema = Joi.object({
     orderId: Joi.string().trim().max(128).allow('', null),
 });
 
+const fazerCardsCodeDeliveryDryRunSchema = Joi.object({
+    productId: objectId().required().messages({
+        'any.required': 'productId is required',
+    }),
+    quantity: Joi.number().integer().min(1).max(1000).default(1),
+});
+
 const listFazerCardsProviderProductsQuery = Joi.object({
     ...pagination,
     search: Joi.string().trim().max(200).allow('', null),
@@ -616,6 +623,7 @@ module.exports = {
         fazerCardsCatalogSync: fazerCardsCatalogSyncSchema,
         fazerCardsCatalogSyncFamily: fazerCardsCatalogSyncFamilySchema,
         fazerCardsTopupDryRun: fazerCardsTopupDryRunSchema,
+        fazerCardsCodeDeliveryDryRun: fazerCardsCodeDeliveryDryRunSchema,
         fazerCardsProviderProductImport: fazerCardsProviderProductImportSchema,
         listFazerCardsProviderProductsQuery,
         // Orders

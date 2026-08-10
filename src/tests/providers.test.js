@@ -20,6 +20,7 @@ const { User } = require('../modules/users/user.model');
 const productService = require('../modules/products/product.service');
 const fazerCardsCatalogSvc = require('../modules/providers/fazercards/fazercardsCatalog.service');
 const { FazerCardsClient } = require('../modules/providers/fazercards/fazercards.client');
+const { ProviderDeliveredCode } = require('../modules/providers/fazercards/providerDeliveredCode.model');
 const {
     FazerCardsAdapter,
     normalizeTopupOfferProduct,
@@ -73,6 +74,78 @@ const createFazerTopupProviderProduct = async (overrides = {}) => {
         },
         ...productOverrides,
     });
+    return { provider, providerProduct };
+};
+
+const createFazerCodeDeliveryProviderProduct = async ({ familyKey = 'GIFTCARDS', overrides = {} } = {}) => {
+    const provider = await Provider.findOne({ providerCode: PROVIDER_CODES.FAZER_CARDS }) || await Provider.create({
+        name: 'FazerCards',
+        slug: 'fazer-cards',
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        baseUrl: 'https://api.fzr.cards/api/v2',
+        isActive: true,
+        syncInterval: 0,
+    });
+    const isGameKey = familyKey === 'GAME_KEYS';
+    const base = isGameKey
+        ? {
+            externalProductId: 'FAZER_GAMEKEY:against_the_storm_cis:keepers_of_the_stone',
+            rawName: 'Against the Storm CIS - Keepers of the Stone',
+            rawPrice: '4.7877',
+            costPrice: '4.7877',
+            category: 'against_the_storm_cis',
+            categoryName: 'Against the Storm CIS',
+            offerId: 'keepers_of_the_stone',
+            offerName: 'Keepers of the Stone',
+            familyKey: 'GAME_KEYS',
+            stock: 1,
+            minQty: 1,
+            maxQty: 1,
+            region: 'CIS',
+            platform: 'Steam',
+            rawPayload: {
+                family: 'GAME_KEYS',
+                game: { game_id: 'against_the_storm_cis', name: 'Against the Storm', region: 'CIS', platform: 'Steam' },
+                key: { key_id: 'keepers_of_the_stone', name: 'Keepers of the Stone', price_usd: '4.7877', stock: 1 },
+            },
+        }
+        : {
+            externalProductId: 'FAZER_GIFTCARD:acash_my:10_myr',
+            rawName: 'A-Cash (MY) - 10 MYR',
+            rawPrice: '2.6029',
+            costPrice: '2.6029',
+            category: 'acash_my',
+            categoryName: 'A-Cash (MY)',
+            offerId: '10_myr',
+            offerName: '10 MYR',
+            familyKey: 'GIFTCARDS',
+            stock: 100,
+            minQty: 1,
+            maxQty: 10,
+            rawPayload: {
+                family: 'GIFTCARDS',
+                category: { category_id: 'acash_my', name: 'A-Cash (MY)' },
+                offer: { card_id: '10_myr', name: '10 MYR', price_usd: '2.6029', stock: 100 },
+            },
+        };
+
+    const providerProduct = await ProviderProduct.create({
+        provider: provider._id,
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        currency: 'USD',
+        isActive: true,
+        available: true,
+        fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+        supportLevel: 'NEEDS_CODE_DELIVERY',
+        executionBlocked: true,
+        isSupported: false,
+        isBlocked: true,
+        blockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+        requiredFields: [],
+        ...base,
+        ...overrides,
+    });
+
     return { provider, providerProduct };
 };
 
@@ -906,8 +979,6 @@ describe('FazerCards multi-family catalog discovery', () => {
             offerId: 'card_10usd',
             costPrice: '10.5',
         });
-        await expect(fazerCardsCatalogSvc.importProviderProduct(stored._id, { sellPrice: 12 }))
-            .rejects.toMatchObject({ code: 'FAZERCARDS_IMPORT_UNSUPPORTED_FULFILLMENT_MODE' });
         expect(await Product.countDocuments({})).toBe(0);
         expect(await Order.countDocuments({})).toBe(0);
         expect(await WalletTransaction.countDocuments({})).toBe(0);
@@ -1088,6 +1159,254 @@ describe('FazerCards multi-family catalog discovery', () => {
             isBlocked: true,
             blockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
         });
+    });
+});
+
+describe('FazerCards CODE_DELIVERY foundation', () => {
+    it('builds a gift card import preview for inactive code-delivery import', async () => {
+        const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
+
+        const preview = await fazerCardsCatalogSvc.getImportPreview(providerProduct._id);
+
+        expect(preview).toMatchObject({
+            providerProductId: providerProduct._id.toString(),
+            providerProductName: 'A-Cash (MY) - 10 MYR',
+            externalProductId: 'FAZER_GIFTCARD:acash_my:10_myr',
+            familyKey: 'GIFTCARDS',
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            executionBlocked: true,
+            blockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+            costPrice: '2.6029',
+            currency: 'USD',
+            requiredFields: [],
+            suggestedOrderFields: [],
+            stock: 100,
+            minQty: 1,
+            maxQty: 10,
+        });
+        expect(preview.warning).toContain('Code delivery execution is not implemented yet');
+    });
+
+    it('imports a gift card as inactive hidden provider-disabled Product metadata', async () => {
+        const { provider, providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
+
+        const result = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 3.25,
+            name: 'A-Cash MY 10',
+            description: 'Pilot gift card',
+        });
+
+        expect(result.action).toBe('created');
+        expect(result.product).toMatchObject({
+            name: 'A-Cash MY 10',
+            description: 'Pilot gift card',
+            basePrice: '3.25',
+            providerPrice: '2.6029',
+            finalPrice: '3.25',
+            currency: 'USD',
+            minQty: 1,
+            maxQty: 10,
+            isActive: false,
+            visibleInStore: false,
+            status: PRODUCT_STATUSES.UNAVAILABLE,
+            executionType: EXECUTION_TYPES.MANUAL,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            externalProductId: 'FAZER_GIFTCARD:acash_my:10_myr',
+            providerExecutionEnabled: false,
+            providerExecutionBlocked: true,
+            providerBlockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+            familyKey: 'GIFTCARDS',
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            providerCategory: 'acash_my',
+            providerCategoryName: 'A-Cash (MY)',
+            providerOfferId: '10_myr',
+            providerOfferName: '10 MYR',
+            providerStock: 100,
+            orderFields: [],
+            dynamicFields: [],
+        });
+        expect(result.product.provider.toString()).toBe(provider._id.toString());
+        expect(result.product.providerProduct.toString()).toBe(providerProduct._id.toString());
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('imports a game key as inactive hidden provider-disabled Product metadata', async () => {
+        const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GAME_KEYS' });
+
+        const result = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 6.5,
+            name: 'Against the Storm Key',
+        });
+
+        expect(result.product).toMatchObject({
+            name: 'Against the Storm Key',
+            isActive: false,
+            visibleInStore: false,
+            status: PRODUCT_STATUSES.UNAVAILABLE,
+            executionType: EXECUTION_TYPES.MANUAL,
+            providerExecutionEnabled: false,
+            providerExecutionBlocked: true,
+            providerBlockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+            familyKey: 'GAME_KEYS',
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            providerCategory: 'against_the_storm_cis',
+            providerOfferId: 'keepers_of_the_stone',
+            providerRegion: 'CIS',
+            providerPlatform: 'Steam',
+            providerStock: 1,
+            orderFields: [],
+            dynamicFields: [],
+        });
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('builds gift card dry-run payload without calling provider, creating orders, or wallet transactions', async () => {
+        const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 3.25,
+            name: 'A-Cash MY 10',
+        });
+        const productCount = await Product.countDocuments({});
+
+        const result = await fazerCardsCatalogSvc.buildCodeDeliveryDryRun({
+            productId: product._id,
+            quantity: 1,
+        });
+
+        expect(result).toMatchObject({
+            success: true,
+            dryRun: true,
+            wouldCall: 'POST /giftcards/order',
+            provider: 'FazerCards',
+            payload: {
+                category_id: 'acash_my',
+                card_id: '10_myr',
+                quantity: 1,
+            },
+            product: {
+                id: product._id.toString(),
+                familyKey: 'GIFTCARDS',
+                fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+                providerExecutionEnabled: false,
+                providerExecutionBlocked: true,
+            },
+            providerProduct: {
+                externalProductId: 'FAZER_GIFTCARD:acash_my:10_myr',
+                stock: 100,
+                minQty: 1,
+                maxQty: 10,
+            },
+            requiredFields: [],
+        });
+        expect(result.warnings).toContain('Dry run only. No FazerCards order was created.');
+        expect(result.warnings).toContain('Code delivery live execution is not implemented yet.');
+        expect(await Product.countDocuments({})).toBe(productCount);
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('builds game key dry-run payload without calling provider', async () => {
+        const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GAME_KEYS' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 6.5,
+            name: 'Against the Storm Key',
+        });
+
+        const result = await fazerCardsCatalogSvc.buildCodeDeliveryDryRun({
+            productId: product._id,
+            quantity: 1,
+        });
+
+        expect(result).toMatchObject({
+            success: true,
+            dryRun: true,
+            wouldCall: 'POST /gamekeys/order',
+            payload: {
+                game_id: 'against_the_storm_cis',
+                key_id: 'keepers_of_the_stone',
+                quantity: 1,
+            },
+            providerProduct: {
+                familyKey: 'GAME_KEYS',
+                region: 'CIS',
+                platform: 'Steam',
+            },
+        });
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('validates code-delivery quantity and stock before dry-run payload build', async () => {
+        const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GAME_KEYS' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 6.5,
+            name: 'Against the Storm Key',
+        });
+
+        await expect(fazerCardsCatalogSvc.buildCodeDeliveryDryRun({
+            productId: product._id,
+            quantity: 0,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_CODE_DELIVERY_QUANTITY_INVALID' });
+
+        await expect(fazerCardsCatalogSvc.buildCodeDeliveryDryRun({
+            productId: product._id,
+            quantity: 2,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_CODE_DELIVERY_QUANTITY_INVALID' });
+
+        await ProviderProduct.findByIdAndUpdate(providerProduct._id, { $set: { maxQty: 5 } });
+        await expect(fazerCardsCatalogSvc.buildCodeDeliveryDryRun({
+            productId: product._id,
+            quantity: 2,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_CODE_DELIVERY_STOCK_INSUFFICIENT' });
+
+        expect(axios.create).not.toHaveBeenCalled();
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+    });
+
+    it('returns code-delivery readiness as safe and not live-executable', async () => {
+        const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 3.25,
+            name: 'A-Cash MY 10',
+        });
+
+        const result = await fazerCardsCatalogSvc.getCodeDeliveryReadiness(product._id);
+
+        expect(result).toMatchObject({
+            success: true,
+            productId: product._id.toString(),
+            productName: 'A-Cash MY 10',
+            readyForLiveExecution: false,
+            familyKey: 'GIFTCARDS',
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            checks: {
+                productExists: true,
+                linkedToFazerCards: true,
+                familySupportedForPreview: true,
+                fulfillmentModeCodeDelivery: true,
+                providerProductExists: true,
+                stockSufficient: true,
+                costValid: true,
+                quantitySupported: true,
+                globalRealOrdersEnabled: false,
+                providerExecutionEnabled: false,
+                codeDeliveryStorageReady: true,
+                productHidden: true,
+                productInactive: true,
+                hasCategoryId: true,
+                hasItemId: true,
+            },
+        });
+        expect(result.warnings).toContain('Code delivery live execution is not implemented yet.');
+        expect(ProviderDeliveredCode.modelName).toBe('ProviderDeliveredCode');
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+        expect(axios.create).not.toHaveBeenCalled();
     });
 });
 
