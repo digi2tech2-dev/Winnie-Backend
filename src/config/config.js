@@ -130,6 +130,10 @@ const config = {
             maxOrderUsd: process.env.FAZERCARDS_MAX_ORDER_USD === undefined
                 ? 1.00
                 : parseFloat(process.env.FAZERCARDS_MAX_ORDER_USD),
+            codeDeliveryEnabled: process.env.FAZERCARDS_CODE_DELIVERY_ENABLED === 'true',
+            codeDeliveryMaxOrderUsd: process.env.FAZERCARDS_CODE_DELIVERY_MAX_ORDER_USD === undefined
+                ? 3.00
+                : parseFloat(process.env.FAZERCARDS_CODE_DELIVERY_MAX_ORDER_USD),
             blockedRegions: (process.env.FAZERCARDS_BLOCKED_REGIONS || 'RU,RUSSIA,CIS')
                 .split(',')
                 .map((region) => region.trim().toUpperCase())

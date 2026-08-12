@@ -39,6 +39,8 @@ const {
     BusinessRuleError,
 } = require('../../shared/errors/AppError');
 
+const PROVIDER_PRODUCT_ADMIN_SELECT = 'rawName translatedName externalProductId rawPrice costPrice currency minQty maxQty isActive lastSyncedAt providerCode familyKey fulfillmentMode supportLevel executionBlocked isSupported isBlocked blockReason category categoryName offerId offerName region platform stock requiredFields';
+
 const dynamicFieldsFromOrderFields = (orderFields = []) => (
     (Array.isArray(orderFields) ? orderFields : []).map((field) => ({
         name: field.key,
@@ -165,8 +167,8 @@ const listProducts = async ({
             .sort(sortForProducts(sort))
             .skip(skip)
             .limit(normalizedLimit)
-            .populate('provider', 'name slug')
-            .populate('providerProduct', 'rawName translatedName externalProductId rawPrice minQty maxQty isActive lastSyncedAt'),
+            .populate('provider', 'name slug code providerCode')
+            .populate('providerProduct', PROVIDER_PRODUCT_ADMIN_SELECT),
         Product.countDocuments(filter),
     ]);
 
@@ -184,8 +186,8 @@ const listProducts = async ({
  */
 const getProductById = async (id) => {
     const product = await Product.findById(id)
-        .populate('provider', 'name slug baseUrl isActive')
-        .populate('providerProduct', 'rawName translatedName externalProductId rawPrice minQty maxQty isActive lastSyncedAt');
+        .populate('provider', 'name slug code providerCode baseUrl isActive')
+        .populate('providerProduct', PROVIDER_PRODUCT_ADMIN_SELECT);
     if (!product) throw new NotFoundError('Product');
     return isXenaProductLike(product) ? canonicalizeXenaProductForResponse(product) : product;
 };
@@ -628,8 +630,8 @@ const updateProduct = async (productId, updates) => {
     );
 
     const updatedProduct = await Product.findById(product._id)
-        .populate('provider', 'name slug')
-        .populate('providerProduct', 'rawName translatedName externalProductId rawPrice minQty maxQty isActive');
+        .populate('provider', 'name slug code providerCode')
+        .populate('providerProduct', PROVIDER_PRODUCT_ADMIN_SELECT);
     return isXenaProductLike(updatedProduct)
         ? canonicalizeXenaProductForResponse(updatedProduct)
         : updatedProduct;
@@ -681,8 +683,8 @@ const syncProductPriceFromProvider = async (productId) => {
 
     await product.save();
     return product.populate([
-        { path: 'provider', select: 'name slug' },
-        { path: 'providerProduct', select: 'rawName translatedName externalProductId rawPrice minQty maxQty isActive' },
+        { path: 'provider', select: 'name slug code providerCode' },
+        { path: 'providerProduct', select: PROVIDER_PRODUCT_ADMIN_SELECT },
     ]);
 };
 
@@ -700,8 +702,8 @@ const unlinkProductProvider = async (productId) => {
 
     await product.save();
     return product.populate([
-        { path: 'provider', select: 'name slug' },
-        { path: 'providerProduct', select: 'rawName translatedName externalProductId rawPrice minQty maxQty isActive' },
+        { path: 'provider', select: 'name slug code providerCode' },
+        { path: 'providerProduct', select: PROVIDER_PRODUCT_ADMIN_SELECT },
     ]);
 };
 

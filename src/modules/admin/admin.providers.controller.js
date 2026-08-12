@@ -171,6 +171,11 @@ const syncFazerCardsCatalogFamily = catchAsync(async (req, res) => {
     sendSuccess(res, data, 'FazerCards catalog family synced');
 });
 
+const syncFazerCardsCatalogAll = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.syncAllCatalogFamilies(req.body);
+    sendSuccess(res, data, 'FazerCards catalog families synced');
+});
+
 const getFazerCardsCatalogSummary = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.getCatalogSummary();
     sendSuccess(res, data, 'FazerCards catalog summary retrieved');
@@ -211,6 +216,19 @@ const dryRunFazerCardsCodeDelivery = catchAsync(async (req, res) => {
     sendSuccess(res, data, 'FazerCards code-delivery dry run built');
 });
 
+const dryRunFazerCardsProduct = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.buildUnifiedDryRun({
+        productId: req.params.productId,
+        ...req.body,
+    });
+    sendSuccess(res, data, 'FazerCards product dry run built');
+});
+
+const runFazerCardsCodeDeliveryLivePilot = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.runCodeDeliveryLivePilot(req.body, req.user?._id);
+    sendSuccess(res, data, 'FazerCards code-delivery live pilot executed');
+});
+
 const getFazerCardsProductReadiness = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.getProductReadiness(req.params.productId);
     sendSuccess(res, data, 'FazerCards product readiness retrieved');
@@ -219,6 +237,21 @@ const getFazerCardsProductReadiness = catchAsync(async (req, res) => {
 const getFazerCardsCodeDeliveryReadiness = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.getCodeDeliveryReadiness(req.params.productId);
     sendSuccess(res, data, 'FazerCards code-delivery readiness retrieved');
+});
+
+const getFazerCardsCodeDeliveryLivePilotDebug = catchAsync(async (req, res) => {
+    const debug = await fazerCardsCatalogSvc.getCodeDeliveryLivePilotDebug(req.params.orderId);
+    sendSuccess(res, { debug }, 'FazerCards code-delivery pilot debug retrieved');
+});
+
+const listFazerCardsCodeDeliveryPilotCodes = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.listCodeDeliveryPilotDeliveredCodes(req.params.orderId);
+    sendSuccess(res, data, 'FazerCards delivered code metadata retrieved');
+});
+
+const getFazerCardsDeliveredCodeDebug = catchAsync(async (req, res) => {
+    const debug = await fazerCardsCatalogSvc.getDeliveredCodeDebug(req.params.codeId);
+    sendSuccess(res, { debug }, 'FazerCards delivered code debug retrieved');
 });
 
 const syncFazerCardsOrderStatus = catchAsync(async (req, res) => {
@@ -257,6 +290,7 @@ module.exports = {
     syncFazerCardsCatalogPage,
     listFazerCardsCatalogFamilies,
     syncFazerCardsCatalogFamily,
+    syncFazerCardsCatalogAll,
     getFazerCardsCatalogSummary,
     backfillFazerCardsCatalogFamilies,
     listFazerCardsProviderProducts,
@@ -265,8 +299,13 @@ module.exports = {
     importFazerCardsProviderProduct,
     dryRunFazerCardsTopup,
     dryRunFazerCardsCodeDelivery,
+    dryRunFazerCardsProduct,
+    runFazerCardsCodeDeliveryLivePilot,
     getFazerCardsProductReadiness,
     getFazerCardsCodeDeliveryReadiness,
+    getFazerCardsCodeDeliveryLivePilotDebug,
+    listFazerCardsCodeDeliveryPilotCodes,
+    getFazerCardsDeliveredCodeDebug,
     syncFazerCardsOrderStatus,
     getFazerCardsOrderProviderDebug,
 };

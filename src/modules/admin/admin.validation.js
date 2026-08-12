@@ -468,6 +468,36 @@ const fazerCardsCatalogSyncFamilySchema = Joi.object({
     cursor: Joi.string().trim().max(2048).allow('', null),
 });
 
+const fazerCardsCatalogSyncAllSchema = Joi.object({
+    families: Joi.array().items(Joi.string().trim().uppercase().valid(
+        'TOPUPS',
+        'GIFTCARDS',
+        'GAME_KEYS',
+        'STEAM_TOPUP',
+        'STEAM_GIFTS',
+        'TELEGRAM',
+        'MANUAL_SERVICES'
+    )).unique().default([]),
+    limit: Joi.number().integer().min(1).max(100).default(20),
+    cursor: Joi.string().trim().max(2048).allow('', null),
+    cursors: Joi.object().pattern(
+        Joi.string().trim().uppercase(),
+        Joi.string().trim().max(2048).allow('', null)
+    ).default({}),
+    limits: Joi.object().pattern(
+        Joi.string().trim().uppercase(),
+        Joi.number().integer().min(1).max(100)
+    ).default({}),
+    familyOptions: Joi.object().pattern(
+        Joi.string().trim().uppercase(),
+        Joi.object({
+            limit: Joi.number().integer().min(1).max(100),
+            cursor: Joi.string().trim().max(2048).allow('', null),
+        })
+    ).default({}),
+    includeSteamGifts: Joi.boolean().default(false),
+});
+
 const fazerCardsTopupDryRunSchema = Joi.object({
     productId: objectId().required().messages({
         'any.required': 'productId is required',
@@ -476,11 +506,29 @@ const fazerCardsTopupDryRunSchema = Joi.object({
     orderId: Joi.string().trim().max(128).allow('', null),
 });
 
+const fazerCardsUnifiedDryRunSchema = Joi.object({
+    fields: Joi.object().unknown(true).default({}),
+    quantity: Joi.number().integer().min(1).max(1000).default(1),
+    orderId: Joi.string().trim().max(128).allow('', null),
+});
+
 const fazerCardsCodeDeliveryDryRunSchema = Joi.object({
     productId: objectId().required().messages({
         'any.required': 'productId is required',
     }),
     quantity: Joi.number().integer().min(1).max(1000).default(1),
+});
+
+const fazerCardsCodeDeliveryLivePilotSchema = Joi.object({
+    productId: objectId().required().messages({
+        'any.required': 'productId is required',
+    }),
+    quantity: Joi.number().integer().min(1).max(1000).default(1),
+    confirmRealOrder: Joi.boolean().valid(true).required().messages({
+        'any.only': 'confirmRealOrder must be true',
+        'any.required': 'confirmRealOrder is required',
+    }),
+    operatorNote: Joi.string().trim().max(500).allow('', null),
 });
 
 const listFazerCardsProviderProductsQuery = Joi.object({
@@ -622,8 +670,11 @@ module.exports = {
         xenaTargetVerification: xenaTargetVerificationSchema,
         fazerCardsCatalogSync: fazerCardsCatalogSyncSchema,
         fazerCardsCatalogSyncFamily: fazerCardsCatalogSyncFamilySchema,
+        fazerCardsCatalogSyncAll: fazerCardsCatalogSyncAllSchema,
         fazerCardsTopupDryRun: fazerCardsTopupDryRunSchema,
+        fazerCardsUnifiedDryRun: fazerCardsUnifiedDryRunSchema,
         fazerCardsCodeDeliveryDryRun: fazerCardsCodeDeliveryDryRunSchema,
+        fazerCardsCodeDeliveryLivePilot: fazerCardsCodeDeliveryLivePilotSchema,
         fazerCardsProviderProductImport: fazerCardsProviderProductImportSchema,
         listFazerCardsProviderProductsQuery,
         // Orders

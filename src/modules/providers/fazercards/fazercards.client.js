@@ -198,6 +198,30 @@ class FazerCardsClient {
         });
     }
 
+    createGiftCardOrder({ categoryId, cardId, quantity, idempotencyKey } = {}) {
+        return this.request('post', '/giftcards/order', {
+            data: {
+                category_id: categoryId,
+                card_id: cardId,
+                quantity,
+            },
+            headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+            context: 'giftcard_order',
+        });
+    }
+
+    createGameKeyOrder({ gameId, keyId, quantity, idempotencyKey } = {}) {
+        return this.request('post', '/gamekeys/order', {
+            data: {
+                game_id: gameId,
+                key_id: keyId,
+                quantity,
+            },
+            headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+            context: 'gamekey_order',
+        });
+    }
+
     getTopupOrderStatus({ providerOrderId } = {}) {
         const id = String(providerOrderId || '').trim();
         if (!id) {

@@ -21,6 +21,8 @@ const productService = require('../modules/products/product.service');
 const fazerCardsCatalogSvc = require('../modules/providers/fazercards/fazercardsCatalog.service');
 const { FazerCardsClient } = require('../modules/providers/fazercards/fazercards.client');
 const { ProviderDeliveredCode } = require('../modules/providers/fazercards/providerDeliveredCode.model');
+const { ProviderPilotOrder } = require('../modules/providers/fazercards/providerPilotOrder.model');
+const { decryptSecret, isEncryptedSecret } = require('../shared/utils/secretEncryption');
 const {
     FazerCardsAdapter,
     normalizeTopupOfferProduct,
@@ -149,6 +151,110 @@ const createFazerCodeDeliveryProviderProduct = async ({ familyKey = 'GIFTCARDS',
     return { provider, providerProduct };
 };
 
+const createFazerCatalogOnlyProviderProduct = async ({ familyKey = 'TELEGRAM', overrides = {} } = {}) => {
+    const provider = await Provider.findOne({ providerCode: PROVIDER_CODES.FAZER_CARDS }) || await Provider.create({
+        name: 'FazerCards',
+        slug: 'fazer-cards',
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        baseUrl: 'https://api.fzr.cards/api/v2',
+        isActive: true,
+        syncInterval: 0,
+    });
+    const defaultsByFamily = {
+        TELEGRAM: {
+            externalProductId: 'FAZER_TELEGRAM:STARS',
+            rawName: 'Telegram Stars',
+            rawPrice: '0.02',
+            costPrice: '0.02',
+            category: 'telegram',
+            categoryName: 'Telegram',
+            offerId: 'stars',
+            offerName: 'Stars',
+            familyKey: 'TELEGRAM',
+            fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
+            supportLevel: 'NEEDS_SPECIAL_FIELDS',
+            blockReason: 'TELEGRAM_EXECUTION_NOT_IMPLEMENTED',
+            requiredFields: [{ key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true }],
+            rawPayload: { family: 'TELEGRAM', kind: 'telegram_stars', response: { price_per_star: '0.02' } },
+        },
+        STEAM_TOPUP: {
+            externalProductId: 'FAZER_STEAM_TOPUP:USD',
+            rawName: 'Steam Wallet Top-up - USD',
+            rawPrice: '1',
+            costPrice: '1',
+            category: 'steam_topup',
+            categoryName: 'Steam Wallet Top-up',
+            offerId: 'USD',
+            offerName: 'USD',
+            familyKey: 'STEAM_TOPUP',
+            fulfillmentMode: FULFILLMENT_MODES.STEAM_TOPUP_WITH_LOGIN,
+            supportLevel: 'NEEDS_SPECIAL_FIELDS',
+            blockReason: 'STEAM_TOPUP_EXECUTION_NOT_IMPLEMENTED',
+            requiredFields: [{ key: 'steamLogin', label: 'Steam Login', type: 'text', required: true }],
+            rawPayload: { family: 'STEAM_TOPUP', rateCurrency: 'USD', rate: 1 },
+        },
+        MANUAL_SERVICES: {
+            externalProductId: 'FAZER_MANUAL_SERVICE:social_boost:starter',
+            rawName: 'Social Boost - Starter',
+            rawPrice: '0.75',
+            costPrice: '0.75',
+            category: 'social_boost',
+            categoryName: 'Social Boost',
+            offerId: 'starter',
+            offerName: 'Starter',
+            familyKey: 'MANUAL_SERVICES',
+            fulfillmentMode: FULFILLMENT_MODES.MANUAL_SERVICE,
+            supportLevel: 'NEEDS_SPECIAL_FIELDS',
+            blockReason: 'MANUAL_SERVICE_EXECUTION_NOT_IMPLEMENTED',
+            requiredFields: [],
+            rawPayload: {
+                family: 'MANUAL_SERVICES',
+                category: { id: 'social_boost', name: 'Social Boost' },
+                offer: { id: 'starter', name: 'Starter', price_usd: '0.75' },
+            },
+        },
+    };
+    const base = defaultsByFamily[familyKey] || defaultsByFamily.TELEGRAM;
+    const providerProduct = await ProviderProduct.create({
+        provider: provider._id,
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        currency: 'USD',
+        isActive: true,
+        available: true,
+        executionBlocked: true,
+        isSupported: false,
+        isBlocked: true,
+        minQty: 1,
+        maxQty: 9999,
+        ...base,
+        ...overrides,
+    });
+
+    return { provider, providerProduct };
+};
+
+const createReadyCodeDeliveryProduct = async ({ familyKey = 'GIFTCARDS', sellPrice = 3.25 } = {}) => {
+    const { provider, providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey });
+    const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+        sellPrice,
+        name: familyKey === 'GAME_KEYS' ? 'Against the Storm Key' : 'A-Cash MY 10',
+    });
+    await ProviderProduct.findByIdAndUpdate(providerProduct._id, {
+        $set: {
+            executionBlocked: false,
+        },
+    });
+    const updatedProduct = await Product.findByIdAndUpdate(product._id, {
+        $set: {
+            providerExecutionEnabled: true,
+            providerExecutionBlocked: false,
+            providerBlockReason: null,
+        },
+    }, { new: true });
+    const updatedProviderProduct = await ProviderProduct.findById(providerProduct._id);
+    return { provider, providerProduct: updatedProviderProduct, product: updatedProduct };
+};
+
 const createFazerTopupOrder = async ({
     providerExecutionEnabled = true,
     customerFields = { user_id: '00123456789' },
@@ -229,6 +335,8 @@ beforeEach(async () => {
     config.providers.fazerCards.topupOrderStatusPath = null;
     config.providers.fazerCards.realOrdersEnabled = false;
     config.providers.fazerCards.maxOrderUsd = 1.00;
+    config.providers.fazerCards.codeDeliveryEnabled = false;
+    config.providers.fazerCards.codeDeliveryMaxOrderUsd = 3.00;
     config.providers.fazerCards.blockedRegions = ['RU', 'RUSSIA', 'CIS'];
     axios.create.mockReset();
     await clearCollections();
@@ -1042,6 +1150,78 @@ describe('FazerCards multi-family catalog discovery', () => {
         expect(client.request.mock.calls.some(([call]) => String(call.url).includes('/order'))).toBe(false);
     });
 
+    it('sync-all runs only read-only catalog endpoints and records Steam Gifts as unavailable', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: {
+                    ok: true,
+                    kind: 'topup',
+                    items: [{ category_id: '8_ball_pool', name: '8 Ball Pool' }],
+                    meta: { total: 1, limit: 2, next_cursor: null, has_more: false },
+                },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: {
+                    ok: true,
+                    kind: 'topup',
+                    category_id: '8_ball_pool',
+                    name: '8 Ball Pool',
+                    offers: [{ offer_id: '110_cash', name: '110 Cash', price_usd: '0.99' }],
+                    fields: [{ key: 'user_id', label: 'Unique ID', type: 'text' }],
+                },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: {
+                    ok: true,
+                    kind: 'gift_card',
+                    items: [{ category_id: 'acash_my', name: 'A-Cash (MY)' }],
+                    meta: { total: 1, limit: 2, next_cursor: null, has_more: false },
+                },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: {
+                    ok: true,
+                    kind: 'gift_card',
+                    offers: [{ card_id: '10_myr', name: '10 MYR', price_usd: '2.60', stock: 100 }],
+                },
+            });
+
+        const result = await fazerCardsCatalogSvc.syncAllCatalogFamilies({
+            families: ['TOPUPS', 'GIFTCARDS', 'STEAM_GIFTS'],
+            limit: 2,
+        });
+
+        expect(result.familiesSynced).toEqual(expect.arrayContaining(['TOPUPS', 'GIFTCARDS']));
+        expect(result.familiesSkipped).toContain('STEAM_GIFTS');
+        expect(result.results.STEAM_GIFTS).toMatchObject({
+            skipped: true,
+            unavailable: true,
+            providerProductsCreated: 0,
+        });
+        expect(result.warnings[0]).toMatchObject({
+            familyKey: 'STEAM_GIFTS',
+            code: 'STEAM_GIFTS_CATALOG_UNAVAILABLE',
+        });
+        expect(await ProviderProduct.countDocuments({ providerCode: PROVIDER_CODES.FAZER_CARDS })).toBe(2);
+        expect(await Product.countDocuments({})).toBe(0);
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+        const urls = client.request.mock.calls.map(([call]) => call.url);
+        expect(urls).toEqual(['/topups', '/topups/offers', '/giftcards', '/giftcards/cards']);
+        expect(urls.some((url) => String(url).includes('/order'))).toBe(false);
+        expect(urls.some((url) => String(url).includes('/steam-gifts'))).toBe(false);
+    });
+
     it('counts legacy top-up ProviderProducts under TOPUPS summary before backfill', async () => {
         const { providerProduct } = await createFazerTopupProviderProduct();
         await ProviderProduct.findByIdAndUpdate(providerProduct._id, {
@@ -1407,6 +1587,532 @@ describe('FazerCards CODE_DELIVERY foundation', () => {
         expect(await Order.countDocuments({})).toBe(0);
         expect(await WalletTransaction.countDocuments({})).toBe(0);
         expect(axios.create).not.toHaveBeenCalled();
+    });
+});
+
+describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
+    it.each([
+        ['TELEGRAM', FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP, 'TELEGRAM_EXECUTION_NOT_IMPLEMENTED'],
+        ['STEAM_TOPUP', FULFILLMENT_MODES.STEAM_TOPUP_WITH_LOGIN, 'STEAM_TOPUP_EXECUTION_NOT_IMPLEMENTED'],
+        ['MANUAL_SERVICES', FULFILLMENT_MODES.MANUAL_SERVICE, 'MANUAL_SERVICE_EXECUTION_NOT_IMPLEMENTED'],
+    ])('imports %s as inactive hidden provider-blocked draft', async (familyKey, fulfillmentMode, blockReason) => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey });
+
+        const result = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 4.25,
+            name: `${familyKey} Draft Product`,
+        });
+
+        expect(result.product).toMatchObject({
+            name: `${familyKey} Draft Product`,
+            isActive: false,
+            visibleInStore: false,
+            status: PRODUCT_STATUSES.UNAVAILABLE,
+            executionType: EXECUTION_TYPES.MANUAL,
+            providerExecutionEnabled: false,
+            providerExecutionBlocked: true,
+            providerBlockReason: blockReason,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            familyKey,
+            fulfillmentMode,
+            externalProductId: providerProduct.externalProductId,
+        });
+        expect(result.product.providerProduct.toString()).toBe(providerProduct._id.toString());
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('unified dry-run routes top-ups to the existing top-up payload builder without provider calls', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct();
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.25,
+            name: '8 Ball Pool - Golden Spin',
+        });
+
+        const result = await fazerCardsCatalogSvc.buildUnifiedDryRun({
+            productId: product._id,
+            fields: { user_id: '00123456789' },
+            orderId: 'order_123',
+        });
+
+        expect(result).toMatchObject({
+            dryRun: true,
+            wouldCall: 'POST /topups/order',
+            idempotencyKeyPreview: 'fazercards:topup:order_123',
+            payload: {
+                category_id: '8_ball_pool',
+                offer_id: 'golden_spin',
+                fields: { user_id: '00123456789' },
+            },
+        });
+        expect(axios.create).not.toHaveBeenCalled();
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+    });
+
+    it('unified dry-run previews unimplemented families without provider order endpoints', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.75,
+            name: 'Telegram Stars Draft',
+        });
+
+        const result = await fazerCardsCatalogSvc.buildUnifiedDryRun({
+            productId: product._id,
+            fields: { telegram_username: 'pilot_user' },
+            quantity: 25,
+        });
+
+        expect(result).toMatchObject({
+            success: true,
+            dryRun: true,
+            wouldCall: null,
+            executionAvailable: false,
+            product: {
+                familyKey: 'TELEGRAM',
+                fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
+                providerExecutionEnabled: false,
+                providerExecutionBlocked: true,
+            },
+            payload: {
+                product: 'telegram_stars',
+                quantity: 25,
+                fields: { telegram_username: 'pilot_user' },
+            },
+        });
+        expect(result.warnings).toContain('Telegram live execution is not implemented yet.');
+        expect(axios.create).not.toHaveBeenCalled();
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+    });
+
+    it('unified readiness works for catalog-only families and remains not live-executable', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'STEAM_TOPUP' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 2.25,
+            name: 'Steam Wallet Draft',
+        });
+
+        const result = await fazerCardsCatalogSvc.getProductReadiness(product._id);
+
+        expect(result).toMatchObject({
+            success: true,
+            productId: product._id.toString(),
+            readyForLiveExecution: false,
+            familyKey: 'STEAM_TOPUP',
+            fulfillmentMode: FULFILLMENT_MODES.STEAM_TOPUP_WITH_LOGIN,
+            checks: {
+                familyCatalogSupported: true,
+                executionImplemented: false,
+                productExecutionEnabled: false,
+                productExecutionBlocked: true,
+                productHidden: true,
+                productInactive: true,
+            },
+            providerProduct: {
+                externalProductId: 'FAZER_STEAM_TOPUP:USD',
+                blockReason: 'STEAM_TOPUP_EXECUTION_NOT_IMPLEMENTED',
+                requiredFieldKeys: ['steamLogin'],
+            },
+        });
+        expect(result.warnings).toContain('Steam Wallet Top-up live execution is not implemented yet.');
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('provider delivered code metadata/debug never returns plaintext codes', async () => {
+        const { provider, providerProduct, product } = await createReadyCodeDeliveryProduct({ familyKey: 'GIFTCARDS' });
+        const pilot = await ProviderPilotOrder.create({
+            product: product._id,
+            provider: provider._id,
+            providerProduct: providerProduct._id,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            familyKey: 'GIFTCARDS',
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            quantity: 1,
+            providerCost: '2.6029',
+            providerCostCurrency: 'USD',
+            status: ORDER_STATUS.COMPLETED,
+            deliveredCodeCount: 1,
+            storedEncrypted: true,
+        });
+        const delivered = new ProviderDeliveredCode({
+            pilotOrder: pilot._id,
+            provider: provider._id,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            providerProduct: providerProduct._id,
+            product: product._id,
+            familyKey: 'GIFTCARDS',
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            deliveryStatus: 'DELIVERED',
+            metadata: { code: 'SECRET-CODE-123', source: 'codes' },
+            providerRawResponse: { codes: ['SECRET-CODE-123'], order: { id: 'provider_1' } },
+            deliveredAt: new Date(),
+        });
+        delivered.setSecretValue('codeEncrypted', 'SECRET-CODE-123');
+        delivered.setSecretValue('pinEncrypted', 'PIN-999');
+        await delivered.save();
+
+        const list = await fazerCardsCatalogSvc.listCodeDeliveryPilotDeliveredCodes(pilot._id);
+        const debug = await fazerCardsCatalogSvc.getDeliveredCodeDebug(delivered._id);
+        const serialized = JSON.stringify({ list, debug });
+
+        expect(list).toMatchObject({
+            success: true,
+            deliveredCodeCount: 1,
+            items: [{
+                hasCode: true,
+                hasPin: true,
+                hasSerial: false,
+                storedEncrypted: true,
+            }],
+        });
+        expect(debug.code.hasCode).toBe(true);
+        expect(serialized).not.toContain('SECRET-CODE-123');
+        expect(serialized).not.toContain('PIN-999');
+        expect(serialized).toContain('[REDACTED_CODE]');
+    });
+});
+
+describe('FazerCards CODE_DELIVERY live pilot guards', () => {
+    const enableCodeDeliveryPilotGates = () => {
+        config.providers.fazerCards.enabled = true;
+        config.providers.fazerCards.realOrdersEnabled = true;
+        config.providers.fazerCards.codeDeliveryEnabled = true;
+        config.providers.fazerCards.codeDeliveryMaxOrderUsd = 3.00;
+    };
+
+    it('rejects live pilot when confirmRealOrder is false', async () => {
+        await expect(fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: '64b64c000000000000000001',
+            quantity: 1,
+            confirmRealOrder: false,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_CONFIRM_REAL_ORDER_REQUIRED' });
+        expect(axios.create).not.toHaveBeenCalled();
+        expect(await ProviderPilotOrder.countDocuments({})).toBe(0);
+    });
+
+    it('rejects live pilot when global real orders are disabled', async () => {
+        const { product } = await createReadyCodeDeliveryProduct({ familyKey: 'GIFTCARDS' });
+        config.providers.fazerCards.realOrdersEnabled = false;
+        config.providers.fazerCards.codeDeliveryEnabled = true;
+
+        await expect(fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 1,
+            confirmRealOrder: true,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_REAL_ORDERS_DISABLED' });
+        expect(axios.create).not.toHaveBeenCalled();
+        expect(await ProviderPilotOrder.countDocuments({})).toBe(0);
+    });
+
+    it('rejects live pilot when code-delivery gate is disabled', async () => {
+        const { product } = await createReadyCodeDeliveryProduct({ familyKey: 'GIFTCARDS' });
+        config.providers.fazerCards.realOrdersEnabled = true;
+        config.providers.fazerCards.codeDeliveryEnabled = false;
+
+        await expect(fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 1,
+            confirmRealOrder: true,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_CODE_DELIVERY_DISABLED' });
+        expect(axios.create).not.toHaveBeenCalled();
+        expect(await ProviderPilotOrder.countDocuments({})).toBe(0);
+    });
+
+    it('rejects live pilot when product providerExecutionEnabled is false', async () => {
+        enableCodeDeliveryPilotGates();
+        const { product } = await createReadyCodeDeliveryProduct({ familyKey: 'GIFTCARDS' });
+        await Product.findByIdAndUpdate(product._id, { $set: { providerExecutionEnabled: false } });
+
+        await expect(fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 1,
+            confirmRealOrder: true,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED' });
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects live pilot when product providerExecutionBlocked is true', async () => {
+        enableCodeDeliveryPilotGates();
+        const { product } = await createReadyCodeDeliveryProduct({ familyKey: 'GIFTCARDS' });
+        await Product.findByIdAndUpdate(product._id, { $set: { providerExecutionBlocked: true } });
+
+        await expect(fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 1,
+            confirmRealOrder: true,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_PROVIDER_EXECUTION_BLOCKED' });
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects live pilot when ProviderProduct executionBlocked is true', async () => {
+        enableCodeDeliveryPilotGates();
+        const { product, providerProduct } = await createReadyCodeDeliveryProduct({ familyKey: 'GIFTCARDS' });
+        await ProviderProduct.findByIdAndUpdate(providerProduct._id, { $set: { executionBlocked: true } });
+
+        await expect(fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 1,
+            confirmRealOrder: true,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_PROVIDER_PRODUCT_EXECUTION_BLOCKED' });
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects live pilot when cost exceeds code-delivery max', async () => {
+        enableCodeDeliveryPilotGates();
+        config.providers.fazerCards.codeDeliveryMaxOrderUsd = 1.00;
+        const { product } = await createReadyCodeDeliveryProduct({ familyKey: 'GIFTCARDS' });
+
+        await expect(fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 1,
+            confirmRealOrder: true,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_CODE_DELIVERY_MAX_COST_GUARD' });
+        expect(axios.create).not.toHaveBeenCalled();
+        expect(await ProviderPilotOrder.countDocuments({})).toBe(0);
+    });
+
+    it('rejects live pilot when balance is insufficient', async () => {
+        enableCodeDeliveryPilotGates();
+        const { product } = await createReadyCodeDeliveryProduct({ familyKey: 'GIFTCARDS' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: {},
+            data: { ok: true, balance: '1.00', currency: 'USD' },
+        });
+
+        await expect(fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 1,
+            confirmRealOrder: true,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_INSUFFICIENT_PROVIDER_BALANCE' });
+        expect(client.request).toHaveBeenCalledTimes(1);
+        expect(client.request.mock.calls.some(([call]) => String(call.url).includes('/order'))).toBe(false);
+        expect(await ProviderPilotOrder.countDocuments({})).toBe(0);
+    });
+
+    it('rejects live pilot when quantity is invalid', async () => {
+        enableCodeDeliveryPilotGates();
+        const { product } = await createReadyCodeDeliveryProduct({ familyKey: 'GAME_KEYS' });
+
+        await expect(fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 2,
+            confirmRealOrder: true,
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_CODE_DELIVERY_QUANTITY_INVALID' });
+        expect(axios.create).not.toHaveBeenCalled();
+        expect(await ProviderPilotOrder.countDocuments({})).toBe(0);
+    });
+
+    it('creates a local tracked record before mocked gift card provider call and stores encrypted codes safely', async () => {
+        enableCodeDeliveryPilotGates();
+        const { product, providerProduct } = await createReadyCodeDeliveryProduct({ familyKey: 'GIFTCARDS' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockImplementation(async (call) => {
+            if (call.url === '/balance') {
+                return { status: 200, headers: {}, data: { ok: true, balance: '10.00', currency: 'USD' } };
+            }
+            if (call.url === '/giftcards/order') {
+                const local = await ProviderPilotOrder.findOne({ product: product._id });
+                expect(local).toBeTruthy();
+                expect(call.headers).toEqual({ 'Idempotency-Key': `fazercards:code-delivery:${local._id.toString()}` });
+                return {
+                    status: 200,
+                    headers: { 'x-request-id': 'req-gift-pilot' },
+                    data: {
+                        ok: true,
+                        order: { id: 'fgc_1', status: 'succeeded' },
+                        cards: [{ code: 'SECRET-GIFT-CODE-1', pin: '1234', serial: 'SER-1' }],
+                    },
+                };
+            }
+            throw new Error(`Unexpected request ${call.url}`);
+        });
+
+        const result = await fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 1,
+            confirmRealOrder: true,
+            operatorNote: 'First controlled gift card pilot',
+        });
+        const pilot = await ProviderPilotOrder.findById(result.order.localOrderId).lean();
+        const storedCode = await ProviderDeliveredCode.findOne({ pilotOrder: pilot._id })
+            .select('+codeEncrypted +pinEncrypted +serialEncrypted')
+            .lean();
+
+        expect(result).toMatchObject({
+            success: true,
+            livePilot: true,
+            order: {
+                localStatus: ORDER_STATUS.COMPLETED,
+                familyKey: 'GIFTCARDS',
+                providerOrderId: 'fgc_1',
+                providerStatus: 'Completed',
+                deliveredCodeCount: 1,
+                hasPin: true,
+                hasSerial: true,
+                storedEncrypted: true,
+            },
+        });
+        expect(pilot.providerIdempotencyKey).toBe(`fazercards:code-delivery:${pilot._id.toString()}`);
+        expect(pilot.providerProduct.toString()).toBe(providerProduct._id.toString());
+        expect(JSON.stringify(result)).not.toContain('SECRET-GIFT-CODE-1');
+        expect(JSON.stringify(result)).not.toContain('1234');
+        expect(JSON.stringify(pilot.providerRawResponse)).not.toContain('SECRET-GIFT-CODE-1');
+        expect(storedCode.codeEncrypted).not.toBe('SECRET-GIFT-CODE-1');
+        expect(isEncryptedSecret(storedCode.codeEncrypted)).toBe(true);
+        expect(decryptSecret(storedCode.codeEncrypted)).toBe('SECRET-GIFT-CODE-1');
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+    });
+
+    it('stores mocked game key success encrypted without returning plaintext', async () => {
+        enableCodeDeliveryPilotGates();
+        config.providers.fazerCards.codeDeliveryMaxOrderUsd = 10.00;
+        const { product } = await createReadyCodeDeliveryProduct({ familyKey: 'GAME_KEYS', sellPrice: 6.5 });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: { ok: true, balance: '20.00', currency: 'USD' },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: { 'x-request-id': 'req-key-pilot' },
+                data: {
+                    ok: true,
+                    order: { id: 'fgk_1', status: 'success' },
+                    keys: [{ key: 'STEAM-KEY-SECRET-1', serial: 'KEY-SER-1' }],
+                },
+            });
+
+        const result = await fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 1,
+            confirmRealOrder: true,
+        });
+        const storedCode = await ProviderDeliveredCode.findOne({ pilotOrder: result.order.localOrderId })
+            .select('+codeEncrypted +serialEncrypted')
+            .lean();
+
+        expect(result.order).toMatchObject({
+            localStatus: ORDER_STATUS.COMPLETED,
+            familyKey: 'GAME_KEYS',
+            providerOrderId: 'fgk_1',
+            deliveredCodeCount: 1,
+            hasSerial: true,
+            storedEncrypted: true,
+        });
+        expect(client.request).toHaveBeenLastCalledWith(expect.objectContaining({
+            method: 'post',
+            url: '/gamekeys/order',
+            data: {
+                game_id: 'against_the_storm_cis',
+                key_id: 'keepers_of_the_stone',
+                quantity: 1,
+            },
+        }));
+        expect(JSON.stringify(result)).not.toContain('STEAM-KEY-SECRET-1');
+        expect(decryptSecret(storedCode.codeEncrypted)).toBe('STEAM-KEY-SECRET-1');
+    });
+
+    it('moves unknown provider response to manual review without blind refund or plaintext response', async () => {
+        enableCodeDeliveryPilotGates();
+        const { product } = await createReadyCodeDeliveryProduct({ familyKey: 'GIFTCARDS' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: { ok: true, balance: '10.00', currency: 'USD' },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: { ok: true, order: { id: 'fgc_unknown', status: 'succeeded' }, message: 'No code yet' },
+            });
+
+        const result = await fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 1,
+            confirmRealOrder: true,
+        });
+        const pilot = await ProviderPilotOrder.findById(result.order.localOrderId).lean();
+
+        expect(result.success).toBe(false);
+        expect(result.order.localStatus).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(result.order.deliveredCodeCount).toBe(0);
+        expect(pilot.providerErrorCode).toBe('FAZERCARDS_CODE_DELIVERY_CODE_MISSING');
+        expect(await ProviderDeliveredCode.countDocuments({ pilotOrder: pilot._id })).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+    });
+
+    it('debug endpoint returns safe live pilot data without plaintext code', async () => {
+        enableCodeDeliveryPilotGates();
+        const { product } = await createReadyCodeDeliveryProduct({ familyKey: 'GIFTCARDS' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: { ok: true, balance: '10.00', currency: 'USD' },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: {
+                    ok: true,
+                    order: { id: 'fgc_debug', status: 'completed' },
+                    codes: ['DEBUG-SECRET-CODE'],
+                },
+            });
+        const result = await fazerCardsCatalogSvc.runCodeDeliveryLivePilot({
+            productId: product._id,
+            quantity: 1,
+            confirmRealOrder: true,
+        });
+
+        const debug = await fazerCardsCatalogSvc.getCodeDeliveryLivePilotDebug(result.order.localOrderId);
+
+        expect(debug).toMatchObject({
+            localOrderId: result.order.localOrderId,
+            localStatus: ORDER_STATUS.COMPLETED,
+            familyKey: 'GIFTCARDS',
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            providerOrderId: 'fgc_debug',
+            deliveredCodeCount: 1,
+            storedEncrypted: true,
+        });
+        expect(JSON.stringify(debug)).not.toContain('DEBUG-SECRET-CODE');
+        expect(JSON.stringify(debug)).toContain('[REDACTED_CODE]');
+    });
+
+    it('keeps code-delivery dry-run provider-call-free after live pilot wiring', async () => {
+        const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 3.25,
+            name: 'A-Cash MY 10',
+        });
+
+        const result = await fazerCardsCatalogSvc.buildCodeDeliveryDryRun({
+            productId: product._id,
+            quantity: 1,
+        });
+
+        expect(result.dryRun).toBe(true);
+        expect(result.wouldCall).toBe('POST /giftcards/order');
+        expect(axios.create).not.toHaveBeenCalled();
+        expect(await ProviderPilotOrder.countDocuments({})).toBe(0);
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
     });
 });
 

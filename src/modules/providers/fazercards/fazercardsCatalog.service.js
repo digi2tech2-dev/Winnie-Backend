@@ -9,12 +9,37 @@ const { refundFailedOrder } = require('../../orders/orderFulfillment.service');
 const { Currency } = require('../../currency/currency.model');
 const { PROVIDER_CODES } = require('../provider.constants');
 const { BusinessRuleError, ConflictError, NotFoundError } = require('../../../shared/errors/AppError');
-const { FazerCardsAdapter, extractTopupIdentifiers, buildTopupFields } = require('./fazercards.adapter');
+const {
+    FazerCardsAdapter,
+    extractTopupIdentifiers,
+    buildTopupFields,
+    normalizeTopupOrderStatus,
+} = require('./fazercards.adapter');
 const { sanitizePayload } = require('./fazercards.client');
 const { getFazerCardsFamily, listFazerCardsFamilies } = require('./fazercardsFamilies');
-const { ProviderDeliveredCode } = require('./providerDeliveredCode.model');
+const { ProviderDeliveredCode, DELIVERY_STATUSES } = require('./providerDeliveredCode.model');
+const { ProviderPilotOrder } = require('./providerPilotOrder.model');
 
 const FAZERCARDS_SLUG = 'fazer-cards';
+const SYNC_ALL_DEFAULT_FAMILIES = Object.freeze([
+    'TOPUPS',
+    'GIFTCARDS',
+    'GAME_KEYS',
+    'TELEGRAM',
+    'STEAM_TOPUP',
+    'MANUAL_SERVICES',
+]);
+const DRAFT_IMPORT_FAMILIES = new Set(SYNC_ALL_DEFAULT_FAMILIES);
+const CODE_DELIVERY_IMPORT_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
+const UNIMPLEMENTED_FAMILY_BLOCK_REASONS = Object.freeze({
+    GIFTCARDS: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+    GAME_KEYS: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+    TELEGRAM: 'TELEGRAM_EXECUTION_NOT_IMPLEMENTED',
+    STEAM_TOPUP: 'STEAM_TOPUP_EXECUTION_NOT_IMPLEMENTED',
+    MANUAL_SERVICES: 'MANUAL_SERVICE_EXECUTION_NOT_IMPLEMENTED',
+    STEAM_GIFTS: 'STEAM_GIFTS_CATALOG_UNAVAILABLE',
+});
+let syncAllInProgress = false;
 
 const findFazerCardsProvider = () => Provider.findOne({
     deletedAt: null,
@@ -555,6 +580,153 @@ const syncCatalogFamily = async ({ family, limit = 20, cursor } = {}, adapterOpt
     };
 };
 
+const normalizeSyncAllFamilies = ({ families, includeSteamGifts = false } = {}) => {
+    const requested = Array.isArray(families) && families.length
+        ? families
+        : SYNC_ALL_DEFAULT_FAMILIES;
+    const normalized = [...new Set(requested.map((family) => String(family || '').trim().toUpperCase()).filter(Boolean))];
+
+    if (includeSteamGifts === true && !normalized.includes('STEAM_GIFTS')) {
+        normalized.push('STEAM_GIFTS');
+    }
+
+    for (const familyKey of normalized) {
+        const registryEntry = getFazerCardsFamily(familyKey);
+        if (!registryEntry || registryEntry.familyKey === 'UNKNOWN') {
+            throw new BusinessRuleError(`Unknown FazerCards catalog family: ${familyKey}.`, 'FAZERCARDS_UNKNOWN_FAMILY');
+        }
+    }
+
+    return normalized;
+};
+
+const getSyncAllFamilyValue = (source = {}, familyKey, key) => {
+    if (!source || typeof source !== 'object') return undefined;
+    return source[familyKey]?.[key]
+        ?? source[familyKey.toLowerCase()]?.[key]
+        ?? source[familyKey];
+};
+
+const getSyncAllFamilyLimit = (options = {}, familyKey) => {
+    const value = getSyncAllFamilyValue(options.limits, familyKey, 'limit')
+        ?? getSyncAllFamilyValue(options.familyOptions, familyKey, 'limit')
+        ?? options.limit;
+    return Math.min(Math.max(parseInt(value, 10) || 20, 1), 100);
+};
+
+const getSyncAllFamilyCursor = (options = {}, familyKey) => (
+    getSyncAllFamilyValue(options.cursors, familyKey, 'cursor')
+    ?? getSyncAllFamilyValue(options.familyOptions, familyKey, 'cursor')
+    ?? (Array.isArray(options.families) && options.families.length === 1 ? options.cursor : null)
+);
+
+const emptySyncFamilyResult = (familyKey, overrides = {}) => {
+    const family = getFazerCardsFamily(familyKey);
+    return {
+        familyKey,
+        displayName: family?.displayName || familyKey,
+        endpoints: family?.catalogEndpoints || [],
+        categoriesFetched: 0,
+        offersFetched: 0,
+        providerProductsCreated: 0,
+        providerProductsUpdated: 0,
+        blocked: 0,
+        unsupported: 0,
+        nextCursor: null,
+        hasMore: false,
+        errors: [],
+        catalogOnly: family?.executionAvailable !== true,
+        ...overrides,
+    };
+};
+
+const syncAllCatalogFamilies = async (options = {}, adapterOptions = {}) => {
+    if (syncAllInProgress) {
+        throw new BusinessRuleError('A FazerCards catalog sync-all job is already running.', 'FAZERCARDS_SYNC_ALREADY_RUNNING');
+    }
+
+    const familyKeys = normalizeSyncAllFamilies(options);
+    syncAllInProgress = true;
+    const startedAt = new Date();
+    const results = {};
+    const errors = [];
+    const warnings = [];
+
+    try {
+        for (const familyKey of familyKeys) {
+            const registryEntry = getFazerCardsFamily(familyKey);
+            if (familyKey === 'STEAM_GIFTS' || registryEntry?.catalogAvailable === false) {
+                results[familyKey] = emptySyncFamilyResult(familyKey, {
+                    success: false,
+                    skipped: true,
+                    unavailable: true,
+                    errors: [registryEntry?.warning || 'FazerCards catalog family is unavailable.'],
+                });
+                warnings.push({ familyKey, code: registryEntry?.blockReason || 'FAZERCARDS_FAMILY_UNAVAILABLE', message: results[familyKey].errors[0] });
+                continue;
+            }
+
+            try {
+                const result = await syncCatalogFamily({
+                    family: familyKey,
+                    limit: getSyncAllFamilyLimit(options, familyKey),
+                    cursor: getSyncAllFamilyCursor(options, familyKey),
+                }, adapterOptions);
+                results[familyKey] = {
+                    success: true,
+                    skipped: false,
+                    ...result,
+                    familyKey,
+                };
+            } catch (err) {
+                const safeError = {
+                    code: err.code || 'FAZERCARDS_SYNC_FAMILY_FAILED',
+                    message: err.safeUpstreamMessage || err.message || 'FazerCards family sync failed.',
+                    httpStatus: err.httpStatus || err.statusCode || null,
+                };
+                results[familyKey] = emptySyncFamilyResult(familyKey, {
+                    success: false,
+                    skipped: false,
+                    errors: [safeError.message],
+                    error: safeError,
+                });
+                errors.push({ familyKey, ...safeError });
+            }
+        }
+
+        const totals = Object.values(results).reduce((sum, item) => ({
+            categoriesFetched: sum.categoriesFetched + (Number(item.categoriesFetched) || 0),
+            offersFetched: sum.offersFetched + (Number(item.offersFetched) || 0),
+            providerProductsCreated: sum.providerProductsCreated + (Number(item.providerProductsCreated) || 0),
+            providerProductsUpdated: sum.providerProductsUpdated + (Number(item.providerProductsUpdated) || 0),
+            blocked: sum.blocked + (Number(item.blocked) || 0),
+            unsupported: sum.unsupported + (Number(item.unsupported) || 0),
+        }), {
+            categoriesFetched: 0,
+            offersFetched: 0,
+            providerProductsCreated: 0,
+            providerProductsUpdated: 0,
+            blocked: 0,
+            unsupported: 0,
+        });
+
+        return {
+            success: errors.length === 0 || Object.values(results).some((result) => result.success === true),
+            familiesRequested: familyKeys,
+            familiesSynced: Object.values(results).filter((result) => result.success === true).map((result) => result.familyKey),
+            familiesSkipped: Object.values(results).filter((result) => result.skipped === true).map((result) => result.familyKey),
+            results,
+            totals,
+            errors,
+            warnings,
+            startedAt,
+            finishedAt: new Date(),
+        };
+    } finally {
+        syncAllInProgress = false;
+    }
+};
+
 const parseBooleanFilter = (value) => {
     if (value === undefined || value === null || value === '') return undefined;
     return ['true', '1', 'yes'].includes(String(value).trim().toLowerCase());
@@ -919,14 +1091,16 @@ const buildProviderMapping = (orderFields = []) => (
     )
 );
 
-const CODE_DELIVERY_IMPORT_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
-
 const getProviderProductFamilyKey = (providerProduct = {}) => {
     const explicit = String(providerProduct.familyKey || providerProduct.rawPayload?.family || '').trim().toUpperCase();
     if (explicit) return explicit;
     const external = String(providerProduct.externalProductId || '').trim();
     if (external.startsWith('FAZER_GIFTCARD:')) return 'GIFTCARDS';
     if (external.startsWith('FAZER_GAMEKEY:')) return 'GAME_KEYS';
+    if (external.startsWith('FAZER_STEAM_TOPUP:')) return 'STEAM_TOPUP';
+    if (external.startsWith('FAZER_STEAM_GIFT:')) return 'STEAM_GIFTS';
+    if (external.startsWith('FAZER_TELEGRAM:')) return 'TELEGRAM';
+    if (external.startsWith('FAZER_MANUAL_SERVICE:')) return 'MANUAL_SERVICES';
     return inferFazerCardsFamilyKey(providerProduct);
 };
 
@@ -940,6 +1114,23 @@ const isTopupImportCandidate = (providerProduct = {}) => (
     providerProduct.fulfillmentMode === FULFILLMENT_MODES.TOPUP_WITH_FIELDS
 );
 
+const isDraftImportCandidate = (providerProduct = {}) => (
+    providerProduct.providerCode === PROVIDER_CODES.FAZER_CARDS
+    && DRAFT_IMPORT_FAMILIES.has(getProviderProductFamilyKey(providerProduct))
+    && providerProduct.fulfillmentMode
+    && providerProduct.fulfillmentMode !== FULFILLMENT_MODES.UNKNOWN
+);
+
+const getFamilyBlockReason = (providerProduct = {}) => {
+    const familyKey = getProviderProductFamilyKey(providerProduct);
+    return providerProduct.blockReason
+        || UNIMPLEMENTED_FAMILY_BLOCK_REASONS[familyKey]
+        || getFazerCardsFamily(familyKey)?.blockReason
+        || 'EXECUTION_NOT_IMPLEMENTED';
+};
+
+const shouldBlockImportedProductExecution = (providerProduct = {}) => !isTopupImportCandidate(providerProduct);
+
 const assertImportableProviderProduct = (providerProduct) => {
     if (!providerProduct) throw new NotFoundError('ProviderProduct');
     if (providerProduct.providerCode !== PROVIDER_CODES.FAZER_CARDS) {
@@ -947,9 +1138,12 @@ const assertImportableProviderProduct = (providerProduct) => {
     }
 
     const isTopup = isTopupImportCandidate(providerProduct);
-    const isCodeDelivery = isCodeDeliveryImportCandidate(providerProduct);
-    if (!isTopup && !isCodeDelivery) {
-        throw new BusinessRuleError('Only FazerCards top-up, gift card, and game key offers can be imported.', 'FAZERCARDS_IMPORT_UNSUPPORTED_FULFILLMENT_MODE');
+    const familyKey = getProviderProductFamilyKey(providerProduct);
+    if (!isTopup && !isDraftImportCandidate(providerProduct)) {
+        throw new BusinessRuleError('Only recognized FazerCards catalog products can be imported as inactive drafts.', 'FAZERCARDS_IMPORT_UNSUPPORTED_FULFILLMENT_MODE');
+    }
+    if (familyKey === 'STEAM_GIFTS') {
+        throw new BusinessRuleError('FazerCards Steam Gifts catalog is unavailable and cannot be imported.', 'FAZERCARDS_STEAM_GIFTS_CATALOG_UNAVAILABLE');
     }
 
     if (isTopup) {
@@ -964,8 +1158,8 @@ const assertImportableProviderProduct = (providerProduct) => {
         }
     }
 
-    if (isCodeDelivery && providerProduct.blockReason !== 'CODE_DELIVERY_NOT_IMPLEMENTED') {
-        throw new BusinessRuleError('Only catalog-only FazerCards code delivery products can be imported safely.', 'FAZERCARDS_CODE_DELIVERY_IMPORT_BLOCKED');
+    if (!isTopup && !UNIMPLEMENTED_FAMILY_BLOCK_REASONS[familyKey]) {
+        throw new BusinessRuleError('FazerCards product family is not enabled for draft import.', 'FAZERCARDS_IMPORT_FAMILY_UNSUPPORTED');
     }
 
     const rawCostPrice = providerProduct.costPrice ?? providerProduct.rawPrice;
@@ -992,7 +1186,9 @@ const normalizeImportCurrency = async (currency) => {
 const buildImportPreview = (providerProduct) => {
     const orderFields = buildOrderFieldsFromProviderFields(providerProduct.requiredFields);
     const familyKey = getProviderProductFamilyKey(providerProduct);
-    const isCodeDelivery = isCodeDeliveryImportCandidate(providerProduct);
+    const executionBlocked = shouldBlockImportedProductExecution(providerProduct);
+    const blockReason = executionBlocked ? getFamilyBlockReason(providerProduct) : providerProduct.blockReason || null;
+    const family = getFazerCardsFamily(familyKey);
     return {
         providerProductId: providerProduct._id.toString(),
         providerProductName: providerProduct.rawName,
@@ -1001,7 +1197,7 @@ const buildImportPreview = (providerProduct) => {
         fulfillmentMode: providerProduct.fulfillmentMode,
         supportLevel: providerProduct.supportLevel || null,
         executionBlocked: providerProduct.executionBlocked === true,
-        blockReason: providerProduct.blockReason || null,
+        blockReason,
         costPrice: String(providerProduct.costPrice ?? providerProduct.rawPrice),
         currency: providerProduct.currency || 'USD',
         requiredFields: providerProduct.requiredFields,
@@ -1012,9 +1208,11 @@ const buildImportPreview = (providerProduct) => {
         platform: providerProduct.platform || null,
         suggestedProductName: providerProduct.translatedName || providerProduct.rawName,
         suggestedOrderFields: orderFields.map(({ providerKey, ...field }) => field),
-        warning: isCodeDelivery
-            ? 'Code delivery execution is not implemented yet. Imported product will be created inactive and not visible to customers.'
-            : 'Imported product will be created inactive and not visible to customers.',
+        warning: executionBlocked && isCodeDeliveryImportCandidate(providerProduct)
+            ? 'Code delivery execution is not implemented yet. Product will be imported as inactive and not visible to customers.'
+            : executionBlocked
+            ? `${family?.displayName || familyKey} execution is not implemented yet. Product will be imported as inactive and not visible to customers.`
+            : 'Product will be imported as inactive and not visible to customers.',
     };
 };
 
@@ -1056,7 +1254,8 @@ const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
 
     const costPrice = String(providerProduct.costPrice ?? providerProduct.rawPrice);
     const familyKey = getProviderProductFamilyKey(providerProduct);
-    const isCodeDelivery = isCodeDeliveryImportCandidate(providerProduct);
+    const executionBlocked = shouldBlockImportedProductExecution(providerProduct);
+    const blockReason = executionBlocked ? getFamilyBlockReason(providerProduct) : null;
     const orderFieldsWithProviderKeys = buildOrderFieldsFromProviderFields(providerProduct.requiredFields);
     const providerMapping = buildProviderMapping(orderFieldsWithProviderKeys);
     const orderFields = orderFieldsWithProviderKeys.map(({ providerKey, ...field }) => field);
@@ -1083,8 +1282,8 @@ const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
         syncNameWithProvider: payload.syncNameFromProvider === true,
         syncAvailabilityWithProvider: payload.syncAvailabilityFromProvider !== false,
         providerExecutionEnabled: false,
-        providerExecutionBlocked: isCodeDelivery,
-        providerBlockReason: isCodeDelivery ? (providerProduct.blockReason || 'CODE_DELIVERY_NOT_IMPLEMENTED') : null,
+        providerExecutionBlocked: executionBlocked,
+        providerBlockReason: blockReason,
         provider: providerProduct.provider._id,
         providerProduct: providerProduct._id,
         providerCode: PROVIDER_CODES.FAZER_CARDS,
@@ -1325,8 +1524,9 @@ const normalizeCodeDeliveryQuantity = (quantity, providerProduct = {}) => {
     if (Number.isFinite(maxQty) && parsed > maxQty) {
         throw new BusinessRuleError('quantity exceeds the provider maximum.', 'FAZERCARDS_CODE_DELIVERY_QUANTITY_INVALID');
     }
-    const stock = Number(providerProduct.stock);
-    if (Number.isFinite(stock) && stock >= 0 && parsed > stock) {
+    const rawStock = providerProduct.stock;
+    const stock = Number(rawStock);
+    if (rawStock !== undefined && rawStock !== null && rawStock !== '' && Number.isFinite(stock) && stock >= 0 && parsed > stock) {
         throw new BusinessRuleError('quantity exceeds available provider stock.', 'FAZERCARDS_CODE_DELIVERY_STOCK_INSUFFICIENT');
     }
     return parsed;
@@ -1417,7 +1617,7 @@ const loadFazerCardsProduct = async (productId) => {
         .populate('provider', 'name slug code providerCode isActive baseUrl authType token encryptedCredentials')
         .populate({
             path: 'providerProduct',
-            select: 'provider providerCode externalProductId rawName costPrice rawPrice currency category offerId fulfillmentMode isSupported isBlocked requiredFields rawPayload',
+            select: 'provider providerCode externalProductId rawName costPrice rawPrice currency category categoryName offerId offerName familyKey fulfillmentMode supportLevel executionBlocked isSupported isBlocked blockReason requiredFields rawPayload stock minQty maxQty region platform',
             populate: { path: 'provider', select: 'name slug code providerCode isActive baseUrl authType token encryptedCredentials' },
         });
     if (!product) throw new NotFoundError('Product');
@@ -1440,7 +1640,7 @@ const assertFazerCardsProductLink = (product) => {
     }
 };
 
-const getProductReadiness = async (productId, adapterOptions = {}) => {
+const getTopupProductReadiness = async (productId, adapterOptions = {}) => {
     const product = await loadFazerCardsProduct(productId);
     assertFazerCardsProductLink(product);
 
@@ -1613,6 +1813,801 @@ const getCodeDeliveryReadiness = async (productId) => {
             'Use dry-run preview to confirm the provider payload.',
             'Implement admin/customer code reveal only after encrypted delivery storage is wired into live execution.',
         ],
+    };
+};
+
+const getRequiredFieldKeys = (requiredFields = []) => (
+    (Array.isArray(requiredFields) ? requiredFields : [])
+        .map((field) => (typeof field === 'string' ? field : field?.key || field?.name || field?.id))
+        .map((key) => String(key || '').trim())
+        .filter(Boolean)
+);
+
+const buildFieldsPayload = (fields = {}, requiredFields = []) => {
+    const { fields: payloadFields, missing } = buildTopupFields(fields, requiredFields);
+    if (missing.length > 0) {
+        throw new BusinessRuleError(
+            `Missing FazerCards customer field(s): ${missing.join(', ')}.`,
+            'FAZERCARDS_CUSTOMER_FIELDS_MISSING'
+        );
+    }
+    return payloadFields;
+};
+
+const buildUnsupportedFamilyPayloadPreview = (providerProduct, { fields = {}, quantity = 1 } = {}) => {
+    const familyKey = getProviderProductFamilyKey(providerProduct);
+    const requiredFields = Array.isArray(providerProduct.requiredFields) ? providerProduct.requiredFields : [];
+    const normalizedQuantity = normalizeCodeDeliveryQuantity(quantity, providerProduct);
+    const payloadFields = requiredFields.length ? buildFieldsPayload(fields, requiredFields) : {};
+    const raw = providerProduct.rawPayload || {};
+
+    if (providerProduct.fulfillmentMode === FULFILLMENT_MODES.STEAM_TOPUP_WITH_LOGIN) {
+        return {
+            wouldCall: null,
+            payload: {
+                currency: asTrimmedString(firstValue(providerProduct.offerId, raw.rateCurrency, providerProduct.category)),
+                quantity: normalizedQuantity,
+                fields: payloadFields,
+            },
+        };
+    }
+
+    if (providerProduct.fulfillmentMode === FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP) {
+        return {
+            wouldCall: null,
+            payload: {
+                product: 'telegram_stars',
+                quantity: normalizedQuantity,
+                fields: payloadFields,
+            },
+        };
+    }
+
+    if (providerProduct.fulfillmentMode === FULFILLMENT_MODES.TELEGRAM_PREMIUM) {
+        return {
+            wouldCall: null,
+            payload: {
+                product: 'telegram_premium',
+                plan_id: asTrimmedString(firstValue(providerProduct.offerId, raw.plan?.id, raw.plan?.months)),
+                quantity: normalizedQuantity,
+                fields: payloadFields,
+            },
+        };
+    }
+
+    if (providerProduct.fulfillmentMode === FULFILLMENT_MODES.MANUAL_SERVICE) {
+        return {
+            wouldCall: null,
+            payload: {
+                service_id: asTrimmedString(firstValue(providerProduct.category, raw.category?.id, raw.category?.manual_service_id)),
+                offer_id: asTrimmedString(firstValue(providerProduct.offerId, raw.offer?.id, raw.offer?.product_id)),
+                quantity: normalizedQuantity,
+                fields: payloadFields,
+            },
+        };
+    }
+
+    return {
+        wouldCall: null,
+        payload: {
+            familyKey,
+            fulfillmentMode: providerProduct.fulfillmentMode || FULFILLMENT_MODES.UNKNOWN,
+            externalProductId: providerProduct.externalProductId || null,
+            quantity: normalizedQuantity,
+            fields: payloadFields,
+        },
+    };
+};
+
+const buildUnifiedDryRun = async ({ productId, fields = {}, quantity = 1, orderId = null } = {}) => {
+    const product = await loadFazerCardsProduct(productId);
+    assertFazerCardsProductLink(product);
+    const providerProduct = product.providerProduct;
+    if (!providerProduct) throw new NotFoundError('ProviderProduct');
+
+    const familyKey = getProviderProductFamilyKey(providerProduct);
+    if (providerProduct.fulfillmentMode === FULFILLMENT_MODES.TOPUP_WITH_FIELDS) {
+        return buildTopupDryRun({ productId, fields, orderId });
+    }
+    if (providerProduct.fulfillmentMode === FULFILLMENT_MODES.CODE_DELIVERY && CODE_DELIVERY_IMPORT_FAMILIES.has(familyKey)) {
+        return buildCodeDeliveryDryRun({ productId, quantity });
+    }
+
+    if (!DRAFT_IMPORT_FAMILIES.has(familyKey)) {
+        throw new BusinessRuleError('FazerCards product family is not supported for dry-run preview.', 'FAZERCARDS_DRY_RUN_FAMILY_UNSUPPORTED');
+    }
+
+    const rawCost = providerProduct.costPrice ?? providerProduct.rawPrice;
+    const cost = Number(rawCost);
+    if (rawCost === undefined || rawCost === null || rawCost === '' || !Number.isFinite(cost) || cost <= 0) {
+        throw new BusinessRuleError('FazerCards ProviderProduct has an invalid cost price.', 'FAZERCARDS_PROVIDER_PRODUCT_INVALID_COST');
+    }
+
+    const { wouldCall, payload } = buildUnsupportedFamilyPayloadPreview(providerProduct, { fields, quantity });
+    const executionState = product.providerExecutionEnabled === true ? 'enabled' : 'disabled';
+    const family = getFazerCardsFamily(familyKey);
+
+    return {
+        success: true,
+        dryRun: true,
+        wouldCall,
+        provider: 'FazerCards',
+        executionAvailable: false,
+        product: {
+            id: product._id.toString(),
+            name: product.name,
+            familyKey: product.familyKey || familyKey,
+            fulfillmentMode: product.fulfillmentMode || providerProduct.fulfillmentMode,
+            providerExecutionEnabled: product.providerExecutionEnabled === true,
+            providerExecutionBlocked: product.providerExecutionBlocked === true,
+        },
+        providerProduct: {
+            id: providerProduct._id.toString(),
+            externalProductId: providerProduct.externalProductId,
+            familyKey,
+            fulfillmentMode: providerProduct.fulfillmentMode,
+            costPrice: String(rawCost),
+            currency: providerProduct.currency || 'USD',
+            stock: providerProduct.stock ?? null,
+            minQty: providerProduct.minQty || 1,
+            maxQty: providerProduct.maxQty || 9999,
+            region: providerProduct.region || null,
+            platform: providerProduct.platform || null,
+            blockReason: getFamilyBlockReason(providerProduct),
+        },
+        payload,
+        requiredFields: providerProduct.requiredFields || [],
+        warnings: [
+            'Dry run only. No FazerCards order was created.',
+            `${family?.displayName || familyKey} live execution is not implemented yet.`,
+            `Product execution is currently ${executionState}.`,
+        ],
+    };
+};
+
+const getUnsupportedFamilyReadiness = async (productId) => {
+    const product = await loadFazerCardsProduct(productId);
+    assertFazerCardsProductLink(product);
+    const providerProduct = product.providerProduct || null;
+    const familyKey = providerProduct ? getProviderProductFamilyKey(providerProduct) : product.familyKey || null;
+    const family = getFazerCardsFamily(familyKey);
+    const rawCost = providerProduct?.costPrice ?? providerProduct?.rawPrice;
+    const cost = Number(rawCost);
+    const requiredFields = Array.isArray(providerProduct?.requiredFields) ? providerProduct.requiredFields : [];
+    const checks = {
+        productExists: true,
+        linkedToFazerCards: Boolean(providerProduct),
+        familyCatalogSupported: DRAFT_IMPORT_FAMILIES.has(familyKey),
+        executionImplemented: false,
+        globalRealOrdersEnabled: config.providers.fazerCards.realOrdersEnabled === true,
+        productExecutionEnabled: product.providerExecutionEnabled === true,
+        productExecutionBlocked: product.providerExecutionBlocked === true,
+        providerProductExecutionBlocked: providerProduct?.executionBlocked === true,
+        providerProductBlocked: providerProduct?.isBlocked === true,
+        costValid: rawCost !== undefined && rawCost !== null && rawCost !== '' && Number.isFinite(cost) && cost > 0,
+        hasRequiredFields: requiredFields.length > 0,
+        productHidden: product.visibleInStore !== true,
+        productInactive: product.isActive !== true || product.status !== PRODUCT_STATUSES.AVAILABLE,
+    };
+
+    const warnings = [
+        `${family?.displayName || familyKey || 'FazerCards'} live execution is not implemented yet.`,
+    ];
+    if (familyKey === 'STEAM_GIFTS') warnings.push('Steam Gifts catalog endpoint returned HTTP 404 in production and is currently unavailable.');
+    if (!checks.globalRealOrdersEnabled) warnings.push('Global real order gate is disabled.');
+    if (!checks.productHidden) warnings.push('Product is visible; keep it hidden until this family is implemented.');
+    if (!checks.productInactive) warnings.push('Product is active; keep it inactive until this family is implemented.');
+    if (checks.productExecutionBlocked) warnings.push(product.providerBlockReason || getFamilyBlockReason(providerProduct));
+
+    return {
+        success: true,
+        productId: product._id.toString(),
+        productName: product.name,
+        readyForLiveExecution: false,
+        familyKey,
+        fulfillmentMode: providerProduct?.fulfillmentMode || product.fulfillmentMode || null,
+        providerProduct: providerProduct ? {
+            id: providerProduct._id.toString(),
+            externalProductId: providerProduct.externalProductId,
+            costPrice: String(rawCost ?? ''),
+            currency: providerProduct.currency || 'USD',
+            stock: providerProduct.stock ?? null,
+            minQty: providerProduct.minQty || 1,
+            maxQty: providerProduct.maxQty || 9999,
+            region: providerProduct.region || null,
+            platform: providerProduct.platform || null,
+            blockReason: getFamilyBlockReason(providerProduct),
+            requiredFieldKeys: getRequiredFieldKeys(requiredFields),
+        } : null,
+        checks,
+        warnings: [...new Set(warnings.filter(Boolean))],
+        nextActions: [
+            'Keep the product hidden and inactive until this family has a tested execution flow.',
+            'Use dry-run preview to inspect stored identifiers and required fields.',
+            'Do not enable live execution for this family until a controlled pilot is approved.',
+        ],
+    };
+};
+
+const getProductReadiness = async (productId, adapterOptions = {}) => {
+    const product = await loadFazerCardsProduct(productId);
+    assertFazerCardsProductLink(product);
+    const providerProduct = product.providerProduct;
+    if (!providerProduct) throw new NotFoundError('ProviderProduct');
+    const familyKey = getProviderProductFamilyKey(providerProduct);
+
+    if (providerProduct.fulfillmentMode === FULFILLMENT_MODES.TOPUP_WITH_FIELDS) {
+        return getTopupProductReadiness(productId, adapterOptions);
+    }
+    if (providerProduct.fulfillmentMode === FULFILLMENT_MODES.CODE_DELIVERY && CODE_DELIVERY_IMPORT_FAMILIES.has(familyKey)) {
+        return getCodeDeliveryReadiness(productId);
+    }
+    return getUnsupportedFamilyReadiness(productId);
+};
+
+const getConfiguredCodeDeliveryMaxOrderUsd = () => {
+    const max = Number(config.providers.fazerCards.codeDeliveryMaxOrderUsd);
+    return Number.isFinite(max) && max > 0 ? max : null;
+};
+
+const buildCodeDeliveryPilotChecks = ({
+    product = null,
+    providerProduct = null,
+    familyKey = null,
+    quantity = 1,
+    cost = null,
+    balance = null,
+    identifiers = {},
+    confirmRealOrder = false,
+} = {}) => {
+    const normalizedFamilyKey = familyKey || (providerProduct ? getProviderProductFamilyKey(providerProduct) : null);
+    const maxOrderUsd = getConfiguredCodeDeliveryMaxOrderUsd();
+    const totalProviderCost = Number.isFinite(Number(cost)) && Number.isFinite(Number(quantity))
+        ? Number((Number(cost) * Number(quantity)).toFixed(6))
+        : null;
+    const stock = Number(providerProduct?.stock);
+
+    return {
+        confirmRealOrder: confirmRealOrder === true,
+        fazerCardsEnabled: config.providers.fazerCards.enabled === true,
+        globalRealOrdersEnabled: config.providers.fazerCards.realOrdersEnabled === true,
+        codeDeliveryEnabled: config.providers.fazerCards.codeDeliveryEnabled === true,
+        productExists: Boolean(product),
+        linkedToFazerCards: Boolean(product && providerProduct),
+        familySupportedForLivePilot: CODE_DELIVERY_IMPORT_FAMILIES.has(normalizedFamilyKey),
+        fulfillmentModeCodeDelivery: providerProduct?.fulfillmentMode === FULFILLMENT_MODES.CODE_DELIVERY,
+        providerProductExists: Boolean(providerProduct),
+        hasCategoryId: Boolean(identifiers.categoryId),
+        hasItemId: Boolean(identifiers.itemId),
+        productExecutionEnabled: product?.providerExecutionEnabled === true,
+        productExecutionNotBlocked: product?.providerExecutionBlocked !== true,
+        providerProductExecutionNotBlocked: providerProduct?.executionBlocked !== true,
+        quantityValid: Number.isInteger(Number(quantity)) && Number(quantity) >= 1,
+        stockSufficient: Number.isFinite(stock) && stock >= 0 ? Number(quantity) <= stock : 'unknown',
+        costValid: Number.isFinite(Number(cost)) && Number(cost) > 0,
+        underCodeDeliveryMaxCost: maxOrderUsd === null ? true : totalProviderCost !== null && totalProviderCost <= maxOrderUsd,
+        balanceSufficient: Number.isFinite(Number(balance)) && totalProviderCost !== null ? Number(balance) >= totalProviderCost : 'unknown',
+        codeDeliveryStorageReady: Boolean(ProviderDeliveredCode?.modelName),
+    };
+};
+
+const makePilotGateError = (message, code, checks = {}, warnings = []) => {
+    const err = new BusinessRuleError(message, code);
+    err.checks = checks;
+    err.warnings = warnings;
+    return err;
+};
+
+const assertPilotGate = (condition, message, code, checks, warnings = []) => {
+    if (!condition) throw makePilotGateError(message, code, checks, warnings);
+};
+
+const loadCodeDeliveryPilotProduct = loadCodeDeliveryProduct;
+
+const getProviderBalanceForPilot = async (product, providerProduct, adapterOptions = {}) => {
+    const providerDoc = product.provider || providerProduct.provider || await findFazerCardsProvider();
+    const adapter = new FazerCardsAdapter(providerDoc, adapterOptions);
+    const balanceResult = await adapter.getBalance();
+    const balance = Number(balanceResult?.balance);
+    if (!Number.isFinite(balance)) {
+        const err = new BusinessRuleError('FazerCards balance response did not include a valid balance.', 'FAZERCARDS_BALANCE_UNKNOWN');
+        err.providerRequestId = balanceResult?.requestId || null;
+        err.providerBody = balanceResult?.raw || { balance: balanceResult?.balance ?? null };
+        throw err;
+    }
+    return { adapter, providerDoc, balance, balanceResult };
+};
+
+const extractProviderOrderNode = (data = {}) => (
+    data.order
+    || data.providerOrder
+    || data.data?.order
+    || data.data
+    || data
+);
+
+const extractProviderOrderId = (data = {}, order = {}) => firstValue(
+    order.id,
+    order.order_id,
+    order.orderId,
+    order.provider_order_id,
+    data.order_id,
+    data.orderId,
+    data.id,
+    data.data?.order_id,
+    data.data?.id,
+    null
+);
+
+const DELIVERY_SECRET_KEY_PATTERN = /(^|_)(code|pin|serial|voucher|license|claim)(_|$)|cardnumber|card_number|card_no|key_value|game_key|gift_card/i;
+
+const CODE_DELIVERY_COLLECTION_KEY_PATTERN = /^(codes|keys|cards|vouchers)$/i;
+
+const redactCodeDeliverySecrets = (value, depth = 0, parentKey = '') => {
+    if (value === null || value === undefined) return value;
+    if (depth > 8) return '[REDACTED_DEPTH_LIMIT]';
+    if (typeof value === 'string' && CODE_DELIVERY_COLLECTION_KEY_PATTERN.test(parentKey)) return '[REDACTED_CODE]';
+    if (Array.isArray(value)) return value.map((item) => redactCodeDeliverySecrets(item, depth + 1, parentKey));
+    if (typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value).map(([key, child]) => {
+            const normalizedKey = String(key || '');
+            const redact = DELIVERY_SECRET_KEY_PATTERN.test(normalizedKey)
+                || (normalizedKey.toLowerCase() === 'key' && typeof child !== 'object');
+            return [key, redact ? '[REDACTED_CODE]' : redactCodeDeliverySecrets(child, depth + 1, normalizedKey)];
+        }));
+    }
+    return value;
+};
+
+const getCodeValueFromObject = (obj = {}, parentKey = '') => {
+    const code = firstValue(
+        obj.code,
+        obj.cardCode,
+        obj.card_code,
+        obj.voucher,
+        obj.voucherCode,
+        obj.voucher_code,
+        obj.licenseKey,
+        obj.license_key,
+        obj.gameKey,
+        obj.game_key,
+        obj.keyValue,
+        obj.key_value,
+        obj.codeValue,
+        obj.code_value,
+        null
+    );
+    if (code) return code;
+    if (typeof obj.key === 'string' && !obj.key_id && !obj.keyId) return obj.key;
+    if (typeof obj.value === 'string' && CODE_DELIVERY_COLLECTION_KEY_PATTERN.test(parentKey)) return obj.value;
+    return null;
+};
+
+const extractDeliveredCodes = (value, parentKey = '') => {
+    const found = [];
+    const visit = (node, key = '') => {
+        if (node === null || node === undefined) return;
+        if (typeof node === 'string') {
+            if (CODE_DELIVERY_COLLECTION_KEY_PATTERN.test(key)) {
+                found.push({ code: node, serial: null, pin: null, metadata: { source: key } });
+            }
+            return;
+        }
+        if (Array.isArray(node)) {
+            node.forEach((item) => visit(item, key));
+            return;
+        }
+        if (typeof node !== 'object') return;
+
+        const code = getCodeValueFromObject(node, key);
+        const pin = firstValue(node.pin, node.pinCode, node.pin_code, null);
+        const serial = firstValue(node.serial, node.serialNumber, node.serial_number, node.cardNumber, node.card_number, null);
+        if (code || pin || serial) {
+            found.push({
+                code: code ? String(code) : null,
+                pin: pin ? String(pin) : null,
+                serial: serial ? String(serial) : null,
+                metadata: {
+                    source: key || null,
+                    id: firstValue(node.id, node.item_id, node.card_id, node.key_id, null),
+                },
+            });
+        }
+
+        Object.entries(node).forEach(([childKey, child]) => visit(child, childKey));
+    };
+
+    visit(value, parentKey);
+    const seen = new Set();
+    return found.filter((item) => {
+        const key = [item.code, item.pin, item.serial].filter(Boolean).join('|');
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+};
+
+const storeDeliveredCodes = async ({ pilotOrder, providerDoc, providerProduct, product, familyKey, rawResponse }) => {
+    const deliveredCodes = extractDeliveredCodes(rawResponse);
+    const stored = [];
+    for (const delivered of deliveredCodes) {
+        const doc = new ProviderDeliveredCode({
+            pilotOrder: pilotOrder._id,
+            provider: providerDoc?._id || providerProduct.provider,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            providerProduct: providerProduct._id,
+            product: product._id,
+            familyKey,
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            metadata: delivered.metadata,
+            providerRawResponse: redactCodeDeliverySecrets(sanitizePayload(rawResponse)),
+            deliveryStatus: DELIVERY_STATUSES.DELIVERED,
+            deliveredAt: new Date(),
+        });
+        if (delivered.code) doc.setSecretValue('codeEncrypted', delivered.code);
+        if (delivered.pin) doc.setSecretValue('pinEncrypted', delivered.pin);
+        if (delivered.serial) doc.setSecretValue('serialEncrypted', delivered.serial);
+        await doc.save();
+        stored.push({
+            hasPin: Boolean(delivered.pin),
+            hasSerial: Boolean(delivered.serial),
+        });
+    }
+    return {
+        deliveredCodeCount: stored.length,
+        hasPin: stored.some((item) => item.hasPin),
+        hasSerial: stored.some((item) => item.hasSerial),
+        storedEncrypted: stored.length > 0,
+    };
+};
+
+const applyPilotProviderResult = async ({ pilotOrder, response, familyKey, providerDoc, providerProduct, product }) => {
+    const data = response?.data || {};
+    const order = extractProviderOrderNode(data);
+    const providerOrderId = asTrimmedString(extractProviderOrderId(data, order));
+    const rawStatus = firstValue(order?.status, data?.status, order?.state, data?.state, 'processing');
+    const mapped = normalizeTopupOrderStatus(rawStatus);
+    const providerStatus = mapped.status;
+    const providerRequestId = firstValue(response?.requestId, data?.requestId, data?.request_id, null);
+    const safeRawResponse = redactCodeDeliverySecrets(sanitizePayload(data));
+    const warnings = [];
+    const codeStorage = await storeDeliveredCodes({
+        pilotOrder,
+        providerDoc,
+        providerProduct,
+        product,
+        familyKey,
+        rawResponse: data,
+    });
+
+    let status = ORDER_STATUS.PROCESSING;
+    let providerErrorCode = null;
+    let providerErrorMessage = null;
+    const now = new Date();
+    const statusUpdate = { lastCheckedAt: now };
+
+    if (!mapped.known || !providerOrderId) {
+        status = ORDER_STATUS.MANUAL_REVIEW;
+        providerErrorCode = !providerOrderId ? 'FAZERCARDS_CODE_DELIVERY_ORDER_ID_MISSING' : 'FAZERCARDS_CODE_DELIVERY_UNKNOWN_STATUS';
+        providerErrorMessage = !providerOrderId
+            ? 'FazerCards code-delivery response did not include provider order id.'
+            : 'FazerCards code-delivery response returned an unknown status.';
+        warnings.push(providerErrorMessage);
+    } else if (mapped.terminalFailure) {
+        status = ORDER_STATUS.FAILED;
+        providerErrorCode = 'FAZERCARDS_CODE_DELIVERY_ORDER_FAILED';
+        providerErrorMessage = 'FazerCards code-delivery order failed.';
+        statusUpdate.failedAt = now;
+    } else if (providerStatus === 'Completed') {
+        if (codeStorage.deliveredCodeCount > 0) {
+            status = ORDER_STATUS.COMPLETED;
+            statusUpdate.completedAt = now;
+        } else {
+            status = ORDER_STATUS.MANUAL_REVIEW;
+            providerErrorCode = 'FAZERCARDS_CODE_DELIVERY_CODE_MISSING';
+            providerErrorMessage = 'Provider response did not contain a recognized code payload.';
+            warnings.push(providerErrorMessage);
+        }
+    }
+
+    const updated = await ProviderPilotOrder.findByIdAndUpdate(pilotOrder._id, {
+        $set: {
+            status,
+            providerOrderId: providerOrderId || null,
+            providerStatus,
+            providerRequestId,
+            providerRawResponse: safeRawResponse,
+            providerErrorCode,
+            providerErrorMessage,
+            deliveredCodeCount: codeStorage.deliveredCodeCount,
+            hasPin: codeStorage.hasPin,
+            hasSerial: codeStorage.hasSerial,
+            storedEncrypted: codeStorage.storedEncrypted,
+            warnings,
+            ...statusUpdate,
+        },
+    }, { new: true });
+
+    return updated;
+};
+
+const markPilotManualReview = async (pilotOrder, err, fallbackCode = 'FAZERCARDS_CODE_DELIVERY_UNKNOWN') => ProviderPilotOrder.findByIdAndUpdate(pilotOrder._id, {
+    $set: {
+        status: ORDER_STATUS.MANUAL_REVIEW,
+        providerRequestId: err.requestId || null,
+        providerRawResponse: redactCodeDeliverySecrets(sanitizePayload(err.providerBody || {
+            errorCode: err.code || fallbackCode,
+            message: err.safeUpstreamMessage || err.message,
+        })),
+        providerErrorCode: err.code || fallbackCode,
+        providerErrorMessage: err.safeUpstreamMessage || err.message || 'FazerCards code-delivery outcome is unknown.',
+        warnings: ['Provider outcome is uncertain. Manual review required.'],
+        lastCheckedAt: new Date(),
+    },
+}, { new: true });
+
+const markPilotFailed = async (pilotOrder, err, fallbackCode = 'FAZERCARDS_CODE_DELIVERY_REJECTED') => ProviderPilotOrder.findByIdAndUpdate(pilotOrder._id, {
+    $set: {
+        status: ORDER_STATUS.FAILED,
+        providerRequestId: err.requestId || null,
+        providerRawResponse: redactCodeDeliverySecrets(sanitizePayload(err.providerBody || {
+            errorCode: err.code || fallbackCode,
+            message: err.safeUpstreamMessage || err.message,
+        })),
+        providerErrorCode: err.code || fallbackCode,
+        providerErrorMessage: err.safeUpstreamMessage || err.message || 'FazerCards code-delivery order was rejected.',
+        failedAt: new Date(),
+        lastCheckedAt: new Date(),
+    },
+}, { new: true });
+
+const summarizePilotOrder = async (pilotOrder) => {
+    const deliveredCodeCount = await ProviderDeliveredCode.countDocuments({ pilotOrder: pilotOrder._id });
+    return {
+        localOrderId: pilotOrder._id.toString(),
+        localStatus: pilotOrder.status,
+        productName: pilotOrder.product?.name || null,
+        familyKey: pilotOrder.familyKey,
+        fulfillmentMode: pilotOrder.fulfillmentMode,
+        providerOrderId: pilotOrder.providerOrderId ?? null,
+        providerStatus: pilotOrder.providerStatus ?? null,
+        providerRequestId: pilotOrder.providerRequestId ?? null,
+        providerCost: pilotOrder.providerCost,
+        providerCostCurrency: pilotOrder.providerCostCurrency,
+        quantity: pilotOrder.quantity,
+        deliveredCodeCount,
+        hasPin: pilotOrder.hasPin === true,
+        hasSerial: pilotOrder.hasSerial === true,
+        storedEncrypted: pilotOrder.storedEncrypted === true,
+        providerRawResponse: redactCodeDeliverySecrets(sanitizePayload(pilotOrder.providerRawResponse)),
+        warnings: pilotOrder.warnings || [],
+    };
+};
+
+const runCodeDeliveryLivePilot = async ({
+    productId,
+    quantity = 1,
+    confirmRealOrder = false,
+    operatorNote = null,
+} = {}, adminUserId = null, adapterOptions = {}) => {
+    assertPilotGate(confirmRealOrder === true, 'confirmRealOrder=true is required for a real FazerCards code-delivery pilot.', 'FAZERCARDS_CONFIRM_REAL_ORDER_REQUIRED', {
+        confirmRealOrder: false,
+    });
+
+    const product = await loadCodeDeliveryPilotProduct(productId);
+    const providerProduct = product.providerProduct;
+    assertCodeDeliveryProduct(product, providerProduct);
+    const familyKey = getProviderProductFamilyKey(providerProduct);
+    const identifiers = extractCodeDeliveryIdentifiers(providerProduct);
+    const normalizedQuantity = normalizeCodeDeliveryQuantity(quantity, providerProduct);
+    const unitCost = Number(providerProduct.costPrice ?? providerProduct.rawPrice);
+    const totalProviderCost = Number((unitCost * normalizedQuantity).toFixed(6));
+    const initialChecks = buildCodeDeliveryPilotChecks({
+        product,
+        providerProduct,
+        familyKey,
+        quantity: normalizedQuantity,
+        cost: unitCost,
+        identifiers,
+        confirmRealOrder,
+    });
+
+    assertPilotGate(config.providers.fazerCards.enabled === true, 'FazerCards integration is disabled.', 'FAZERCARDS_DISABLED', initialChecks);
+    assertPilotGate(config.providers.fazerCards.realOrdersEnabled === true, 'FazerCards real orders are disabled by global safety gate.', 'FAZERCARDS_REAL_ORDERS_DISABLED', initialChecks);
+    assertPilotGate(config.providers.fazerCards.codeDeliveryEnabled === true, 'FazerCards code delivery is disabled by global safety gate.', 'FAZERCARDS_CODE_DELIVERY_DISABLED', initialChecks);
+    assertPilotGate(Boolean(identifiers.categoryId), 'FazerCards code-delivery category/game id is missing.', 'FAZERCARDS_CODE_DELIVERY_CATEGORY_ID_MISSING', initialChecks);
+    assertPilotGate(Boolean(identifiers.itemId), 'FazerCards code-delivery card/key id is missing.', 'FAZERCARDS_CODE_DELIVERY_ITEM_ID_MISSING', initialChecks);
+    assertPilotGate(product.providerExecutionEnabled === true, 'Product provider execution is disabled.', 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED', initialChecks);
+    assertPilotGate(product.providerExecutionBlocked !== true, 'Product provider execution is blocked.', 'FAZERCARDS_PROVIDER_EXECUTION_BLOCKED', initialChecks);
+    assertPilotGate(providerProduct.executionBlocked !== true, 'ProviderProduct execution is blocked.', 'FAZERCARDS_PROVIDER_PRODUCT_EXECUTION_BLOCKED', initialChecks);
+    assertPilotGate(Number.isFinite(unitCost) && unitCost > 0, 'FazerCards ProviderProduct has an invalid cost price.', 'FAZERCARDS_PROVIDER_PRODUCT_INVALID_COST', initialChecks);
+
+    const maxOrderUsd = getConfiguredCodeDeliveryMaxOrderUsd();
+    assertPilotGate(maxOrderUsd === null || totalProviderCost <= maxOrderUsd, 'FazerCards code-delivery order blocked by max cost guard.', 'FAZERCARDS_CODE_DELIVERY_MAX_COST_GUARD', initialChecks);
+
+    let preflight;
+    try {
+        preflight = await getProviderBalanceForPilot(product, providerProduct, adapterOptions);
+    } catch (err) {
+        const checks = buildCodeDeliveryPilotChecks({
+            product,
+            providerProduct,
+            familyKey,
+            quantity: normalizedQuantity,
+            cost: unitCost,
+            identifiers,
+            confirmRealOrder,
+        });
+        throw makePilotGateError('FazerCards balance could not be checked; code-delivery pilot requires manual retry.', 'FAZERCARDS_BALANCE_UNKNOWN', checks, ['No provider order was created.']);
+    }
+
+    const checks = buildCodeDeliveryPilotChecks({
+        product,
+        providerProduct,
+        familyKey,
+        quantity: normalizedQuantity,
+        cost: unitCost,
+        balance: preflight.balance,
+        identifiers,
+        confirmRealOrder,
+    });
+    assertPilotGate(preflight.balance >= totalProviderCost, 'FazerCards balance is insufficient for this code-delivery pilot.', 'FAZERCARDS_INSUFFICIENT_PROVIDER_BALANCE', checks);
+
+    const pilotOrder = await ProviderPilotOrder.create({
+        product: product._id,
+        provider: product.provider?._id || providerProduct.provider,
+        providerProduct: providerProduct._id,
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        familyKey,
+        fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+        quantity: normalizedQuantity,
+        providerCost: String(totalProviderCost),
+        providerCostCurrency: providerProduct.currency || 'USD',
+        status: ORDER_STATUS.PROCESSING,
+        operator: adminUserId || null,
+        operatorNote: operatorNote || null,
+    });
+    const idempotencyKey = `fazercards:code-delivery:${pilotOrder._id.toString()}`;
+    await ProviderPilotOrder.findByIdAndUpdate(pilotOrder._id, { $set: { providerIdempotencyKey: idempotencyKey } });
+    pilotOrder.providerIdempotencyKey = idempotencyKey;
+
+    let response;
+    try {
+        if (familyKey === 'GIFTCARDS') {
+            response = await preflight.adapter.client.createGiftCardOrder({
+                categoryId: identifiers.categoryId,
+                cardId: identifiers.itemId,
+                quantity: normalizedQuantity,
+                idempotencyKey,
+            });
+        } else {
+            response = await preflight.adapter.client.createGameKeyOrder({
+                gameId: identifiers.categoryId,
+                keyId: identifiers.itemId,
+                quantity: normalizedQuantity,
+                idempotencyKey,
+            });
+        }
+    } catch (err) {
+        const httpStatus = Number(err.httpStatus || err.statusCode || 0);
+        const retryUnsafe = err.code === 'FAZERCARDS_TIMEOUT'
+            || err.code === 'FAZERCARDS_NETWORK_ERROR'
+            || httpStatus === 0
+            || httpStatus === 429
+            || httpStatus >= 500;
+        const updated = retryUnsafe
+            ? await markPilotManualReview(pilotOrder, err, 'FAZERCARDS_CODE_DELIVERY_UNKNOWN')
+            : await markPilotFailed(pilotOrder, err, 'FAZERCARDS_CODE_DELIVERY_REJECTED');
+        return {
+            success: false,
+            livePilot: true,
+            checks,
+            order: await summarizePilotOrder(await updated.populate('product', 'name')),
+        };
+    }
+
+    const updated = await applyPilotProviderResult({
+        pilotOrder,
+        response,
+        familyKey,
+        providerDoc: preflight.providerDoc,
+        providerProduct,
+        product,
+    });
+
+    return {
+        success: updated.status === ORDER_STATUS.COMPLETED || updated.status === ORDER_STATUS.PROCESSING,
+        livePilot: true,
+        checks,
+        order: await summarizePilotOrder(await updated.populate('product', 'name')),
+    };
+};
+
+const getCodeDeliveryLivePilotDebug = async (orderId) => {
+    const pilotOrder = await ProviderPilotOrder.findById(orderId)
+        .populate('product', 'name')
+        .lean();
+    if (!pilotOrder) throw new NotFoundError('ProviderPilotOrder');
+    if (pilotOrder.providerCode !== PROVIDER_CODES.FAZER_CARDS || pilotOrder.fulfillmentMode !== FULFILLMENT_MODES.CODE_DELIVERY) {
+        throw new BusinessRuleError('Pilot order is not a FazerCards code-delivery order.', 'INVALID_PROVIDER_ORDER');
+    }
+    const deliveredCodeCount = await ProviderDeliveredCode.countDocuments({ pilotOrder: pilotOrder._id });
+    return {
+        localOrderId: pilotOrder._id.toString(),
+        localStatus: pilotOrder.status,
+        productName: pilotOrder.product?.name || null,
+        familyKey: pilotOrder.familyKey,
+        fulfillmentMode: pilotOrder.fulfillmentMode,
+        providerOrderId: pilotOrder.providerOrderId ?? null,
+        providerStatus: pilotOrder.providerStatus ?? null,
+        providerCost: pilotOrder.providerCost,
+        providerCostCurrency: pilotOrder.providerCostCurrency,
+        quantity: pilotOrder.quantity,
+        deliveredCodeCount,
+        storedEncrypted: pilotOrder.storedEncrypted === true,
+        sanitizedRawResponse: redactCodeDeliverySecrets(sanitizePayload(pilotOrder.providerRawResponse)),
+        warnings: pilotOrder.warnings || [],
+    };
+};
+
+const buildDeliveredCodeSafeSummary = (code) => ({
+    id: code._id.toString(),
+    localOrderId: code.order ? code.order.toString() : null,
+    pilotOrderId: code.pilotOrder ? code.pilotOrder.toString() : null,
+    providerCode: code.providerCode,
+    familyKey: code.familyKey,
+    fulfillmentMode: code.fulfillmentMode,
+    providerProductId: code.providerProduct ? code.providerProduct.toString() : null,
+    productId: code.product ? code.product.toString() : null,
+    deliveryStatus: code.deliveryStatus,
+    deliveredAt: code.deliveredAt || null,
+    revealedAt: code.revealedAt || null,
+    revealCount: code.revealCount || 0,
+    hasCode: Boolean(code.codeEncrypted),
+    hasPin: Boolean(code.pinEncrypted),
+    hasSerial: Boolean(code.serialEncrypted),
+    storedEncrypted: Boolean(code.codeEncrypted || code.pinEncrypted || code.serialEncrypted),
+    metadata: redactCodeDeliverySecrets(sanitizePayload(code.metadata)),
+    createdAt: code.createdAt,
+    updatedAt: code.updatedAt,
+});
+
+const listCodeDeliveryPilotDeliveredCodes = async (orderId) => {
+    const pilotOrder = await ProviderPilotOrder.findById(orderId).lean();
+    if (!pilotOrder) throw new NotFoundError('ProviderPilotOrder');
+    if (pilotOrder.providerCode !== PROVIDER_CODES.FAZER_CARDS || pilotOrder.fulfillmentMode !== FULFILLMENT_MODES.CODE_DELIVERY) {
+        throw new BusinessRuleError('Pilot order is not a FazerCards code-delivery order.', 'INVALID_PROVIDER_ORDER');
+    }
+
+    const codes = await ProviderDeliveredCode.find({ pilotOrder: pilotOrder._id })
+        .select('+codeEncrypted +serialEncrypted +pinEncrypted')
+        .sort({ createdAt: 1 })
+        .lean();
+
+    return {
+        success: true,
+        localOrderId: pilotOrder._id.toString(),
+        localStatus: pilotOrder.status,
+        deliveredCodeCount: codes.length,
+        items: codes.map(buildDeliveredCodeSafeSummary),
+        warnings: ['Plaintext provider codes are not returned by this endpoint.'],
+    };
+};
+
+const getDeliveredCodeDebug = async (codeId) => {
+    const code = await ProviderDeliveredCode.findById(codeId)
+        .select('+codeEncrypted +serialEncrypted +pinEncrypted +providerRawResponse')
+        .lean();
+    if (!code) throw new NotFoundError('ProviderDeliveredCode');
+    if (code.providerCode !== PROVIDER_CODES.FAZER_CARDS) {
+        throw new BusinessRuleError('Delivered code is not linked to FazerCards.', 'INVALID_PROVIDER_ORDER');
+    }
+
+    return {
+        success: true,
+        code: buildDeliveredCodeSafeSummary(code),
+        sanitizedRawResponse: redactCodeDeliverySecrets(sanitizePayload(code.providerRawResponse)),
+        warnings: ['Plaintext provider codes are not returned by this endpoint.'],
     };
 };
 
@@ -1839,6 +2834,7 @@ module.exports = {
     syncCatalogPage,
     listFamilies,
     syncCatalogFamily,
+    syncAllCatalogFamilies,
     getCatalogSummary,
     backfillLegacyFamilies,
     listProviderProducts,
@@ -1847,8 +2843,13 @@ module.exports = {
     importProviderProduct,
     buildTopupDryRun,
     buildCodeDeliveryDryRun,
+    buildUnifiedDryRun,
     getProductReadiness,
     getCodeDeliveryReadiness,
+    runCodeDeliveryLivePilot,
+    getCodeDeliveryLivePilotDebug,
+    listCodeDeliveryPilotDeliveredCodes,
+    getDeliveredCodeDebug,
     syncOrderStatus,
     getOrderProviderDebug,
 };

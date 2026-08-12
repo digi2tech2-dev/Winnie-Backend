@@ -17,7 +17,13 @@ const providerDeliveredCodeSchema = new mongoose.Schema(
         order: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'Order',
-            required: true,
+            default: null,
+            index: true,
+        },
+        pilotOrder: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'ProviderPilotOrder',
+            default: null,
             index: true,
         },
         provider: {
@@ -126,7 +132,15 @@ providerDeliveredCodeSchema.methods.getSecretValue = function getSecretValue(fie
     return isEncryptedSecret(value) ? decryptSecret(value) : value;
 };
 
+providerDeliveredCodeSchema.pre('validate', function ensureDeliveryOwner(next) {
+    if (!this.order && !this.pilotOrder) {
+        return next(new Error('ProviderDeliveredCode requires order or pilotOrder.'));
+    }
+    return next();
+});
+
 providerDeliveredCodeSchema.index({ order: 1, providerProduct: 1 });
+providerDeliveredCodeSchema.index({ pilotOrder: 1, providerProduct: 1 });
 providerDeliveredCodeSchema.index({ providerCode: 1, familyKey: 1, deliveryStatus: 1 });
 
 const ProviderDeliveredCode = mongoose.model('ProviderDeliveredCode', providerDeliveredCodeSchema);
