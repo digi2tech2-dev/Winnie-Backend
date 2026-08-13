@@ -178,9 +178,19 @@ const syncFazerCardsCatalogAll = catchAsync(async (req, res) => {
     sendSuccess(res, data, 'FazerCards catalog families synced');
 });
 
+const getFazerCardsCatalogSyncStatus = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.getCatalogSyncStatus();
+    sendSuccess(res, data, 'FazerCards catalog sync status retrieved');
+});
+
 const getFazerCardsCatalogSummary = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.getCatalogSummary();
     sendSuccess(res, data, 'FazerCards catalog summary retrieved');
+});
+
+const getFazerCardsLaunchHealth = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.getLaunchHealth();
+    sendSuccess(res, data, 'FazerCards launch health retrieved');
 });
 
 const listFazerCardsContracts = catchAsync(async (req, res) => {
@@ -296,6 +306,48 @@ const storeFazerCardsManualDeliveredCode = catchAsync(async (req, res) => {
     sendSuccess(res, { deliveredCode: result }, 'FazerCards delivered code stored securely');
 });
 
+const listFazerCardsManualOrders = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.listManualOrders(req.query);
+    sendPaginated(res, data.orders, data.pagination, 'FazerCards manual orders retrieved');
+});
+
+const getFazerCardsManualOrder = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.getManualOrderDetail(req.params.orderId);
+    sendSuccess(res, data, 'FazerCards manual order retrieved');
+});
+
+const completeFazerCardsManualOrder = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.completeManualOrder(req.params.orderId, req.body, req.user?._id, {
+        ipAddress: req.ip ?? null,
+        userAgent: req.get('User-Agent') ?? null,
+    });
+    sendSuccess(res, data, 'FazerCards manual order completed');
+});
+
+const failFazerCardsManualOrder = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.failManualOrder(req.params.orderId, req.body, req.user?._id, {
+        ipAddress: req.ip ?? null,
+        userAgent: req.get('User-Agent') ?? null,
+    });
+    sendSuccess(res, data, 'FazerCards manual order failed');
+});
+
+const noteFazerCardsManualOrder = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.addManualOrderNote(req.params.orderId, req.body, req.user?._id, {
+        ipAddress: req.ip ?? null,
+        userAgent: req.get('User-Agent') ?? null,
+    });
+    sendSuccess(res, data, 'FazerCards manual order note added');
+});
+
+const bulkUpdateFazerCardsLaunch = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.bulkUpdateLaunchControls(req.body, req.user?._id, {
+        ipAddress: req.ip ?? null,
+        userAgent: req.get('User-Agent') ?? null,
+    });
+    sendSuccess(res, data, req.body.dryRun === true ? 'FazerCards launch update previewed' : 'FazerCards launch settings updated');
+});
+
 const syncFazerCardsOrderStatus = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.syncOrderStatus(req.params.orderId);
     sendSuccess(res, data, 'FazerCards order status synced');
@@ -333,7 +385,9 @@ module.exports = {
     listFazerCardsCatalogFamilies,
     syncFazerCardsCatalogFamily,
     syncFazerCardsCatalogAll,
+    getFazerCardsCatalogSyncStatus,
     getFazerCardsCatalogSummary,
+    getFazerCardsLaunchHealth,
     listFazerCardsContracts,
     getFazerCardsContractsSummary,
     getFazerCardsContract,
@@ -352,6 +406,12 @@ module.exports = {
     listFazerCardsCodeDeliveryPilotCodes,
     getFazerCardsDeliveredCodeDebug,
     storeFazerCardsManualDeliveredCode,
+    listFazerCardsManualOrders,
+    getFazerCardsManualOrder,
+    completeFazerCardsManualOrder,
+    failFazerCardsManualOrder,
+    noteFazerCardsManualOrder,
+    bulkUpdateFazerCardsLaunch,
     syncFazerCardsOrderStatus,
     getFazerCardsOrderProviderDebug,
 };

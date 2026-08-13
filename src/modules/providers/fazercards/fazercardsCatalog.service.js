@@ -1,5 +1,6 @@
 'use strict';
 
+const mongoose = require('mongoose');
 const config = require('../../../config/config');
 const { Provider } = require('../provider.model');
 const { ProviderProduct, FULFILLMENT_MODES, SUPPORT_LEVELS } = require('../providerProduct.model');
@@ -24,6 +25,9 @@ const {
     sanitizeProviderCodePayload,
     storeManualDeliveredCodeForOrder,
 } = require('./fazercardsDelivery.service');
+const { createAuditLog } = require('../../audit/audit.service');
+const { ORDER_ACTIONS, PRODUCT_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../../audit/audit.constants');
+const { notifyOrderCompleted, notifyOrderFailed } = require('../../notifications/notification.events');
 
 const FAZERCARDS_SLUG = 'fazer-cards';
 const SYNC_ALL_DEFAULT_FAMILIES = Object.freeze([
@@ -44,6 +48,7 @@ const UNIMPLEMENTED_FAMILY_BLOCK_REASONS = Object.freeze({
     STEAM_GIFTS: 'STEAM_GIFTS_CATALOG_UNAVAILABLE',
 });
 let syncAllInProgress = false;
+let lastSyncAllSummary = null;
 
 const findFazerCardsProvider = () => Provider.findOne({
     deletedAt: null,
@@ -757,7 +762,7 @@ const syncAllCatalogFamilies = async (options = {}, adapterOptions = {}) => {
             unsupported: 0,
         });
 
-        return {
+        const summary = {
             success: errors.length === 0 || Object.values(results).some((result) => result.success === true),
             familiesRequested: familyKeys,
             familiesSynced: Object.values(results).filter((result) => result.success === true).map((result) => result.familyKey),
@@ -769,6 +774,8 @@ const syncAllCatalogFamilies = async (options = {}, adapterOptions = {}) => {
             startedAt,
             finishedAt: new Date(),
         };
+        lastSyncAllSummary = sanitizePayload(summary);
+        return summary;
     } finally {
         syncAllInProgress = false;
     }
@@ -2796,6 +2803,749 @@ const getOrderProviderDebug = async (orderId) => {
     };
 };
 
+const normalizeManualStatusFilter = (status) => {
+    const normalized = String(status || '').trim().toUpperCase();
+    if (!normalized) return null;
+    if (normalized === 'PENDING_MANUAL') return ORDER_STATUS.PENDING;
+    if (normalized === 'PROCESSING_MANUAL') return ORDER_STATUS.PROCESSING;
+    if (normalized === 'MANUAL_REVIEW') return ORDER_STATUS.MANUAL_REVIEW;
+    return normalized;
+};
+
+const normalizeObjectId = (value, label = 'id') => {
+    if (!value) return null;
+    const stringValue = String(value).trim();
+    if (!mongoose.Types.ObjectId.isValid(stringValue)) {
+        throw new BusinessRuleError(`${label} must be a valid ObjectId.`, 'INVALID_OBJECT_ID');
+    }
+    return new mongoose.Types.ObjectId(stringValue);
+};
+
+const SUBMITTED_FIELD_SECRET_PATTERN = /(password|passwd|token|secret|credential|authorization|auth_key|api_key)/i;
+
+const buildSubmittedFieldSummaries = (order = {}) => {
+    const values = order.customerInput?.values && typeof order.customerInput.values === 'object'
+        ? order.customerInput.values
+        : {};
+    const snapshot = Array.isArray(order.customerInput?.fieldsSnapshot)
+        ? order.customerInput.fieldsSnapshot
+        : [];
+    const labelsByKey = new Map(snapshot.map((field) => [
+        String(field.key || field.name || '').trim(),
+        field,
+    ]).filter(([key]) => key));
+
+    return Object.entries(values).map(([key, value]) => {
+        const field = labelsByKey.get(key) || {};
+        return {
+            key,
+            label: field.label || key,
+            type: field.type || 'text',
+            value: SUBMITTED_FIELD_SECRET_PATTERN.test(key)
+                ? '[REDACTED]'
+                : (value === undefined || value === null ? '' : String(value)),
+        };
+    });
+};
+
+const getSafeOrderUser = (user) => {
+    if (!user || typeof user !== 'object') return null;
+    return {
+        id: user._id?.toString?.() || String(user._id || user.id || ''),
+        name: user.name || '',
+        email: user.email || '',
+    };
+};
+
+const getSafeOrderProduct = (product = {}, providerProduct = null) => ({
+    id: product?._id?.toString?.() || String(product?._id || product?.id || ''),
+    name: product?.name || '',
+    familyKey: product?.familyKey || providerProduct?.familyKey || null,
+    fulfillmentMode: product?.fulfillmentMode || providerProduct?.fulfillmentMode || null,
+    providerExecutionMode: product?.providerExecutionMode || null,
+    providerExecutionEnabled: product?.providerExecutionEnabled === true,
+    providerExecutionBlocked: product?.providerExecutionBlocked === true,
+    providerBlockReason: product?.providerBlockReason || null,
+});
+
+const countDeliveredCodesForOrders = async (orderIds = []) => {
+    if (!orderIds.length) return new Map();
+    const counts = await ProviderDeliveredCode.aggregate([
+        { $match: { order: { $in: orderIds } } },
+        { $group: { _id: '$order', count: { $sum: 1 } } },
+    ]);
+    return new Map(counts.map((item) => [String(item._id), Number(item.count || 0)]));
+};
+
+const safeProviderMetadataForManualOrder = (order = {}, providerProduct = null) => ({
+    providerCode: order.providerCode || PROVIDER_CODES.FAZER_CARDS.toLowerCase(),
+    providerOrderId: order.providerOrderId ?? null,
+    providerStatus: order.providerStatus ?? null,
+    providerRequestId: order.providerRequestId ?? null,
+    providerErrorCode: order.providerErrorCode ?? null,
+    providerErrorMessage: order.providerErrorMessage ?? null,
+    providerProduct: providerProduct ? {
+        id: providerProduct._id?.toString?.() || String(providerProduct._id || ''),
+        externalProductId: providerProduct.externalProductId || null,
+        familyKey: getProviderProductFamilyKey(providerProduct),
+        fulfillmentMode: providerProduct.fulfillmentMode || null,
+        costPrice: providerProduct.costPrice ?? providerProduct.rawPrice ?? null,
+        currency: providerProduct.currency || 'USD',
+        stock: providerProduct.stock ?? null,
+        minQty: providerProduct.minQty || 1,
+        maxQty: providerProduct.maxQty || 9999,
+        region: providerProduct.region || null,
+        platform: providerProduct.platform || null,
+    } : null,
+    rawResponseStored: Boolean(order.providerRawResponse),
+});
+
+const summarizeManualOrder = (order, deliveredCodeCount = 0, detail = false) => {
+    const product = getOrderProduct(order);
+    const providerProduct = getOrderProviderProduct(order);
+    const plainOrder = order && typeof order.toObject === 'function' ? order.toObject() : order;
+    return {
+        id: order._id.toString(),
+        orderNumber: order.orderNumber || null,
+        status: order.status,
+        executionType: order.executionType,
+        familyKey: order.familyKey || product?.familyKey || providerProduct?.familyKey || null,
+        fulfillmentMode: order.fulfillmentMode || product?.fulfillmentMode || providerProduct?.fulfillmentMode || null,
+        quantity: order.quantity,
+        totalPrice: order.totalPrice,
+        currency: order.currency || 'USD',
+        refunded: order.refunded === true,
+        refundedAt: order.refundedAt || null,
+        failedAt: order.failedAt || null,
+        createdAt: order.createdAt,
+        updatedAt: order.updatedAt,
+        customer: getSafeOrderUser(order.userId),
+        product: getSafeOrderProduct(product, providerProduct),
+        submittedFields: buildSubmittedFieldSummaries(order),
+        deliveredCodeCount,
+        hasDeliveredCodes: deliveredCodeCount > 0,
+        provider: safeProviderMetadataForManualOrder(order, providerProduct),
+        internalNotes: detail ? (plainOrder.internalNotes || []) : undefined,
+        statusHistory: detail ? (plainOrder.statusHistory || []) : undefined,
+        warnings: [
+            'Plaintext delivered codes are never returned by manual order list/detail endpoints.',
+        ],
+    };
+};
+
+const populateFazerCardsManualOrder = (query) => query
+    .populate({
+        path: 'productId',
+        select: 'name provider providerProduct providerCode familyKey fulfillmentMode providerExecutionMode providerExecutionEnabled providerExecutionBlocked providerBlockReason',
+        populate: [
+            { path: 'provider', select: 'name slug providerCode' },
+            {
+                path: 'providerProduct',
+                select: 'provider providerCode externalProductId rawName costPrice rawPrice currency familyKey fulfillmentMode category categoryName offerId offerName region platform stock minQty maxQty requiredFields blockReason executionBlocked isSupported isBlocked',
+                populate: { path: 'provider', select: 'name slug providerCode' },
+            },
+        ],
+    })
+    .populate('userId', 'name email');
+
+const buildFazerCardsProductIdsForOrderFilters = async ({ familyKey, fulfillmentMode, productId } = {}) => {
+    const productQuery = {
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        deletedAt: null,
+    };
+    if (productId) productQuery._id = normalizeObjectId(productId, 'productId');
+    if (familyKey) productQuery.familyKey = String(familyKey).trim().toUpperCase();
+    if (fulfillmentMode) productQuery.fulfillmentMode = String(fulfillmentMode).trim().toUpperCase();
+    const products = await Product.find(productQuery).select('_id').lean();
+    return products.map((product) => product._id);
+};
+
+const listManualOrders = async ({
+    page = 1,
+    limit = 20,
+    familyKey,
+    fulfillmentMode,
+    status,
+    productId,
+    userId,
+    from,
+    to,
+} = {}) => {
+    const normalizedPage = Math.max(parseInt(page, 10) || 1, 1);
+    const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200);
+    const productIds = await buildFazerCardsProductIdsForOrderFilters({ familyKey, fulfillmentMode, productId });
+    const query = {
+        productId: { $in: productIds },
+        $or: [
+            { status: ORDER_STATUS.MANUAL_REVIEW },
+            { executionType: EXECUTION_TYPES.MANUAL },
+        ],
+    };
+
+    const normalizedStatus = normalizeManualStatusFilter(status);
+    if (normalizedStatus) query.status = normalizedStatus;
+    if (!normalizedStatus) query.status = { $in: [ORDER_STATUS.MANUAL_REVIEW, ORDER_STATUS.PENDING, ORDER_STATUS.PROCESSING] };
+    if (userId) query.userId = normalizeObjectId(userId, 'userId');
+    if (from || to) {
+        query.createdAt = {};
+        if (from) query.createdAt.$gte = new Date(from);
+        if (to) query.createdAt.$lte = new Date(to);
+    }
+
+    const skip = (normalizedPage - 1) * normalizedLimit;
+    const [orders, total] = await Promise.all([
+        populateFazerCardsManualOrder(Order.find(query))
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(normalizedLimit),
+        Order.countDocuments(query),
+    ]);
+    const deliveredCounts = await countDeliveredCodesForOrders(orders.map((order) => order._id));
+
+    return {
+        orders: orders.map((order) => summarizeManualOrder(order, deliveredCounts.get(String(order._id)) || 0)),
+        pagination: {
+            page: normalizedPage,
+            limit: normalizedLimit,
+            total,
+            pages: Math.ceil(total / normalizedLimit),
+        },
+    };
+};
+
+const loadManualOrder = async (orderId) => {
+    const order = await populateFazerCardsManualOrder(Order.findById(orderId));
+    if (!order) throw new NotFoundError('Order');
+    assertFazerCardsOrder(order);
+    const isManual = order.status === ORDER_STATUS.MANUAL_REVIEW || order.executionType === EXECUTION_TYPES.MANUAL;
+    if (!isManual) {
+        throw new BusinessRuleError('Order is not a manual FazerCards order.', 'FAZERCARDS_ORDER_NOT_MANUAL');
+    }
+    return order;
+};
+
+const appendManualOrderNote = (order, {
+    adminId = null,
+    note = '',
+    proof = null,
+    type = 'admin_note',
+    status = null,
+    metadata = null,
+} = {}) => {
+    const trimmedNote = String(note || '').trim();
+    if (trimmedNote || proof) {
+        order.internalNotes = order.internalNotes || [];
+        order.internalNotes.push({
+            note: trimmedNote,
+            proof: proof || null,
+            type,
+            createdBy: adminId || null,
+            createdAt: new Date(),
+        });
+    }
+    if (status) {
+        order.statusHistory = order.statusHistory || [];
+        order.statusHistory.push({
+            status,
+            note: trimmedNote,
+            actor: adminId || null,
+            at: new Date(),
+            metadata: sanitizePayload(metadata),
+        });
+    }
+};
+
+const auditManualOrderAction = ({
+    order,
+    adminId,
+    action,
+    metadata = {},
+    ipAddress = null,
+    userAgent = null,
+} = {}) => createAuditLog({
+    actorId: adminId || order.userId || null,
+    actorRole: ACTOR_ROLES.ADMIN,
+    ipAddress,
+    userAgent,
+    action,
+    entityType: ENTITY_TYPES.ORDER,
+    entityId: order._id,
+    metadata: sanitizePayload({
+        orderId: order._id.toString(),
+        orderNumber: order.orderNumber,
+        familyKey: order.familyKey,
+        fulfillmentMode: order.fulfillmentMode,
+        ...metadata,
+    }),
+});
+
+const isCodeDeliveryManualOrder = (order) => {
+    const product = getOrderProduct(order);
+    const providerProduct = getOrderProviderProduct(order);
+    const familyKey = String(order.familyKey || product?.familyKey || providerProduct?.familyKey || '').trim().toUpperCase();
+    const fulfillmentMode = String(order.fulfillmentMode || product?.fulfillmentMode || providerProduct?.fulfillmentMode || '').trim().toUpperCase();
+    return fulfillmentMode === FULFILLMENT_MODES.CODE_DELIVERY && CODE_DELIVERY_IMPORT_FAMILIES.has(familyKey);
+};
+
+const getExistingDeliveredCodeCount = (orderId) => ProviderDeliveredCode.countDocuments({ order: orderId });
+
+const completeManualOrder = async (orderId, {
+    adminNote = '',
+    proof = null,
+    deliveredCodes = [],
+} = {}, adminId = null, auditContext = {}) => {
+    const order = await loadManualOrder(orderId);
+    if (order.status === ORDER_STATUS.COMPLETED) {
+        throw new BusinessRuleError('Order is already completed.', 'ORDER_ALREADY_COMPLETED');
+    }
+    if (order.refunded === true) {
+        throw new BusinessRuleError('Refunded orders cannot be completed.', 'ORDER_ALREADY_REFUNDED');
+    }
+
+    const suppliedCodes = Array.isArray(deliveredCodes) ? deliveredCodes : [];
+    if (suppliedCodes.length > 0 && !isCodeDeliveryManualOrder(order)) {
+        throw new BusinessRuleError('Delivered codes can only be stored for CODE_DELIVERY orders.', 'ORDER_NOT_CODE_DELIVERY');
+    }
+    if (isCodeDeliveryManualOrder(order) && suppliedCodes.length === 0 && await getExistingDeliveredCodeCount(order._id) === 0) {
+        throw new BusinessRuleError('At least one delivered code/key is required to complete this CODE_DELIVERY order.', 'DELIVERED_CODE_REQUIRED');
+    }
+
+    const storedCodes = [];
+    for (const delivered of suppliedCodes) {
+        storedCodes.push(await storeManualDeliveredCodeForOrder({
+            orderId: order._id,
+            code: delivered.code,
+            pin: delivered.pin,
+            serial: delivered.serial,
+            metadata: delivered.metadata || { source: 'admin_manual_complete' },
+        }));
+    }
+
+    order.status = ORDER_STATUS.COMPLETED;
+    order.providerErrorCode = null;
+    order.providerErrorMessage = null;
+    order.rejectionReason = null;
+    appendManualOrderNote(order, {
+        adminId,
+        note: adminNote || 'Manual FazerCards order completed by admin.',
+        proof,
+        type: 'manual_complete',
+        status: ORDER_STATUS.COMPLETED,
+        metadata: {
+            deliveredCodeCountAdded: storedCodes.length,
+        },
+    });
+    await order.save();
+    notifyOrderCompleted(order, { source: 'fazercards_manual_fulfillment' });
+    await auditManualOrderAction({
+        order,
+        adminId,
+        action: ORDER_ACTIONS.COMPLETED,
+        metadata: {
+            action: 'fazercards_manual_complete',
+            deliveredCodeCountAdded: storedCodes.length,
+            plaintextReturned: false,
+        },
+        ...auditContext,
+    });
+
+    const deliveredCodeCount = await getExistingDeliveredCodeCount(order._id);
+    return {
+        success: true,
+        order: summarizeManualOrder(await loadManualOrder(order._id), deliveredCodeCount, true),
+        deliveredCodes: storedCodes.map((item) => ({
+            id: item.id,
+            deliveryStatus: item.deliveryStatus,
+            hasCode: item.hasCode,
+            hasPin: item.hasPin,
+            hasSerial: item.hasSerial,
+            storedEncrypted: item.storedEncrypted,
+            deliveredAt: item.deliveredAt,
+        })),
+        warnings: ['Plaintext delivered codes were stored encrypted and are not returned by this endpoint.'],
+    };
+};
+
+const getRefundableAmount = (order = {}) => {
+    const walletPortion = Number(order.walletDeducted || 0);
+    const creditPortion = Number(order.creditUsedAmount || 0);
+    const charged = Number(order.chargedAmount || 0);
+    return walletPortion + creditPortion > 0 ? walletPortion + creditPortion : charged;
+};
+
+const failManualOrder = async (orderId, {
+    reason = '',
+    refund = false,
+} = {}, adminId = null, auditContext = {}) => {
+    const order = await loadManualOrder(orderId);
+    const trimmedReason = String(reason || '').trim();
+    if (!trimmedReason) {
+        throw new BusinessRuleError('reason is required.', 'FAZERCARDS_MANUAL_FAIL_REASON_REQUIRED');
+    }
+    if (order.status === ORDER_STATUS.FAILED && order.refunded === true) {
+        return {
+            success: true,
+            alreadyFailed: true,
+            refunded: true,
+            order: summarizeManualOrder(order, await getExistingDeliveredCodeCount(order._id), true),
+        };
+    }
+
+    let refundApplied = false;
+    let refundSkippedReason = null;
+    if (refund === true) {
+        if (order.refunded === true) {
+            refundSkippedReason = 'ALREADY_REFUNDED';
+        } else if (getRefundableAmount(order) <= 0) {
+            refundSkippedReason = 'NO_REFUNDABLE_AMOUNT';
+        } else {
+            refundApplied = await refundFailedOrder(order, {
+                source: 'fazercards_manual_fail',
+                reason: 'ADMIN_MANUAL_FAIL',
+                providerRejected: false,
+            });
+            if (!refundApplied) refundSkippedReason = 'ALREADY_REFUNDED';
+        }
+    }
+
+    const freshOrder = await Order.findById(order._id);
+    freshOrder.status = ORDER_STATUS.FAILED;
+    freshOrder.failedAt = freshOrder.failedAt || new Date();
+    freshOrder.rejectionReason = trimmedReason;
+    freshOrder.providerErrorCode = 'FAZERCARDS_MANUAL_FULFILLMENT_FAILED';
+    freshOrder.providerErrorMessage = trimmedReason;
+    appendManualOrderNote(freshOrder, {
+        adminId,
+        note: trimmedReason,
+        type: 'manual_fail',
+        status: ORDER_STATUS.FAILED,
+        metadata: {
+            refundRequested: refund === true,
+            refundApplied,
+            refundSkippedReason,
+        },
+    });
+    await freshOrder.save();
+    notifyOrderFailed(freshOrder, {
+        source: 'fazercards_manual_fulfillment',
+        reason: trimmedReason,
+        notifyUser: true,
+    });
+    await auditManualOrderAction({
+        order: freshOrder,
+        adminId,
+        action: ORDER_ACTIONS.FAILED,
+        metadata: {
+            action: 'fazercards_manual_fail',
+            reason: trimmedReason,
+            refundRequested: refund === true,
+            refundApplied,
+            refundSkippedReason,
+        },
+        ...auditContext,
+    });
+
+    const loaded = await loadManualOrder(freshOrder._id);
+    return {
+        success: true,
+        refunded: refundApplied,
+        refundSkippedReason,
+        order: summarizeManualOrder(loaded, await getExistingDeliveredCodeCount(loaded._id), true),
+    };
+};
+
+const addManualOrderNote = async (orderId, {
+    adminNote = '',
+    proof = null,
+} = {}, adminId = null, auditContext = {}) => {
+    const note = String(adminNote || '').trim();
+    if (!note && !proof) {
+        throw new BusinessRuleError('adminNote or proof is required.', 'FAZERCARDS_MANUAL_NOTE_REQUIRED');
+    }
+    const order = await loadManualOrder(orderId);
+    appendManualOrderNote(order, {
+        adminId,
+        note,
+        proof,
+        type: 'manual_note',
+        metadata: { proofProvided: Boolean(proof) },
+    });
+    await order.save();
+    await auditManualOrderAction({
+        order,
+        adminId,
+        action: ORDER_ACTIONS.MANUAL_REVIEW,
+        metadata: {
+            action: 'fazercards_manual_note',
+            proofProvided: Boolean(proof),
+        },
+        ...auditContext,
+    });
+    return {
+        success: true,
+        order: summarizeManualOrder(await loadManualOrder(order._id), await getExistingDeliveredCodeCount(order._id), true),
+    };
+};
+
+const getManualOrderDetail = async (orderId) => {
+    const order = await loadManualOrder(orderId);
+    const deliveredCodeCount = await getExistingDeliveredCodeCount(order._id);
+    return {
+        success: true,
+        order: summarizeManualOrder(order, deliveredCodeCount, true),
+    };
+};
+
+const validateBulkLaunchProductUpdate = (product, updates) => {
+    const providerProduct = product.providerProduct;
+    const familyKey = String(product.familyKey || providerProduct?.familyKey || '').trim().toUpperCase();
+    const contract = fazerCardsContracts.getContractOrUnknown(familyKey);
+    const requestedMode = updates.providerExecutionMode || product.providerExecutionMode || fazerCardsContracts.getDefaultExecutionMode(familyKey);
+    const modeValidation = fazerCardsContracts.validateExecutionModeForFamily(familyKey, requestedMode);
+    const errors = [];
+    const enablingCustomerPurchase = updates.customerPurchaseEnabled === true;
+    const enablingVisibility = updates.isActive === true
+        || updates.visibleInStore === true
+        || updates.status === PRODUCT_STATUSES.AVAILABLE
+        || enablingCustomerPurchase;
+
+    if (!modeValidation.ok) {
+        errors.push({ code: modeValidation.code, message: modeValidation.message, allowedModes: modeValidation.allowedModes });
+    }
+    if (contract.supportStage === fazerCardsContracts.SUPPORT_STAGES.DISABLED_UNAVAILABLE && enablingVisibility) {
+        errors.push({ code: 'FAMILY_DISABLED_UNAVAILABLE', message: 'This FazerCards family is currently unavailable.' });
+    }
+    if (enablingCustomerPurchase && contract.canCustomerPurchase !== true) {
+        errors.push({ code: 'CUSTOMER_PURCHASE_NOT_ALLOWED', message: 'Customer purchase is not allowed for this FazerCards family contract.' });
+    }
+    if (modeValidation.ok && modeValidation.mode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER && fazerCardsContracts.canAutoExecuteFamily(familyKey) !== true) {
+        errors.push({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED', message: 'Auto provider execution is not allowed for this FazerCards family contract.' });
+    }
+
+    return {
+        ok: errors.length === 0,
+        familyKey,
+        contract: {
+            supportStage: contract.supportStage,
+            executionStage: contract.executionStage,
+            allowedModes: modeValidation.allowedModes || fazerCardsContracts.getAllowedExecutionModes(familyKey),
+        },
+        requestedMode: modeValidation.ok ? modeValidation.mode : String(requestedMode || '').trim().toUpperCase(),
+        errors,
+    };
+};
+
+const buildBulkLaunchUpdateSet = (product, payload, validatedMode) => {
+    const allowed = [
+        'customerPurchaseEnabled',
+        'isActive',
+        'visibleInStore',
+        'status',
+        'providerExecutionMode',
+        'providerExecutionBlocked',
+        'providerBlockReason',
+    ];
+    const update = {};
+    for (const key of allowed) {
+        if (payload[key] !== undefined) update[key] = payload[key];
+    }
+    update.providerExecutionMode = validatedMode;
+    if (validatedMode !== fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
+        update.providerExecutionEnabled = false;
+        update.executionType = EXECUTION_TYPES.MANUAL;
+    } else if (product.providerExecutionEnabled === true) {
+        update.executionType = EXECUTION_TYPES.AUTOMATIC;
+    }
+    if (validatedMode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.DISABLED) {
+        update.customerPurchaseEnabled = false;
+        update.providerExecutionEnabled = false;
+        update.executionType = EXECUTION_TYPES.MANUAL;
+    }
+    return update;
+};
+
+const bulkUpdateLaunchControls = async (payload = {}, adminId = null, auditContext = {}) => {
+    const productIds = [...new Set((Array.isArray(payload.productIds) ? payload.productIds : [])
+        .map((id) => String(id || '').trim())
+        .filter(Boolean))];
+    if (productIds.length === 0) {
+        throw new BusinessRuleError('productIds is required.', 'FAZERCARDS_BULK_PRODUCT_IDS_REQUIRED');
+    }
+
+    const dryRun = payload.dryRun === true;
+    const products = await Product.find({ _id: { $in: productIds }, deletedAt: null })
+        .populate('providerProduct', 'providerCode familyKey fulfillmentMode externalProductId')
+        .lean();
+    const productsById = new Map(products.map((product) => [product._id.toString(), product]));
+    const results = [];
+
+    for (const productId of productIds) {
+        const product = productsById.get(productId);
+        if (!product) {
+            results.push({ productId, ok: false, errors: [{ code: 'PRODUCT_NOT_FOUND', message: 'Product not found.' }] });
+            continue;
+        }
+        if (normalizeProviderCode(product.providerCode) !== PROVIDER_CODES.FAZER_CARDS) {
+            results.push({ productId, ok: false, errors: [{ code: 'FAZERCARDS_PRODUCT_REQUIRED', message: 'Product is not linked to FazerCards.' }] });
+            continue;
+        }
+
+        const validation = validateBulkLaunchProductUpdate(product, payload);
+        const update = validation.ok ? buildBulkLaunchUpdateSet(product, payload, validation.requestedMode) : {};
+        results.push({
+            productId,
+            productName: product.name,
+            ok: validation.ok,
+            familyKey: validation.familyKey,
+            requestedMode: validation.requestedMode,
+            contract: validation.contract,
+            errors: validation.errors,
+            update,
+        });
+    }
+
+    if (!dryRun) {
+        for (const result of results.filter((item) => item.ok)) {
+            await Product.findByIdAndUpdate(result.productId, { $set: result.update }, { runValidators: true });
+            await createAuditLog({
+                actorId: adminId || result.productId,
+                actorRole: ACTOR_ROLES.ADMIN,
+                ipAddress: auditContext.ipAddress || null,
+                userAgent: auditContext.userAgent || null,
+                action: PRODUCT_ACTIONS.UPDATED,
+                entityType: ENTITY_TYPES.PRODUCT,
+                entityId: result.productId,
+                metadata: sanitizePayload({
+                    action: 'fazercards_bulk_update_launch',
+                    familyKey: result.familyKey,
+                    update: result.update,
+                }),
+            });
+        }
+    }
+
+    const successful = results.filter((item) => item.ok).length;
+    return {
+        success: results.every((item) => item.ok),
+        dryRun,
+        total: results.length,
+        updated: dryRun ? 0 : successful,
+        wouldUpdate: dryRun ? successful : 0,
+        failed: results.length - successful,
+        results,
+    };
+};
+
+const getCatalogSyncStatus = async () => ({
+    success: true,
+    inProgress: syncAllInProgress,
+    lastSync: lastSyncAllSummary,
+    catalog: await getCatalogSummary(),
+});
+
+const getFazerCardsProductIds = async () => (
+    Product.find({ providerCode: PROVIDER_CODES.FAZER_CARDS, deletedAt: null }).select('_id').lean()
+);
+
+const getLaunchHealth = async (adapterOptions = {}) => {
+    const warnings = [];
+    let balance = null;
+    let connectionOk = false;
+    let connectionError = null;
+    if (config.providers.fazerCards.enabled === true) {
+        try {
+            const balanceResult = await getBalance(adapterOptions);
+            balance = balanceResult.balance?.balance ?? balanceResult.balance ?? null;
+            connectionOk = true;
+        } catch (err) {
+            connectionError = err.code || 'FAZERCARDS_CONNECTION_UNKNOWN';
+            warnings.push('FazerCards balance/connection could not be checked.');
+        }
+    } else {
+        warnings.push('FazerCards integration is disabled.');
+    }
+
+    const catalog = await getCatalogSummary();
+    const fazerProductIds = (await getFazerCardsProductIds()).map((product) => product._id);
+    const visibleFilter = {
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        deletedAt: null,
+        isActive: true,
+        visibleInStore: true,
+        status: PRODUCT_STATUSES.AVAILABLE,
+        customerPurchaseEnabled: true,
+    };
+    const now = new Date();
+    const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const orderBase = fazerProductIds.length ? { productId: { $in: fazerProductIds } } : { _id: { $exists: false } };
+
+    const [
+        activeCustomerVisible,
+        autoProvider,
+        manualFulfillment,
+        disabled,
+        visibleAutoProvider,
+        manualPending,
+        manualReview,
+        processing,
+        completed24h,
+        failed24h,
+    ] = await Promise.all([
+        Product.countDocuments(visibleFilter),
+        Product.countDocuments({ providerCode: PROVIDER_CODES.FAZER_CARDS, deletedAt: null, providerExecutionMode: fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER }),
+        Product.countDocuments({ providerCode: PROVIDER_CODES.FAZER_CARDS, deletedAt: null, providerExecutionMode: fazerCardsContracts.PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT }),
+        Product.countDocuments({ providerCode: PROVIDER_CODES.FAZER_CARDS, deletedAt: null, providerExecutionMode: fazerCardsContracts.PROVIDER_EXECUTION_MODES.DISABLED }),
+        Product.countDocuments({ ...visibleFilter, providerExecutionMode: fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER }),
+        Order.countDocuments({ ...orderBase, executionType: EXECUTION_TYPES.MANUAL, status: { $in: [ORDER_STATUS.PENDING, ORDER_STATUS.PROCESSING, ORDER_STATUS.MANUAL_REVIEW] } }),
+        Order.countDocuments({ ...orderBase, status: ORDER_STATUS.MANUAL_REVIEW }),
+        Order.countDocuments({ ...orderBase, status: ORDER_STATUS.PROCESSING }),
+        Order.countDocuments({ ...orderBase, status: ORDER_STATUS.COMPLETED, updatedAt: { $gte: since24h } }),
+        Order.countDocuments({ ...orderBase, status: { $in: [ORDER_STATUS.FAILED, ORDER_STATUS.CANCELED] }, updatedAt: { $gte: since24h } }),
+    ]);
+
+    if (config.providers.fazerCards.customerPurchaseEnabled === false) warnings.push('FazerCards customer purchase gate is disabled.');
+    if (config.providers.fazerCards.realOrdersEnabled !== true) warnings.push('FazerCards real order gate is disabled.');
+    if (config.providers.fazerCards.codeDeliveryEnabled !== true) warnings.push('FazerCards code delivery gate is disabled.');
+    if (visibleAutoProvider > 0 && config.providers.fazerCards.realOrdersEnabled !== true) {
+        warnings.push('Visible AUTO_PROVIDER products exist while the global real order gate is disabled; orders will require manual review.');
+    }
+    warnings.push('Steam Gifts remain disabled because production catalog discovery returned HTTP 404.');
+
+    return {
+        success: true,
+        api: {
+            enabled: config.providers.fazerCards.enabled === true,
+            balance,
+            connectionOk,
+            connectionError,
+        },
+        gates: {
+            customerPurchaseEnabled: config.providers.fazerCards.customerPurchaseEnabled !== false,
+            realOrdersEnabled: config.providers.fazerCards.realOrdersEnabled === true,
+            codeDeliveryEnabled: config.providers.fazerCards.codeDeliveryEnabled === true,
+        },
+        catalog: {
+            byFamily: catalog.byFamily,
+            totalProviderProducts: catalog.totalProviderProducts,
+        },
+        products: {
+            activeCustomerVisible,
+            autoProvider,
+            manualFulfillment,
+            disabled,
+            visibleAutoProvider,
+        },
+        orders: {
+            manualPending,
+            manualReview,
+            processing,
+            completed24h,
+            failed24h,
+        },
+        warnings: [...new Set(warnings.filter(Boolean))],
+    };
+};
+
 const storeManualDeliveredCode = async ({ orderId, code, pin = null, serial = null, metadata = null } = {}) =>
     storeManualDeliveredCodeForOrder({ orderId, code, pin, serial, metadata });
 
@@ -2812,7 +3562,9 @@ module.exports = {
     listFamilies,
     syncCatalogFamily,
     syncAllCatalogFamilies,
+    getCatalogSyncStatus,
     getCatalogSummary,
+    getLaunchHealth,
     backfillLegacyFamilies,
     listProviderProducts,
     getProviderProductDetails,
@@ -2828,6 +3580,12 @@ module.exports = {
     listCodeDeliveryPilotDeliveredCodes,
     getDeliveredCodeDebug,
     storeManualDeliveredCode,
+    listManualOrders,
+    getManualOrderDetail,
+    completeManualOrder,
+    failManualOrder,
+    addManualOrderNote,
+    bulkUpdateLaunchControls,
     syncOrderStatus,
     getOrderProviderDebug,
 };

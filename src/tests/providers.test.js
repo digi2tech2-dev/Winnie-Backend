@@ -2978,3 +2978,333 @@ describe('FazerCards order monitoring and reconcile tools', () => {
         expect(product.providerExecutionEnabled).toBe(false);
     });
 });
+
+describe('FazerCards Phase 9 launch operations', () => {
+    const createManualFazerOrder = async ({ familyKey = 'TELEGRAM', codeDelivery = false, status = ORDER_STATUS.MANUAL_REVIEW } = {}) => {
+        const source = codeDelivery
+            ? await createFazerCodeDeliveryProviderProduct({ familyKey: familyKey === 'GAME_KEYS' ? 'GAME_KEYS' : 'GIFTCARDS' })
+            : await createFazerCatalogOnlyProviderProduct({ familyKey });
+        const { provider, providerProduct } = source;
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: codeDelivery ? 3.25 : 1.75,
+            name: `${familyKey} Manual Launch Product`,
+        });
+        await Product.findByIdAndUpdate(product._id, {
+            $set: {
+                isActive: true,
+                visibleInStore: true,
+                status: PRODUCT_STATUSES.AVAILABLE,
+                customerPurchaseEnabled: true,
+                providerExecutionMode: 'MANUAL_FULFILLMENT',
+                providerExecutionEnabled: false,
+            },
+        });
+        const { customer, group } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
+        const order = await Order.create({
+            userId: customer._id,
+            orderNumber: 970000 + Math.floor(Math.random() * 10000),
+            productId: product._id,
+            quantity: 1,
+            unitPrice: codeDelivery ? '3.25' : '1.75',
+            totalPrice: codeDelivery ? '3.25' : '1.75',
+            basePriceSnapshot: codeDelivery ? '3.25' : '1.75',
+            markupPercentageSnapshot: 0,
+            finalPriceCharged: codeDelivery ? '3.25' : '1.75',
+            groupIdSnapshot: group._id,
+            walletDeducted: 20,
+            creditUsedAmount: '0',
+            status,
+            executionType: ORDER_EXECUTION_TYPES.MANUAL,
+            providerCode: 'fazer-cards',
+            familyKey: codeDelivery ? providerProduct.familyKey : familyKey,
+            fulfillmentMode: providerProduct.fulfillmentMode,
+            providerErrorCode: 'FAZERCARDS_MANUAL_FULFILLMENT_REQUIRED',
+            providerErrorMessage: 'Manual fulfillment required.',
+            customerInput: {
+                values: codeDelivery ? {} : { telegram_username: 'launch_user' },
+                fieldsSnapshot: codeDelivery ? [] : [{ key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true }],
+            },
+        });
+        return { provider, providerProduct, product: await Product.findById(product._id), order, customer };
+    };
+
+    it('lists manual FazerCards orders with safe submitted fields and excludes non-manual completed orders', async () => {
+        const manual = await createManualFazerOrder({ familyKey: 'TELEGRAM' });
+        await createManualFazerOrder({ familyKey: 'STEAM_TOPUP', status: ORDER_STATUS.COMPLETED });
+
+        const result = await fazerCardsCatalogSvc.listManualOrders({ familyKey: 'TELEGRAM' });
+
+        expect(result.pagination.total).toBe(1);
+        expect(result.orders[0]).toMatchObject({
+            id: manual.order._id.toString(),
+            status: ORDER_STATUS.MANUAL_REVIEW,
+            familyKey: 'TELEGRAM',
+            fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
+            product: {
+                name: 'TELEGRAM Manual Launch Product',
+                providerExecutionMode: 'MANUAL_FULFILLMENT',
+            },
+            submittedFields: [{ key: 'telegram_username', label: 'Telegram Username', type: 'text', value: 'launch_user' }],
+            deliveredCodeCount: 0,
+        });
+        expect(JSON.stringify(result.orders[0])).not.toContain('providerRawResponse');
+        expect(JSON.stringify(result.orders[0])).not.toContain('codeEncrypted');
+    });
+
+    it('manual detail includes notes/history but not plaintext provider code secrets', async () => {
+        const { order } = await createManualFazerOrder({ familyKey: 'TELEGRAM' });
+        await fazerCardsCatalogSvc.addManualOrderNote(order._id, {
+            adminNote: 'Waiting for manual Telegram processing.',
+            proof: 'ticket-123',
+        });
+
+        const detail = await fazerCardsCatalogSvc.getManualOrderDetail(order._id);
+
+        expect(detail.order.internalNotes).toHaveLength(1);
+        expect(detail.order.internalNotes[0]).toMatchObject({
+            note: 'Waiting for manual Telegram processing.',
+            proof: 'ticket-123',
+            type: 'manual_note',
+        });
+        expect(JSON.stringify(detail)).not.toContain('codeEncrypted');
+        expect(JSON.stringify(detail)).not.toContain('providerRawResponse');
+    });
+
+    it('manual complete updates status and records audit-friendly history', async () => {
+        const { order } = await createManualFazerOrder({ familyKey: 'TELEGRAM' });
+
+        const result = await fazerCardsCatalogSvc.completeManualOrder(order._id, {
+            adminNote: 'Handled manually in provider panel.',
+            proof: 'proof-url',
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.order.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(result.order.internalNotes.at(-1)).toMatchObject({
+            note: 'Handled manually in provider panel.',
+            proof: 'proof-url',
+            type: 'manual_complete',
+        });
+        expect(result.order.statusHistory.at(-1)).toMatchObject({ status: ORDER_STATUS.COMPLETED });
+    });
+
+    it('manual complete with delivered code stores encrypted code and never returns plaintext', async () => {
+        const { order } = await createManualFazerOrder({ familyKey: 'GIFTCARDS', codeDelivery: true });
+
+        const result = await fazerCardsCatalogSvc.completeManualOrder(order._id, {
+            adminNote: 'Gift card fulfilled manually.',
+            deliveredCodes: [{ code: 'MANUAL-SECRET-CODE', pin: '1234', serial: 'SER-1' }],
+        });
+        const stored = await ProviderDeliveredCode.findOne({ order: order._id }).select('+codeEncrypted +pinEncrypted +serialEncrypted');
+
+        expect(result.order.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(result.deliveredCodes[0]).toMatchObject({
+            hasCode: true,
+            hasPin: true,
+            hasSerial: true,
+            storedEncrypted: true,
+        });
+        expect(JSON.stringify(result)).not.toContain('MANUAL-SECRET-CODE');
+        expect(isEncryptedSecret(stored.codeEncrypted)).toBe(true);
+        expect(decryptSecret(stored.codeEncrypted)).toBe('MANUAL-SECRET-CODE');
+    });
+
+    it('manual fail refunds once only', async () => {
+        const { order, customer } = await createManualFazerOrder({ familyKey: 'TELEGRAM' });
+
+        const first = await fazerCardsCatalogSvc.failManualOrder(order._id, {
+            reason: 'Could not fulfill manually.',
+            refund: true,
+        });
+        const second = await fazerCardsCatalogSvc.failManualOrder(order._id, {
+            reason: 'Second operator retry.',
+            refund: true,
+        });
+        const refunds = await WalletTransaction.find({ userId: customer._id, type: 'REFUND' });
+
+        expect(first.refunded).toBe(true);
+        expect(second.refunded).toBe(true);
+        expect(second.alreadyFailed).toBe(true);
+        expect(refunds).toHaveLength(1);
+        expect((await Order.findById(order._id)).refunded).toBe(true);
+    });
+
+    it('bulk launch dry-run rejects invalid auto execution for unconfirmed families and does not modify products', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.75,
+            name: 'Telegram Bulk Candidate',
+        });
+
+        const result = await fazerCardsCatalogSvc.bulkUpdateLaunchControls({
+            productIds: [product._id.toString()],
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: 'available',
+            providerExecutionMode: 'AUTO_PROVIDER',
+            dryRun: true,
+        });
+        const after = await Product.findById(product._id).lean();
+
+        expect(result.success).toBe(false);
+        expect(result.updated).toBe(0);
+        expect(result.results[0].errors).toEqual(expect.arrayContaining([
+            expect.objectContaining({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED' }),
+        ]));
+        expect(after.isActive).toBe(false);
+        expect(after.visibleInStore).toBe(false);
+        expect(after.customerPurchaseEnabled).toBe(false);
+    });
+
+    it('bulk launch rejects Steam Gifts customer enablement', async () => {
+        const { provider } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const providerProduct = await ProviderProduct.create({
+            provider: provider._id,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            externalProductId: 'FAZER_STEAM_GIFT:unavailable',
+            rawName: 'Steam Gift Unavailable',
+            rawPrice: '1',
+            costPrice: '1',
+            currency: 'USD',
+            familyKey: 'STEAM_GIFTS',
+            fulfillmentMode: FULFILLMENT_MODES.STEAM_GIFT_INVITE,
+            isSupported: false,
+            isBlocked: true,
+            executionBlocked: true,
+            blockReason: 'STEAM_GIFTS_CATALOG_UNAVAILABLE',
+        });
+        const product = await Product.create({
+            name: 'Steam Gift Disabled',
+            basePrice: '2',
+            minQty: 1,
+            maxQty: 1,
+            isActive: false,
+            visibleInStore: false,
+            status: PRODUCT_STATUSES.UNAVAILABLE,
+            customerPurchaseEnabled: false,
+            provider,
+            providerProduct,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            familyKey: 'STEAM_GIFTS',
+            fulfillmentMode: FULFILLMENT_MODES.STEAM_GIFT_INVITE,
+            providerExecutionMode: 'DISABLED',
+        });
+
+        const result = await fazerCardsCatalogSvc.bulkUpdateLaunchControls({
+            productIds: [product._id.toString()],
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: 'available',
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+            dryRun: true,
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.results[0].errors.map((error) => error.code)).toContain('FAMILY_DISABLED_UNAVAILABLE');
+    });
+
+    it('bulk launch applies valid manual fulfillment controls for unconfirmed families', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.75,
+            name: 'Telegram Bulk Manual Candidate',
+        });
+
+        const result = await fazerCardsCatalogSvc.bulkUpdateLaunchControls({
+            productIds: [product._id.toString()],
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: 'available',
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+        });
+        const updated = await Product.findById(product._id).lean();
+
+        expect(result).toMatchObject({ success: true, updated: 1, failed: 0 });
+        expect(updated).toMatchObject({
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+            providerExecutionEnabled: false,
+            executionType: EXECUTION_TYPES.MANUAL,
+        });
+    });
+
+    it('catalog sync status reports in-progress flag, last sync, and current summary without order calls', async () => {
+        const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
+
+        const status = await fazerCardsCatalogSvc.getCatalogSyncStatus();
+
+        expect(status).toMatchObject({
+            success: true,
+            inProgress: false,
+            catalog: {
+                byFamily: {
+                    GIFTCARDS: expect.objectContaining({ total: 1 }),
+                },
+            },
+        });
+        expect(status.catalog.totalProviderProducts).toBeGreaterThanOrEqual(1);
+        expect(providerProduct.familyKey).toBe('GIFTCARDS');
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('launch health returns gates, catalog, product counts, and order counts without exposing secrets', async () => {
+        await createManualFazerOrder({ familyKey: 'TELEGRAM' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: {},
+            data: { ok: true, balance: '12.34', currency: 'USD' },
+        });
+
+        const health = await fazerCardsCatalogSvc.getLaunchHealth();
+
+        expect(health).toMatchObject({
+            success: true,
+            api: {
+                enabled: true,
+                connectionOk: true,
+            },
+            gates: {
+                customerPurchaseEnabled: true,
+                realOrdersEnabled: false,
+                codeDeliveryEnabled: false,
+            },
+            catalog: {
+                byFamily: expect.any(Object),
+            },
+            products: {
+                manualFulfillment: expect.any(Number),
+            },
+            orders: {
+                manualReview: 1,
+            },
+        });
+        expect(JSON.stringify(health)).not.toContain('test-fazer-key');
+        expect(client.request).toHaveBeenCalledTimes(1);
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'get',
+            url: '/balance',
+        }));
+    });
+
+    it('customer order sanitization keeps provider internals out while returning clear status messages', async () => {
+        const { order, customer } = await createManualFazerOrder({ familyKey: 'TELEGRAM' });
+
+        const customerOrder = await require('../modules/orders/order.service').getOrderById(order._id, customer._id);
+        const serialized = JSON.stringify(customerOrder);
+
+        expect(customerOrder.customerStatusMessage).toBe('Your order is being processed manually.');
+        expect(customerOrder.fulfillmentNotice).toBe('Your order is being processed manually.');
+        expect(serialized).not.toContain('providerRawResponse');
+        expect(serialized).not.toContain('providerOrderId');
+        expect(serialized).not.toContain('providerErrorCode');
+        expect(serialized).not.toContain('FAZERCARDS_MANUAL_FULFILLMENT_REQUIRED');
+    });
+});

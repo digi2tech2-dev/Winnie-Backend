@@ -233,6 +233,22 @@ const serializeOrderWithDeliveryMetadata = (order, deliveredCodeCount = 0) => {
 
 const sanitizeOrderForCustomer = (order) => {
     const plain = order && typeof order.toObject === 'function' ? order.toObject() : { ...(order || {}) };
+    if (plain.status === ORDER_STATUS.COMPLETED) {
+        plain.customerStatusMessage = plain.hasDeliveredCodes
+            ? 'Your digital code is ready to reveal.'
+            : 'Your order is complete.';
+    } else if (plain.status === ORDER_STATUS.PROCESSING) {
+        plain.customerStatusMessage = 'Your order is being processed.';
+    } else if (plain.status === ORDER_STATUS.MANUAL_REVIEW) {
+        plain.customerStatusMessage = 'Your order is being processed manually.';
+    } else if (plain.status === ORDER_STATUS.FAILED || plain.status === ORDER_STATUS.CANCELED) {
+        plain.customerStatusMessage = plain.refunded
+            ? 'Your order failed and the eligible refund has been processed.'
+            : 'Your order could not be completed. Support will review it.';
+    } else {
+        plain.customerStatusMessage = 'Your order has been received.';
+    }
+
     if (
         plain.status === ORDER_STATUS.MANUAL_REVIEW
         && normalizeUpper(plain.providerCode).includes('FAZER')

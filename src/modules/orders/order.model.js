@@ -423,6 +423,65 @@ const orderSchema = new mongoose.Schema(
             },
             default: null,
         },
+
+        internalNotes: {
+            type: [{
+                note: {
+                    type: String,
+                    trim: true,
+                    default: '',
+                },
+                proof: {
+                    type: String,
+                    trim: true,
+                    default: null,
+                },
+                type: {
+                    type: String,
+                    trim: true,
+                    default: 'admin_note',
+                },
+                createdBy: {
+                    type: mongoose.Schema.Types.ObjectId,
+                    ref: 'User',
+                    default: null,
+                },
+                createdAt: {
+                    type: Date,
+                    default: Date.now,
+                },
+            }],
+            default: [],
+        },
+
+        statusHistory: {
+            type: [{
+                status: {
+                    type: String,
+                    trim: true,
+                    default: null,
+                },
+                note: {
+                    type: String,
+                    trim: true,
+                    default: '',
+                },
+                actor: {
+                    type: mongoose.Schema.Types.ObjectId,
+                    ref: 'User',
+                    default: null,
+                },
+                at: {
+                    type: Date,
+                    default: Date.now,
+                },
+                metadata: {
+                    type: mongoose.Schema.Types.Mixed,
+                    default: null,
+                },
+            }],
+            default: [],
+        },
     },
     {
         timestamps: true,

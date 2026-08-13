@@ -540,6 +540,75 @@ const fazerCardsManualDeliveredCodeSchema = Joi.object({
     'object.missing': 'code, pin, or serial is required',
 });
 
+const fazerCardsManualOrdersQuerySchema = Joi.object({
+    ...pagination,
+    familyKey: Joi.string().trim().uppercase().valid(
+        'TOPUPS',
+        'GIFTCARDS',
+        'GAME_KEYS',
+        'STEAM_TOPUP',
+        'TELEGRAM',
+        'MANUAL_SERVICES'
+    ).allow('', null),
+    fulfillmentMode: Joi.string().trim().uppercase().valid(
+        'TOPUP_WITH_FIELDS',
+        'CODE_DELIVERY',
+        'STEAM_TOPUP_WITH_LOGIN',
+        'TELEGRAM_STARS_TOPUP',
+        'TELEGRAM_PREMIUM',
+        'MANUAL_SERVICE',
+        'UNKNOWN'
+    ).allow('', null),
+    status: Joi.string().trim().uppercase().valid(
+        'PENDING',
+        'PROCESSING',
+        'MANUAL_REVIEW',
+        'PENDING_MANUAL',
+        'PROCESSING_MANUAL',
+        'FAILED',
+        'COMPLETED'
+    ).allow('', null),
+    productId: objectId().allow('', null),
+    userId: objectId().allow('', null),
+    from: Joi.date().iso().allow('', null),
+    to: Joi.date().iso().allow('', null),
+});
+
+const fazerCardsManualCompleteSchema = Joi.object({
+    adminNote: Joi.string().trim().max(1000).allow('', null),
+    proof: Joi.string().trim().max(2000).allow('', null),
+    deliveredCodes: Joi.array().items(Joi.object({
+        code: Joi.string().trim().max(4096).allow('', null),
+        pin: Joi.string().trim().max(4096).allow('', null),
+        serial: Joi.string().trim().max(4096).allow('', null),
+        metadata: Joi.object().unknown(true).default({}),
+    }).or('code', 'pin', 'serial')).default([]),
+});
+
+const fazerCardsManualFailSchema = Joi.object({
+    reason: Joi.string().trim().min(1).max(1000).required(),
+    refund: Joi.boolean().default(false),
+});
+
+const fazerCardsManualNoteSchema = Joi.object({
+    adminNote: Joi.string().trim().max(1000).allow('', null),
+    proof: Joi.string().trim().max(2000).allow('', null),
+}).or('adminNote', 'proof').messages({
+    'object.missing': 'adminNote or proof is required',
+});
+
+const fazerCardsBulkLaunchSchema = Joi.object({
+    productIds: Joi.array().items(objectId()).min(1).max(500).unique().required(),
+    customerPurchaseEnabled: Joi.boolean(),
+    isActive: Joi.boolean(),
+    visibleInStore: Joi.boolean(),
+    status: Joi.string().trim().lowercase().valid('available', 'unavailable'),
+    providerExecutionMode: Joi.string().trim().uppercase().valid('AUTO_PROVIDER', 'MANUAL_FULFILLMENT', 'DISABLED'),
+    providerExecutionBlocked: Joi.boolean(),
+    providerBlockReason: Joi.string().trim().max(200).allow('', null),
+    dryRun: Joi.boolean().default(false),
+}).min(2);
+
 const listFazerCardsProviderProductsQuery = Joi.object({
     ...pagination,
     search: Joi.string().trim().max(200).allow('', null),
@@ -685,6 +754,11 @@ module.exports = {
         fazerCardsCodeDeliveryDryRun: fazerCardsCodeDeliveryDryRunSchema,
         fazerCardsCodeDeliveryLivePilot: fazerCardsCodeDeliveryLivePilotSchema,
         fazerCardsManualDeliveredCode: fazerCardsManualDeliveredCodeSchema,
+        fazerCardsManualOrdersQuery: fazerCardsManualOrdersQuerySchema,
+        fazerCardsManualComplete: fazerCardsManualCompleteSchema,
+        fazerCardsManualFail: fazerCardsManualFailSchema,
+        fazerCardsManualNote: fazerCardsManualNoteSchema,
+        fazerCardsBulkLaunch: fazerCardsBulkLaunchSchema,
         fazerCardsProviderProductImport: fazerCardsProviderProductImportSchema,
         listFazerCardsProviderProductsQuery,
         // Orders
