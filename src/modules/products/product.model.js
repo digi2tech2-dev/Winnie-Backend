@@ -29,6 +29,13 @@ const PRODUCT_STATUSES = Object.freeze({
     UNAVAILABLE: 'unavailable',
 });
 
+/** How provider-linked products are fulfilled once a customer purchase is allowed. */
+const PROVIDER_EXECUTION_MODES = Object.freeze({
+    AUTO_PROVIDER: 'AUTO_PROVIDER',
+    MANUAL_FULFILLMENT: 'MANUAL_FULFILLMENT',
+    DISABLED: 'DISABLED',
+});
+
 /**
  * All field types the frontend form builder supports.
  * Validated server-side during order creation.
@@ -323,6 +330,17 @@ const productSchema = new mongoose.Schema(
             default: true,
         },
 
+        /**
+         * Explicit customer purchase gate. Defaults true for legacy products so
+         * existing customer catalog behavior is unchanged; imported provider
+         * products set this false until an admin enables sales.
+         */
+        customerPurchaseEnabled: {
+            type: Boolean,
+            default: true,
+            index: true,
+        },
+
         /** Soft-delete timestamp. Null = not deleted. */
         deletedAt: {
             type: Date,
@@ -382,6 +400,13 @@ const productSchema = new mongoose.Schema(
         providerExecutionBlocked: {
             type: Boolean,
             default: false,
+        },
+
+        providerExecutionMode: {
+            type: String,
+            enum: Object.values(PROVIDER_EXECUTION_MODES),
+            default: PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT,
+            index: true,
         },
 
         providerBlockReason: {
@@ -642,6 +667,7 @@ productSchema.index({ provider: 1, isActive: 1 });        // provider product li
 productSchema.index({ providerProduct: 1 });               // price-sync: find Products by ProviderProduct
 productSchema.index({ pricingMode: 1, provider: 1 });     // price-sync: find 'sync' mode candidates
 productSchema.index({ isActive: 1, visibleInStore: 1, displayOrder: 1 });    // user-facing product list
+productSchema.index({ isActive: 1, visibleInStore: 1, customerPurchaseEnabled: 1, status: 1 });
 productSchema.index({ deletedAt: 1 }, { sparse: true });   // fast filter for non-deleted products
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -668,6 +694,7 @@ module.exports = {
     MARKUP_TYPES,
     EXECUTION_TYPES,
     PRODUCT_STATUSES,
+    PROVIDER_EXECUTION_MODES,
     FIELD_TYPES,
     DYNAMIC_FIELD_TYPES,
     dynamicFieldSchema,

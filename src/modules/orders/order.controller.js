@@ -71,6 +71,17 @@ const getMyOrder = catchAsync(async (req, res) => {
     sendSuccess(res, order);
 });
 
+const revealDeliveredCodes = catchAsync(async (req, res) => {
+    const auditContext = {
+        actorId: req.user._id,
+        actorRole: req.user.role,
+        ipAddress: req.ip ?? null,
+        userAgent: req.get('User-Agent') ?? null,
+    };
+    const result = await orderService.revealDeliveredCodes(req.params.id, req.user._id, auditContext);
+    sendSuccess(res, result, 'Delivered codes revealed successfully.');
+});
+
 // ── Admin Endpoints ───────────────────────────────────────────────────────────
 
 const getAllOrders = catchAsync(async (req, res) => {
@@ -102,6 +113,7 @@ module.exports = {
     quoteOrder,
     getMyOrders,
     getMyOrder,
+    revealDeliveredCodes,
     getAllOrders,
     adminGetOrder,
     failOrder,

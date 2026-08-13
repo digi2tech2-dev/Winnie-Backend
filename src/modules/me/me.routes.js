@@ -132,6 +132,12 @@ router.post('/orders/quote', quoteOrderValidation, validate, me.quoteOrder);
 router.post('/orders', createOrderValidation, validate, me.placeOrder);
 router.get('/orders', me.getOrders);
 router.get(
+    '/orders/:id/delivered-codes',
+    [param('id').isMongoId().withMessage('Invalid order ID')],
+    validate,
+    me.revealOrderDeliveredCodes
+);
+router.get(
     '/orders/:id',
     [param('id').isMongoId().withMessage('Invalid order ID')],
     validate,

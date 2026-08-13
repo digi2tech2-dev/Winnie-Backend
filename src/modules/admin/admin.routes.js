@@ -200,6 +200,7 @@ router.post('/providers/fazercards/code-delivery/live-pilot', authorizeRoles('AD
 router.get('/providers/fazercards/code-delivery/live-pilot/:orderId', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.getFazerCardsCodeDeliveryLivePilotDebug);
 router.get('/providers/fazercards/code-delivery/live-pilot/:orderId/delivered-codes', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.listFazerCardsCodeDeliveryPilotCodes);
 router.get('/providers/fazercards/code-delivery/delivered-codes/:codeId/debug', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.getFazerCardsDeliveredCodeDebug);
+router.post('/providers/fazercards/orders/:orderId/delivered-codes', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsManualDeliveredCode), providersCtrl.storeFazerCardsManualDeliveredCode);
 router.get('/providers/fazercards/code-delivery/products/:productId/readiness', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.getFazerCardsCodeDeliveryReadiness);
 router.get('/providers/fazercards/products/:productId/readiness', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.getFazerCardsProductReadiness);
 router.post('/providers/fazercards/products/:productId/dry-run', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsUnifiedDryRun), providersCtrl.dryRunFazerCardsProduct);

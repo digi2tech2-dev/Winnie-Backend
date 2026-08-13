@@ -210,6 +210,22 @@ const orderSchema = new mongoose.Schema(
             default: ORDER_EXECUTION_TYPES.MANUAL,
         },
 
+        familyKey: {
+            type: String,
+            trim: true,
+            uppercase: true,
+            default: null,
+            index: true,
+        },
+
+        fulfillmentMode: {
+            type: String,
+            trim: true,
+            uppercase: true,
+            default: null,
+            index: true,
+        },
+
         /**
          * Admin-provided reason when an order is rejected/failed.
          * Visible to customers on the storefront.

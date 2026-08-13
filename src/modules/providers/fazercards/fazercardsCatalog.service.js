@@ -20,6 +20,10 @@ const { getFazerCardsFamily, listFazerCardsFamilies } = require('./fazercardsFam
 const fazerCardsContracts = require('./fazercardsContracts');
 const { ProviderDeliveredCode, DELIVERY_STATUSES } = require('./providerDeliveredCode.model');
 const { ProviderPilotOrder } = require('./providerPilotOrder.model');
+const {
+    sanitizeProviderCodePayload,
+    storeManualDeliveredCodeForOrder,
+} = require('./fazercardsDelivery.service');
 
 const FAZERCARDS_SLUG = 'fazer-cards';
 const SYNC_ALL_DEFAULT_FAMILIES = Object.freeze([
@@ -32,9 +36,8 @@ const SYNC_ALL_DEFAULT_FAMILIES = Object.freeze([
 ]);
 const DRAFT_IMPORT_FAMILIES = new Set(SYNC_ALL_DEFAULT_FAMILIES);
 const CODE_DELIVERY_IMPORT_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
+const AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']);
 const UNIMPLEMENTED_FAMILY_BLOCK_REASONS = Object.freeze({
-    GIFTCARDS: 'CODE_DELIVERY_NOT_IMPLEMENTED',
-    GAME_KEYS: 'CODE_DELIVERY_NOT_IMPLEMENTED',
     TELEGRAM: 'TELEGRAM_EXECUTION_NOT_IMPLEMENTED',
     STEAM_TOPUP: 'STEAM_TOPUP_EXECUTION_NOT_IMPLEMENTED',
     MANUAL_SERVICES: 'MANUAL_SERVICE_EXECUTION_NOT_IMPLEMENTED',
@@ -339,6 +342,10 @@ const normalizeGiftCardProduct = (category = {}, offer = {}) => {
         rawName: `${categoryName} - ${offerName}`,
         rawPrice: costPrice === null ? '0' : String(firstValue(offer.price_usd, offer.priceUsd, offer.cost_usd)),
         costPrice,
+        executionBlocked: false,
+        isSupported: costPrice !== null && costPrice > 0,
+        isBlocked: costPrice === null || costPrice <= 0,
+        blockReason: costPrice === null || costPrice <= 0 ? 'INVALID_PRICE' : null,
         category: categoryId,
         categoryName,
         offerId: cardId,
@@ -363,6 +370,10 @@ const normalizeGameKeyProduct = (game = {}, key = {}) => {
         rawName: `${gameName} - ${keyName}`,
         rawPrice: costPrice === null ? '0' : String(firstValue(key.price_usd, key.priceUsd, key.cost_usd)),
         costPrice,
+        executionBlocked: false,
+        isSupported: costPrice !== null && costPrice > 0,
+        isBlocked: costPrice === null || costPrice <= 0,
+        blockReason: costPrice === null || costPrice <= 0 ? 'INVALID_PRICE' : null,
         category: gameId,
         categoryName: gameName,
         offerId: keyId,
@@ -1165,7 +1176,9 @@ const getFamilyBlockReason = (providerProduct = {}) => {
         || 'EXECUTION_NOT_IMPLEMENTED';
 };
 
-const shouldBlockImportedProductExecution = (providerProduct = {}) => !isTopupImportCandidate(providerProduct);
+const isAutoProviderImportCandidate = (providerProduct = {}) => AUTO_PROVIDER_FAMILIES.has(getProviderProductFamilyKey(providerProduct));
+
+const shouldBlockImportedProductExecution = (providerProduct = {}) => !isAutoProviderImportCandidate(providerProduct);
 
 const assertImportableProviderProduct = (providerProduct) => {
     if (!providerProduct) throw new NotFoundError('ProviderProduct');
@@ -1194,7 +1207,7 @@ const assertImportableProviderProduct = (providerProduct) => {
         }
     }
 
-    if (!isTopup && !UNIMPLEMENTED_FAMILY_BLOCK_REASONS[familyKey]) {
+    if (!isTopup && !DRAFT_IMPORT_FAMILIES.has(familyKey)) {
         throw new BusinessRuleError('FazerCards product family is not enabled for draft import.', 'FAZERCARDS_IMPORT_FAMILY_UNSUPPORTED');
     }
 
@@ -1244,9 +1257,7 @@ const buildImportPreview = (providerProduct) => {
         platform: providerProduct.platform || null,
         suggestedProductName: providerProduct.translatedName || providerProduct.rawName,
         suggestedOrderFields: orderFields.map(({ providerKey, ...field }) => field),
-        warning: executionBlocked && isCodeDeliveryImportCandidate(providerProduct)
-            ? 'Code delivery execution is not implemented yet. Product will be imported as inactive and not visible to customers.'
-            : executionBlocked
+        warning: executionBlocked
             ? `${family?.displayName || familyKey} execution is not implemented yet. Product will be imported as inactive and not visible to customers.`
             : 'Product will be imported as inactive and not visible to customers.',
     };
@@ -1292,6 +1303,7 @@ const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
     const familyKey = getProviderProductFamilyKey(providerProduct);
     const executionBlocked = shouldBlockImportedProductExecution(providerProduct);
     const blockReason = executionBlocked ? getFamilyBlockReason(providerProduct) : null;
+    const providerExecutionMode = fazerCardsContracts.getDefaultExecutionMode(familyKey);
     const orderFieldsWithProviderKeys = buildOrderFieldsFromProviderFields(providerProduct.requiredFields);
     const providerMapping = buildProviderMapping(orderFieldsWithProviderKeys);
     const orderFields = orderFieldsWithProviderKeys.map(({ providerKey, ...field }) => field);
@@ -1313,12 +1325,14 @@ const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
         isPaused: false,
         status: PRODUCT_STATUSES.UNAVAILABLE,
         executionType: EXECUTION_TYPES.MANUAL,
+        customerPurchaseEnabled: false,
         pricingMode: syncPrice ? PRICING_MODES.SYNC : PRICING_MODES.MANUAL,
         syncPriceWithProvider: syncPrice,
         syncNameWithProvider: payload.syncNameFromProvider === true,
         syncAvailabilityWithProvider: payload.syncAvailabilityFromProvider !== false,
         providerExecutionEnabled: false,
         providerExecutionBlocked: executionBlocked,
+        providerExecutionMode,
         providerBlockReason: blockReason,
         provider: providerProduct.provider._id,
         providerProduct: providerProduct._id,
@@ -2114,21 +2128,7 @@ const DELIVERY_SECRET_KEY_PATTERN = /(^|_)(code|pin|serial|voucher|license|claim
 
 const CODE_DELIVERY_COLLECTION_KEY_PATTERN = /^(codes|keys|cards|vouchers)$/i;
 
-const redactCodeDeliverySecrets = (value, depth = 0, parentKey = '') => {
-    if (value === null || value === undefined) return value;
-    if (depth > 8) return '[REDACTED_DEPTH_LIMIT]';
-    if (typeof value === 'string' && CODE_DELIVERY_COLLECTION_KEY_PATTERN.test(parentKey)) return '[REDACTED_CODE]';
-    if (Array.isArray(value)) return value.map((item) => redactCodeDeliverySecrets(item, depth + 1, parentKey));
-    if (typeof value === 'object') {
-        return Object.fromEntries(Object.entries(value).map(([key, child]) => {
-            const normalizedKey = String(key || '');
-            const redact = DELIVERY_SECRET_KEY_PATTERN.test(normalizedKey)
-                || (normalizedKey.toLowerCase() === 'key' && typeof child !== 'object');
-            return [key, redact ? '[REDACTED_CODE]' : redactCodeDeliverySecrets(child, depth + 1, normalizedKey)];
-        }));
-    }
-    return value;
-};
+const redactCodeDeliverySecrets = sanitizeProviderCodePayload;
 
 const getCodeValueFromObject = (obj = {}, parentKey = '') => {
     const code = firstValue(
@@ -2796,6 +2796,9 @@ const getOrderProviderDebug = async (orderId) => {
     };
 };
 
+const storeManualDeliveredCode = async ({ orderId, code, pin = null, serial = null, metadata = null } = {}) =>
+    storeManualDeliveredCodeForOrder({ orderId, code, pin, serial, metadata });
+
 module.exports = {
     FAZERCARDS_SLUG,
     findFazerCardsProvider,
@@ -2824,6 +2827,7 @@ module.exports = {
     getCodeDeliveryLivePilotDebug,
     listCodeDeliveryPilotDeliveredCodes,
     getDeliveredCodeDebug,
+    storeManualDeliveredCode,
     syncOrderStatus,
     getOrderProviderDebug,
 };

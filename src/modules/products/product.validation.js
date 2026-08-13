@@ -1,7 +1,13 @@
 'use strict';
 
 const { body, param, query } = require('express-validator');
-const { PRICING_MODES, MARKUP_TYPES, EXECUTION_TYPES, PRODUCT_STATUSES } = require('./product.model');
+const {
+    PRICING_MODES,
+    MARKUP_TYPES,
+    EXECUTION_TYPES,
+    PRODUCT_STATUSES,
+    PROVIDER_EXECUTION_MODES,
+} = require('./product.model');
 const { isPositive } = require('../../shared/utils/decimalPrecision');
 
 /**
@@ -92,6 +98,10 @@ const createProductValidation = [
         .isIn(Object.values(PRODUCT_STATUSES))
         .withMessage(`status must be one of: ${Object.values(PRODUCT_STATUSES).join(', ')}`),
 
+    body('customerPurchaseEnabled')
+        .optional()
+        .isBoolean().withMessage('customerPurchaseEnabled must be a boolean'),
+
     body('executionType')
         .optional()
         .isIn(Object.values(EXECUTION_TYPES))
@@ -100,6 +110,11 @@ const createProductValidation = [
     body('providerExecutionEnabled')
         .optional()
         .isBoolean().withMessage('providerExecutionEnabled must be a boolean'),
+
+    body('providerExecutionMode')
+        .optional()
+        .isIn(Object.values(PROVIDER_EXECUTION_MODES))
+        .withMessage(`providerExecutionMode must be one of: ${Object.values(PROVIDER_EXECUTION_MODES).join(', ')}`),
 
     body('provider')
         .optional({ nullable: true })
@@ -193,6 +208,10 @@ const publishProductValidation = [
         .isIn(Object.values(PRODUCT_STATUSES))
         .withMessage(`status must be one of: ${Object.values(PRODUCT_STATUSES).join(', ')}`),
 
+    body('customerPurchaseEnabled')
+        .optional()
+        .isBoolean().withMessage('customerPurchaseEnabled must be a boolean'),
+
     body('pricingMode')
         .optional()
         .isIn(Object.values(PRICING_MODES))
@@ -215,6 +234,11 @@ const publishProductValidation = [
     body('providerExecutionEnabled')
         .optional()
         .isBoolean().withMessage('providerExecutionEnabled must be a boolean'),
+
+    body('providerExecutionMode')
+        .optional()
+        .isIn(Object.values(PROVIDER_EXECUTION_MODES))
+        .withMessage(`providerExecutionMode must be one of: ${Object.values(PROVIDER_EXECUTION_MODES).join(', ')}`),
 ];
 
 // ─── Admin: update product ────────────────────────────────────────────────────
@@ -272,6 +296,10 @@ const updateProductValidation = [
         .isIn(Object.values(PRODUCT_STATUSES))
         .withMessage(`status must be one of: ${Object.values(PRODUCT_STATUSES).join(', ')}`),
 
+    body('customerPurchaseEnabled')
+        .optional()
+        .isBoolean().withMessage('customerPurchaseEnabled must be a boolean'),
+
     body('pricingMode')
         .optional()
         .isIn(Object.values(PRICING_MODES))
@@ -306,6 +334,11 @@ const updateProductValidation = [
     body('providerExecutionEnabled')
         .optional()
         .isBoolean().withMessage('providerExecutionEnabled must be a boolean'),
+
+    body('providerExecutionMode')
+        .optional()
+        .isIn(Object.values(PROVIDER_EXECUTION_MODES))
+        .withMessage(`providerExecutionMode must be one of: ${Object.values(PROVIDER_EXECUTION_MODES).join(', ')}`),
 
     body('provider')
         .optional({ nullable: true })

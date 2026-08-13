@@ -108,6 +108,11 @@ const providerDeliveredCodeSchema = new mongoose.Schema(
             type: Date,
             default: null,
         },
+        revealedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null,
+        },
     },
     {
         timestamps: true,

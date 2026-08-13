@@ -1,9 +1,11 @@
 'use strict';
 
 const mongoose = require('mongoose');
-const { Product, computeFinalPrice } = require('../products/product.model');
+const { Product, computeFinalPrice, PROVIDER_EXECUTION_MODES } = require('../products/product.model');
 const { Provider } = require('../providers/provider.model');
-const { ProviderProduct } = require('../providers/providerProduct.model');
+const { ProviderProduct, FULFILLMENT_MODES } = require('../providers/providerProduct.model');
+const { ProviderDeliveredCode, DELIVERY_STATUSES } = require('../providers/fazercards/providerDeliveredCode.model');
+const { PROVIDER_CODES } = require('../providers/provider.constants');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('./order.model');
 const { getNextSequence } = require('./counter.model');
 const { debitWalletAtomic, refundWalletAtomic } = require('../wallet/wallet.service');
@@ -37,10 +39,13 @@ const {
 } = require('../notifications/notification.events');
 const { getLivePrice, invalidate: invalidatePriceCache } = require('../providers/providerPriceCache');
 const { toDecimal, toStr, toFiat, multiply, subtract, add, isPositive, compare } = require('../../shared/utils/decimalPrecision');
+const config = require('../../config/config');
+const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
 
 const XENA_EXTERNAL_PRODUCT_ID = 'xena-dynamic-recharge';
 const XENA_TARGET_FIELD_KEY = 'target_uid';
 const XENA_LEGACY_TARGET_FIELD_KEY = 'account_id';
+const FAZER_CARDS_CODE_DELIVERY_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
 
 const _hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
 
@@ -154,6 +159,133 @@ const _assertProductAvailable = (product) => {
     ) {
         throw new BusinessRuleError('This product is currently unavailable.', 'PRODUCT_INACTIVE');
     }
+
+    if (product.customerPurchaseEnabled === false) {
+        throw new BusinessRuleError('This product is currently unavailable.', 'PRODUCT_INACTIVE');
+    }
+
+    if (String(product.providerCode || '').trim().toUpperCase() === PROVIDER_CODES.FAZER_CARDS) {
+        if (config.providers.fazerCards.customerPurchaseEnabled === false) {
+            throw new BusinessRuleError(
+                'FazerCards customer purchases are currently disabled.',
+                'FAZERCARDS_CUSTOMER_PURCHASE_DISABLED'
+            );
+        }
+
+        const familyKey = String(product.familyKey || '').trim().toUpperCase();
+        const contract = fazerCardsContracts.getContractOrUnknown(familyKey);
+        if (contract.canCustomerPurchase !== true) {
+            throw new BusinessRuleError(
+                contract.supportStage === fazerCardsContracts.SUPPORT_STAGES.DISABLED_UNAVAILABLE
+                    ? 'This FazerCards family is currently unavailable.'
+                    : 'This product is currently unavailable.',
+                contract.supportStage === fazerCardsContracts.SUPPORT_STAGES.DISABLED_UNAVAILABLE
+                    ? 'FAMILY_DISABLED_UNAVAILABLE'
+                    : 'CUSTOMER_PURCHASE_NOT_ALLOWED'
+            );
+        }
+    }
+};
+
+const getFazerCardsExecutionMode = (product = {}) => {
+    if (String(product.providerCode || '').trim().toUpperCase() !== PROVIDER_CODES.FAZER_CARDS) {
+        return null;
+    }
+    const familyKey = String(product.familyKey || '').trim().toUpperCase();
+    const mode = product.providerExecutionMode || fazerCardsContracts.getDefaultExecutionMode(familyKey);
+    const validation = fazerCardsContracts.validateExecutionModeForFamily(familyKey, mode);
+    if (!validation.ok) {
+        throw new BusinessRuleError(validation.message, validation.code);
+    }
+    if (validation.mode === PROVIDER_EXECUTION_MODES.DISABLED) {
+        throw new BusinessRuleError('This FazerCards family is currently unavailable.', 'FAMILY_DISABLED_UNAVAILABLE');
+    }
+    return {
+        mode: validation.mode,
+        familyKey,
+        isManualFulfillment: validation.mode === PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT,
+        isAutoProvider: validation.mode === PROVIDER_EXECUTION_MODES.AUTO_PROVIDER,
+    };
+};
+
+const normalizeUpper = (value) => String(value || '').trim().toUpperCase();
+
+const isFazerCardsProduct = (product = {}) =>
+    normalizeUpper(product.providerCode) === PROVIDER_CODES.FAZER_CARDS;
+
+const isCodeDeliveryOrderLike = (order = {}, product = {}) => {
+    const familyKey = normalizeUpper(order.familyKey || product.familyKey);
+    const fulfillmentMode = normalizeUpper(order.fulfillmentMode || product.fulfillmentMode);
+    return fulfillmentMode === FULFILLMENT_MODES.CODE_DELIVERY
+        || FAZER_CARDS_CODE_DELIVERY_FAMILIES.has(familyKey);
+};
+
+const serializeOrderWithDeliveryMetadata = (order, deliveredCodeCount = 0) => {
+    const plain = order && typeof order.toObject === 'function' ? order.toObject() : { ...(order || {}) };
+    const product = plain.productId && typeof plain.productId === 'object' ? plain.productId : {};
+    if (isCodeDeliveryOrderLike(plain, product)) {
+        plain.deliveryType = 'CODE_DELIVERY';
+        plain.hasDeliveredCodes = deliveredCodeCount > 0;
+        plain.deliveredCodeCount = deliveredCodeCount;
+    }
+    return plain;
+};
+
+const sanitizeOrderForCustomer = (order) => {
+    const plain = order && typeof order.toObject === 'function' ? order.toObject() : { ...(order || {}) };
+    if (
+        plain.status === ORDER_STATUS.MANUAL_REVIEW
+        && normalizeUpper(plain.providerCode).includes('FAZER')
+        && (
+            plain.providerErrorCode === 'FAZERCARDS_MANUAL_FULFILLMENT_REQUIRED'
+            || plain.providerErrorCode === 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED'
+        )
+    ) {
+        plain.fulfillmentNotice = 'Your order is being processed manually.';
+    }
+
+    for (const field of [
+        'providerRawResponse',
+        'providerRequestId',
+        'providerIdempotencyKey',
+        'providerTargetSnapshot',
+        'providerErrorCode',
+        'providerErrorMessage',
+        'providerMessage',
+        'providerOrderId',
+        'providerStatus',
+        'providerCode',
+        'familyKey',
+        'fulfillmentMode',
+    ]) {
+        delete plain[field];
+    }
+    return plain;
+};
+
+const attachDeliveryMetadata = async (orders) => {
+    const list = Array.isArray(orders) ? orders : [orders].filter(Boolean);
+    if (list.length === 0) return orders;
+
+    const orderIds = list
+        .filter((order) => isCodeDeliveryOrderLike(order, order.productId))
+        .map((order) => order._id);
+
+    if (orderIds.length === 0) {
+        return Array.isArray(orders)
+            ? list.map((order) => serializeOrderWithDeliveryMetadata(order, 0))
+            : serializeOrderWithDeliveryMetadata(list[0], 0);
+    }
+
+    const counts = await ProviderDeliveredCode.aggregate([
+        { $match: { order: { $in: orderIds } } },
+        { $group: { _id: '$order', count: { $sum: 1 } } },
+    ]);
+    const countByOrderId = new Map(counts.map((item) => [String(item._id), Number(item.count || 0)]));
+    const serialized = list.map((order) =>
+        serializeOrderWithDeliveryMetadata(order, countByOrderId.get(String(order._id)) || 0)
+    );
+    return Array.isArray(orders) ? serialized : serialized[0];
 };
 
 const _normaliseOrderQuantity = (quantity, product) => {
@@ -357,10 +489,13 @@ const createOrder = async ({
     if (!resolvedProvider) {
         try {
             const prod = await Product.findById(productId)
-                .select('executionType provider')
+                .select('executionType provider providerCode providerExecutionMode providerExecutionEnabled familyKey')
                 .populate('provider');
+            const isFazerCardsAuto = String(prod?.providerCode || '').trim().toUpperCase() === PROVIDER_CODES.FAZER_CARDS
+                && prod?.providerExecutionMode === PROVIDER_EXECUTION_MODES.AUTO_PROVIDER
+                && prod?.providerExecutionEnabled === true;
             if (
-                prod?.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC &&
+                (prod?.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC || isFazerCardsAuto) &&
                 prod?.provider?._id
             ) {
                 const providerDoc = prod.provider.toObject
@@ -444,6 +579,7 @@ const _attemptCreateOrder = async (
         // â”€â”€ 1. Load & Validate Product â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const product = await Product.findById(productId).session(session);
         _assertProductAvailable(product);
+        const fazerCardsMode = getFazerCardsExecutionMode(product);
 
         // â”€â”€ 2. Validate Quantity Bounds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const qty = _normaliseOrderQuantity(quantity, product);
@@ -485,7 +621,7 @@ const _attemptCreateOrder = async (
         // proceeds with the cached DB price.  A transient outage should NOT
         // block legitimate orders.
         //
-        if (product.provider && product.providerProduct && provider) {
+        if (!isFazerCardsProduct(product) && product.provider && product.providerProduct && provider) {
             try {
                 // Look up the externalProductId from the linked ProviderProduct
                 const ppDoc = await ProviderProduct.findById(product.providerProduct)
@@ -581,13 +717,22 @@ const _attemptCreateOrder = async (
         // â”€â”€ 5. Determine initial status & execution type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // An AUTOMATIC product â†’ PROCESSING (fulfillment attempted post-commit)
         // Any other case        â†’ PENDING   (admin handles manually)
-        const isAutomatic = product.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC;
+        const isAutomatic = fazerCardsMode
+            ? fazerCardsMode.isAutoProvider && product.providerExecutionEnabled === true
+            : product.executionType === ORDER_EXECUTION_TYPES.AUTOMATIC;
+        const isFazerCardsProviderDisabled = Boolean(fazerCardsMode && !isAutomatic);
         const isManualOrder = (
+            fazerCardsMode?.isManualFulfillment === true ||
+            isFazerCardsProviderDisabled ||
             product.executionType === ORDER_EXECUTION_TYPES.MANUAL ||
             !product.provider ||
             !product.providerProduct
         );
-        const initialStatus = isAutomatic ? ORDER_STATUS.PROCESSING : ORDER_STATUS.PENDING;
+        const initialStatus = isAutomatic
+            ? ORDER_STATUS.PROCESSING
+            : (fazerCardsMode?.isManualFulfillment === true || isFazerCardsProviderDisabled)
+                ? ORDER_STATUS.MANUAL_REVIEW
+                : ORDER_STATUS.PENDING;
 
         // â”€â”€ 6. Create Order â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const orderData = {
@@ -608,10 +753,22 @@ const _attemptCreateOrder = async (
             walletDeducted,
             creditUsedAmount,
             status: initialStatus,
-            executionType: product.executionType,
+            executionType: isAutomatic ? ORDER_EXECUTION_TYPES.AUTOMATIC : ORDER_EXECUTION_TYPES.MANUAL,
+            familyKey: product.familyKey || null,
+            fulfillmentMode: product.fulfillmentMode || null,
             customerInput,
             // â”€â”€ Provider code snapshot (immutable â€” cron uses this, not product.provider) â”€â”€
-            providerCode: providerCode ?? null,
+            providerCode: providerCode ?? (product.providerCode ? String(product.providerCode).toLowerCase().trim() : null),
+            providerMessage: fazerCardsMode?.isManualFulfillment === true
+                ? 'Manual fulfillment required because provider contract is not confirmed or auto execution is not enabled.'
+                : isFazerCardsProviderDisabled
+                    ? 'FazerCards provider execution is disabled for this product.'
+                    : null,
+            providerErrorCode: fazerCardsMode?.isManualFulfillment === true
+                ? 'FAZERCARDS_MANUAL_FULFILLMENT_REQUIRED'
+                : isFazerCardsProviderDisabled
+                    ? 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED'
+                : null,
             // â”€â”€ Currency snapshot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             currency: userCurrency,
             rateSnapshot,
@@ -1098,6 +1255,86 @@ const markOrderAsCompleted = async (orderId) => {
     return order;
 };
 
+const revealDeliveredCodes = async (orderId, userId, auditContext = null) => {
+    const order = await Order.findOne({ _id: orderId, userId })
+        .populate('productId', 'name familyKey fulfillmentMode providerCode');
+    if (!order) throw new NotFoundError('Order');
+
+    if (order.status !== ORDER_STATUS.COMPLETED) {
+        throw new BusinessRuleError(
+            'Delivered codes can only be revealed after the order is completed.',
+            'ORDER_NOT_COMPLETED'
+        );
+    }
+
+    if (!isCodeDeliveryOrderLike(order, order.productId)) {
+        throw new BusinessRuleError(
+            'This order does not have code delivery.',
+            'ORDER_NOT_CODE_DELIVERY'
+        );
+    }
+
+    const deliveredCodes = await ProviderDeliveredCode.find({ order: order._id })
+        .select('+codeEncrypted +pinEncrypted +serialEncrypted');
+    if (deliveredCodes.length === 0) {
+        throw new BusinessRuleError(
+            'No delivered codes are available for this order yet.',
+            'DELIVERED_CODES_NOT_AVAILABLE'
+        );
+    }
+
+    const revealedAt = new Date();
+    const items = [];
+
+    for (const delivered of deliveredCodes) {
+        const code = delivered.getSecretValue('codeEncrypted');
+        const pin = delivered.getSecretValue('pinEncrypted');
+        const serial = delivered.getSecretValue('serialEncrypted');
+
+        delivered.revealCount = Number(delivered.revealCount || 0) + 1;
+        delivered.revealedAt = revealedAt;
+        delivered.revealedBy = userId;
+        delivered.deliveryStatus = DELIVERY_STATUSES.REVEALED;
+        await delivered.save();
+
+        items.push({
+            id: delivered._id.toString(),
+            code: code || null,
+            pin: pin || null,
+            serial: serial || null,
+            metadata: delivered.metadata || null,
+            revealCount: delivered.revealCount,
+            deliveredAt: delivered.deliveredAt || null,
+            revealedAt,
+        });
+    }
+
+    createAuditLog({
+        actorId: auditContext?.actorId ?? userId,
+        actorRole: auditContext?.actorRole ?? ACTOR_ROLES.CUSTOMER,
+        ipAddress: auditContext?.ipAddress ?? null,
+        userAgent: auditContext?.userAgent ?? null,
+        action: ORDER_ACTIONS.DELIVERED_CODES_REVEALED,
+        entityType: ENTITY_TYPES.ORDER,
+        entityId: order._id,
+        metadata: {
+            orderId: order._id.toString(),
+            orderNumber: order.orderNumber,
+            deliveredCodeCount: items.length,
+            deliveredCodeIds: deliveredCodes.map((delivered) => delivered._id.toString()),
+        },
+    });
+
+    return {
+        orderId: order._id.toString(),
+        orderNumber: order.orderNumber,
+        deliveryType: 'CODE_DELIVERY',
+        deliveredCodeCount: items.length,
+        items,
+        warning: 'Plaintext codes are returned only by this reveal endpoint.',
+    };
+};
+
 // -----------------------------------------------------------------------------
 // QUERIES
 // -----------------------------------------------------------------------------
@@ -1112,7 +1349,11 @@ const listOrdersForUser = async (userId, { page = 1, limit = 20 } = {}) => {
             .populate('productId', 'name basePrice executionType'),
         Order.countDocuments({ userId }),
     ]);
-    return { orders, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+    const ordersWithDelivery = await attachDeliveryMetadata(orders);
+    return {
+        orders: ordersWithDelivery.map(sanitizeOrderForCustomer),
+        pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    };
 };
 
 const listAllOrders = async ({ page = 1, limit = 20, status } = {}) => {
@@ -1139,7 +1380,8 @@ const getOrderById = async (orderId, userId = null) => {
         .populate('userId', 'name email');
 
     if (!order) throw new NotFoundError('Order');
-    return order;
+    const orderWithDelivery = await attachDeliveryMetadata(order);
+    return userId ? sanitizeOrderForCustomer(orderWithDelivery) : orderWithDelivery;
 };
 
 module.exports = {
@@ -1149,6 +1391,7 @@ module.exports = {
     markOrderAsFailed,
     processOrderRefund,
     markOrderAsCompleted,
+    revealDeliveredCodes,
     listOrdersForUser,
     listAllOrders,
     getOrderById,

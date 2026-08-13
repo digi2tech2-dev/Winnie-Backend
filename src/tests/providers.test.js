@@ -139,11 +139,11 @@ const createFazerCodeDeliveryProviderProduct = async ({ familyKey = 'GIFTCARDS',
         isActive: true,
         available: true,
         fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
-        supportLevel: 'NEEDS_CODE_DELIVERY',
-        executionBlocked: true,
-        isSupported: false,
-        isBlocked: true,
-        blockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+        supportLevel: 'CATALOG_ONLY',
+        executionBlocked: false,
+        isSupported: true,
+        isBlocked: false,
+        blockReason: null,
         requiredFields: [],
         ...base,
         ...overrides,
@@ -479,7 +479,7 @@ describe('FazerCards family contracts', () => {
 
         const summary = fazerCardsContracts.getContractSummary();
         expect(summary.families.TOPUPS.supportStage).toBe('PILOT_READY');
-        expect(summary.families.GIFTCARDS.executionStage).toBe('ADMIN_PILOT_ONLY');
+        expect(summary.families.GIFTCARDS.executionStage).toBe('CUSTOMER_FLOW_READY_BUT_GATED');
         expect(summary.families.STEAM_GIFTS.supportStage).toBe('DISABLED_UNAVAILABLE');
         expect(summary.nextBestExecutionOrder).toEqual(expect.arrayContaining(['GIFTCARDS', 'GAME_KEYS', 'TOPUPS']));
     });
@@ -1118,7 +1118,7 @@ describe('FazerCards catalog normalization and raw sync', () => {
 });
 
 describe('FazerCards multi-family catalog discovery', () => {
-    it('family discovery returns known catalog families with non-topup execution disabled', () => {
+    it('family discovery returns known catalog families with gated code-delivery execution', () => {
         const result = fazerCardsCatalogSvc.listFamilies();
 
         expect(result.families.map((family) => family.familyKey)).toEqual(expect.arrayContaining([
@@ -1141,11 +1141,12 @@ describe('FazerCards multi-family catalog discovery', () => {
             fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
         });
         expect(giftcards).toMatchObject({
-            status: 'catalog_only',
+            status: 'implemented_gated',
             catalogAvailable: true,
-            executionAvailable: false,
+            executionAvailable: true,
+            executionGloballyGated: true,
             fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
-            supportLevel: 'NEEDS_CODE_DELIVERY',
+            supportLevel: 'CATALOG_ONLY',
         });
     });
 
@@ -1155,7 +1156,7 @@ describe('FazerCards multi-family catalog discovery', () => {
         expect(axios.create).not.toHaveBeenCalled();
     });
 
-    it('syncs gift cards as blocked ProviderProducts without creating Products, Orders, or wallet transactions', async () => {
+    it('syncs gift cards as supported gated ProviderProducts without creating Products, Orders, or wallet transactions', async () => {
         const client = makeClient();
         axios.create.mockReturnValue(client);
         client.request
@@ -1196,20 +1197,20 @@ describe('FazerCards multi-family catalog discovery', () => {
             endpoints: ['GET /giftcards', 'GET /giftcards/cards'],
             providerProductsCreated: 1,
             providerProductsUpdated: 0,
-            blocked: 1,
-            unsupported: 1,
-            catalogOnly: true,
+            blocked: 0,
+            unsupported: 0,
+            catalogOnly: false,
             requestId: 'req-giftcats',
         });
         expect(stored).toMatchObject({
             providerCode: PROVIDER_CODES.FAZER_CARDS,
             familyKey: 'GIFTCARDS',
-            supportLevel: 'NEEDS_CODE_DELIVERY',
+            supportLevel: 'CATALOG_ONLY',
             fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
-            isSupported: false,
-            isBlocked: true,
-            executionBlocked: true,
-            blockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+            isSupported: true,
+            isBlocked: false,
+            executionBlocked: false,
+            blockReason: null,
             rawName: 'Steam USD - Steam - $10',
             category: 'gc_steam_1',
             offerId: 'card_10usd',
@@ -1261,15 +1262,15 @@ describe('FazerCards multi-family catalog discovery', () => {
         expect(listed.products).toHaveLength(1);
         expect(listed.products[0]).toMatchObject({
             familyKey: 'GAME_KEYS',
-            supportLevel: 'NEEDS_CODE_DELIVERY',
+            supportLevel: 'CATALOG_ONLY',
             fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
-            blockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+            blockReason: null,
             imported: false,
         });
         expect(summary.byFamily.GAME_KEYS).toMatchObject({
             total: 1,
-            supported: 0,
-            blocked: 1,
+            supported: 1,
+            blocked: 0,
             imported: 0,
         });
         expect(summary.nextRecommendedFamilies.map((family) => family.familyKey)).toContain('GAME_KEYS');
@@ -1482,8 +1483,8 @@ describe('FazerCards CODE_DELIVERY foundation', () => {
             externalProductId: 'FAZER_GIFTCARD:acash_my:10_myr',
             familyKey: 'GIFTCARDS',
             fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
-            executionBlocked: true,
-            blockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+            executionBlocked: false,
+            blockReason: null,
             costPrice: '2.6029',
             currency: 'USD',
             requiredFields: [],
@@ -1492,7 +1493,7 @@ describe('FazerCards CODE_DELIVERY foundation', () => {
             minQty: 1,
             maxQty: 10,
         });
-        expect(preview.warning).toContain('Code delivery execution is not implemented yet');
+        expect(preview.warning).toContain('Product will be imported as inactive and not visible to customers.');
     });
 
     it('imports a gift card as inactive hidden provider-disabled Product metadata', async () => {
@@ -1505,7 +1506,8 @@ describe('FazerCards CODE_DELIVERY foundation', () => {
         });
 
         expect(result.action).toBe('created');
-        expect(result.product).toMatchObject({
+        const product = result.product.toObject ? result.product.toObject() : result.product;
+        expect(product).toMatchObject({
             name: 'A-Cash MY 10',
             description: 'Pilot gift card',
             basePrice: '3.25',
@@ -1520,9 +1522,11 @@ describe('FazerCards CODE_DELIVERY foundation', () => {
             executionType: EXECUTION_TYPES.MANUAL,
             providerCode: PROVIDER_CODES.FAZER_CARDS,
             externalProductId: 'FAZER_GIFTCARD:acash_my:10_myr',
+            customerPurchaseEnabled: false,
             providerExecutionEnabled: false,
-            providerExecutionBlocked: true,
-            providerBlockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+            providerExecutionBlocked: false,
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerBlockReason: null,
             familyKey: 'GIFTCARDS',
             fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
             providerCategory: 'acash_my',
@@ -1533,8 +1537,8 @@ describe('FazerCards CODE_DELIVERY foundation', () => {
             orderFields: [],
             dynamicFields: [],
         });
-        expect(result.product.provider.toString()).toBe(provider._id.toString());
-        expect(result.product.providerProduct.toString()).toBe(providerProduct._id.toString());
+        expect(product.provider.toString()).toBe(provider._id.toString());
+        expect(product.providerProduct.toString()).toBe(providerProduct._id.toString());
         expect(await Order.countDocuments({})).toBe(0);
         expect(await WalletTransaction.countDocuments({})).toBe(0);
         expect(axios.create).not.toHaveBeenCalled();
@@ -1548,15 +1552,18 @@ describe('FazerCards CODE_DELIVERY foundation', () => {
             name: 'Against the Storm Key',
         });
 
-        expect(result.product).toMatchObject({
+        const product = result.product.toObject ? result.product.toObject() : result.product;
+        expect(product).toMatchObject({
             name: 'Against the Storm Key',
             isActive: false,
             visibleInStore: false,
             status: PRODUCT_STATUSES.UNAVAILABLE,
             executionType: EXECUTION_TYPES.MANUAL,
+            customerPurchaseEnabled: false,
             providerExecutionEnabled: false,
-            providerExecutionBlocked: true,
-            providerBlockReason: 'CODE_DELIVERY_NOT_IMPLEMENTED',
+            providerExecutionBlocked: false,
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerBlockReason: null,
             familyKey: 'GAME_KEYS',
             fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
             providerCategory: 'against_the_storm_cis',
@@ -1600,7 +1607,7 @@ describe('FazerCards CODE_DELIVERY foundation', () => {
                 familyKey: 'GIFTCARDS',
                 fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
                 providerExecutionEnabled: false,
-                providerExecutionBlocked: true,
+                providerExecutionBlocked: false,
             },
             providerProduct: {
                 externalProductId: 'FAZER_GIFTCARD:acash_my:10_myr',
@@ -1611,7 +1618,7 @@ describe('FazerCards CODE_DELIVERY foundation', () => {
             requiredFields: [],
         });
         expect(result.warnings).toContain('Dry run only. No FazerCards order was created.');
-        expect(result.warnings).toContain('Code delivery live execution is not implemented yet.');
+        expect(result.warnings).toContain('Product execution is currently disabled.');
         expect(await Product.countDocuments({})).toBe(productCount);
         expect(await Order.countDocuments({})).toBe(0);
         expect(await WalletTransaction.countDocuments({})).toBe(0);
@@ -1812,7 +1819,7 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
             },
             payload: null,
         });
-        expect(result.blockers).toContain('Provider order endpoint and payload shape are unconfirmed.');
+        expect(result.blockers).toContain('Provider order endpoint and payload shape are unconfirmed for auto execution.');
         expect(result.warnings).toContain('Dry run was not built because this FazerCards family contract is unconfirmed.');
         expect(result.warnings).toContain('Telegram live execution is not implemented yet.');
         expect(axios.create).not.toHaveBeenCalled();
@@ -1837,7 +1844,7 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
             fulfillmentMode: FULFILLMENT_MODES.STEAM_TOPUP_WITH_LOGIN,
             supportStage: 'IMPORT_READY',
             executionStage: 'NONE',
-            canCustomerPurchase: false,
+            canCustomerPurchase: true,
             canLivePilot: false,
             contract: {
                 familyKey: 'STEAM_TOPUP',

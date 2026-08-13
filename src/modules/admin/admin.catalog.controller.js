@@ -575,7 +575,12 @@ const createProduct = catchAsync(async (req, res) => {
         visibleInStore,
         isPaused,
         status,
+        customerPurchaseEnabled,
         executionType,
+        providerExecutionEnabled,
+        providerExecutionMode,
+        providerExecutionBlocked,
+        providerBlockReason,
         orderFields,
         providerMapping,
     } = req.body;
@@ -593,7 +598,12 @@ const createProduct = catchAsync(async (req, res) => {
         visibleInStore: visibleInStore ?? true,
         isPaused: isPaused ?? false,
         status: status ?? 'available',
+        customerPurchaseEnabled: customerPurchaseEnabled ?? true,
         executionType: executionType ?? 'manual',
+        providerExecutionEnabled,
+        providerExecutionMode,
+        providerExecutionBlocked,
+        providerBlockReason,
         orderFields: orderFields ?? [],
         providerMapping: providerMapping ?? {},
     }, req.user._id);
@@ -642,6 +652,11 @@ const createProductFromProvider = catchAsync(async (req, res) => {
         visibleInStore,
         isPaused,
         status,
+        customerPurchaseEnabled,
+        providerExecutionEnabled,
+        providerExecutionMode,
+        providerExecutionBlocked,
+        providerBlockReason,
     } = req.body;
 
     try {
@@ -661,7 +676,12 @@ const createProductFromProvider = catchAsync(async (req, res) => {
             visibleInStore,
             isPaused,
             status,
+            customerPurchaseEnabled,
             executionType,
+            providerExecutionEnabled,
+            providerExecutionMode,
+            providerExecutionBlocked,
+            providerBlockReason,
             displayOrder,
             createdBy: req.user._id,
         });

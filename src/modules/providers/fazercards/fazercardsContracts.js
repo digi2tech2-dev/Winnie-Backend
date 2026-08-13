@@ -38,6 +38,16 @@ const CONTRACT_CODES = Object.freeze({
     PAYLOAD_IDENTIFIER_MISSING: 'PAYLOAD_IDENTIFIER_MISSING',
 });
 
+const PROVIDER_EXECUTION_MODES = Object.freeze({
+    AUTO_PROVIDER: 'AUTO_PROVIDER',
+    MANUAL_FULFILLMENT: 'MANUAL_FULFILLMENT',
+    DISABLED: 'DISABLED',
+});
+
+const AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']);
+const MANUAL_FULFILLMENT_FAMILIES = new Set(['TELEGRAM', 'STEAM_TOPUP', 'MANUAL_SERVICES']);
+const DISABLED_FAMILIES = new Set(['STEAM_GIFTS']);
+
 const asString = (value, fallback = '') => {
     if (value === undefined || value === null) return fallback;
     return String(value).trim();
@@ -465,7 +475,7 @@ const CONTRACTS = Object.freeze({
         canImportDraft: true,
         canDryRun: true,
         canLivePilot: true,
-        canCustomerPurchase: false,
+        canCustomerPurchase: true,
         customerInputSchema: {
             source: 'providerProduct.requiredFields',
             fields: [],
@@ -485,20 +495,20 @@ const CONTRACTS = Object.freeze({
         customerDeliveryStrategy: 'NO_CODE_DELIVERY_STATUS_ONLY',
         requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'providerExecutionEnabled', 'requiredFields'],
         blockers: ['Real target/account ID validation not completed in production.'],
-        warnings: ['Live customer purchase remains gated until a controlled real target ID pilot succeeds.'],
+        warnings: ['Auto execution is gated by environment and product-level provider execution settings.'],
     }),
     GIFTCARDS: Object.freeze({
         familyKey: 'GIFTCARDS',
         displayName: 'Gift Cards',
         fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
         supportStage: SUPPORT_STAGES.PILOT_READY,
-        executionStage: EXECUTION_STAGES.ADMIN_PILOT_ONLY,
+        executionStage: EXECUTION_STAGES.CUSTOMER_FLOW_READY_BUT_GATED,
         riskLevel: RISK_LEVELS.MEDIUM,
         catalogStatus: 'implemented',
         canImportDraft: true,
         canDryRun: true,
         canLivePilot: true,
-        canCustomerPurchase: false,
+        canCustomerPurchase: true,
         customerInputSchema: { fields: [{ key: 'quantity', type: 'number', required: true, min: 1 }] },
         providerPayloadSchema: {
             confirmed: true,
@@ -510,23 +520,23 @@ const CONTRACTS = Object.freeze({
             codeCandidates: ['codes[]', 'cards[]', 'voucherCode', 'code', 'pin', 'serial'],
         },
         storageStrategy: 'PROVIDER_DELIVERED_CODE_ENCRYPTED',
-        customerDeliveryStrategy: 'CUSTOMER_REVEAL_NOT_IMPLEMENTED',
+        customerDeliveryStrategy: 'CUSTOMER_REVEAL_AFTER_COMPLETED_ORDER',
         requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'FAZERCARDS_CODE_DELIVERY_ENABLED', 'ProviderDeliveredCode encryption'],
-        blockers: ['Customer code reveal is not implemented.'],
-        warnings: ['Admin pilot only; never return plaintext codes in list/debug responses.'],
+        blockers: [],
+        warnings: ['Auto execution is gated by environment and product-level provider execution settings. Never return plaintext codes in list/debug responses.'],
     }),
     GAME_KEYS: Object.freeze({
         familyKey: 'GAME_KEYS',
         displayName: 'Game Keys',
         fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
         supportStage: SUPPORT_STAGES.PILOT_READY,
-        executionStage: EXECUTION_STAGES.ADMIN_PILOT_ONLY,
+        executionStage: EXECUTION_STAGES.CUSTOMER_FLOW_READY_BUT_GATED,
         riskLevel: RISK_LEVELS.MEDIUM,
         catalogStatus: 'implemented',
         canImportDraft: true,
         canDryRun: true,
         canLivePilot: true,
-        canCustomerPurchase: false,
+        canCustomerPurchase: true,
         customerInputSchema: { fields: [{ key: 'quantity', type: 'number', required: true, min: 1 }] },
         providerPayloadSchema: {
             confirmed: true,
@@ -538,10 +548,10 @@ const CONTRACTS = Object.freeze({
             codeCandidates: ['keys[]', 'gameKey', 'licenseKey', 'code', 'serial'],
         },
         storageStrategy: 'PROVIDER_DELIVERED_CODE_ENCRYPTED',
-        customerDeliveryStrategy: 'CUSTOMER_REVEAL_NOT_IMPLEMENTED',
+        customerDeliveryStrategy: 'CUSTOMER_REVEAL_AFTER_COMPLETED_ORDER',
         requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'FAZERCARDS_CODE_DELIVERY_ENABLED', 'ProviderDeliveredCode encryption'],
-        blockers: ['Customer key reveal is not implemented.'],
-        warnings: ['Admin pilot only; never return plaintext keys in list/debug responses.'],
+        blockers: [],
+        warnings: ['Auto execution is gated by environment and product-level provider execution settings. Never return plaintext keys in list/debug responses.'],
     }),
     TELEGRAM: Object.freeze({
         familyKey: 'TELEGRAM',
@@ -554,7 +564,7 @@ const CONTRACTS = Object.freeze({
         canImportDraft: true,
         canDryRun: false,
         canLivePilot: false,
-        canCustomerPurchase: false,
+        canCustomerPurchase: true,
         customerInputSchema: {
             fields: [
                 { key: 'telegram_username', type: 'text', required: true },
@@ -566,8 +576,8 @@ const CONTRACTS = Object.freeze({
         storageStrategy: 'ORDER_PROVIDER_METADATA_UNCONFIRMED',
         customerDeliveryStrategy: 'NO_CODE_DELIVERY_EXPECTED_UNCONFIRMED',
         requiredCapabilities: ['Official Telegram order endpoint/payload confirmation'],
-        blockers: ['Provider order endpoint and payload shape are unconfirmed.'],
-        warnings: ['Do not collect or send Telegram order data until the provider contract is confirmed.'],
+        blockers: ['Provider order endpoint and payload shape are unconfirmed for auto execution.'],
+        warnings: ['Customer orders are allowed only through manual fulfillment. Do not send Telegram order data to FazerCards until the provider contract is confirmed.'],
     }),
     STEAM_TOPUP: Object.freeze({
         familyKey: 'STEAM_TOPUP',
@@ -580,7 +590,7 @@ const CONTRACTS = Object.freeze({
         canImportDraft: true,
         canDryRun: false,
         canLivePilot: false,
-        canCustomerPurchase: false,
+        canCustomerPurchase: true,
         customerInputSchema: { fields: [] },
         providerPayloadSchema: { confirmed: false, endpoint: null, body: 'UNCONFIRMED' },
         expectedResponseSchema: { confirmed: false },
@@ -588,7 +598,7 @@ const CONTRACTS = Object.freeze({
         customerDeliveryStrategy: 'NO_CODE_DELIVERY_EXPECTED_UNCONFIRMED',
         requiredCapabilities: ['Official Steam top-up input and execution contract confirmation'],
         blockers: ['Steam top-up execution contract is unconfirmed.', 'May involve account/login-like data.'],
-        warnings: ['High risk; do not invent login/password fields.'],
+        warnings: ['Customer orders are allowed only through manual fulfillment. High risk; do not invent login/password fields.'],
     }),
     MANUAL_SERVICES: Object.freeze({
         familyKey: 'MANUAL_SERVICES',
@@ -601,7 +611,7 @@ const CONTRACTS = Object.freeze({
         canImportDraft: true,
         canDryRun: false,
         canLivePilot: false,
-        canCustomerPurchase: false,
+        canCustomerPurchase: true,
         customerInputSchema: {
             source: 'providerProduct.requiredFields or admin-defined orderFields',
             fields: [],
@@ -612,8 +622,8 @@ const CONTRACTS = Object.freeze({
         storageStrategy: 'ORDER_MANUAL_WORKFLOW_UNIMPLEMENTED',
         customerDeliveryStrategy: 'MANUAL_ADMIN_WORKFLOW_NOT_IMPLEMENTED',
         requiredCapabilities: ['Manual workflow/chat execution design'],
-        blockers: ['Manual service execution workflow is not implemented.'],
-        warnings: ['Do not auto-execute manual services.'],
+        blockers: ['Manual service auto-execution workflow is not implemented.'],
+        warnings: ['Customer orders are allowed only through manual fulfillment.'],
     }),
     STEAM_GIFTS: Object.freeze({
         familyKey: 'STEAM_GIFTS',
@@ -682,6 +692,63 @@ const getContractSummary = () => ({
     nextBestExecutionOrder: ['GIFTCARDS', 'GAME_KEYS', 'TOPUPS', 'TELEGRAM', 'STEAM_TOPUP', 'MANUAL_SERVICES'],
 });
 
+const normalizeFamilyKey = (familyKey) => asString(familyKey).toUpperCase();
+
+const getAllowedExecutionModes = (familyKey) => {
+    const normalized = normalizeFamilyKey(familyKey);
+    if (AUTO_PROVIDER_FAMILIES.has(normalized)) {
+        return [PROVIDER_EXECUTION_MODES.AUTO_PROVIDER, PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT];
+    }
+    if (MANUAL_FULFILLMENT_FAMILIES.has(normalized)) {
+        return [PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT];
+    }
+    if (DISABLED_FAMILIES.has(normalized)) {
+        return [PROVIDER_EXECUTION_MODES.DISABLED];
+    }
+    return [PROVIDER_EXECUTION_MODES.DISABLED];
+};
+
+const getDefaultExecutionMode = (familyKey) => {
+    const normalized = normalizeFamilyKey(familyKey);
+    if (AUTO_PROVIDER_FAMILIES.has(normalized)) return PROVIDER_EXECUTION_MODES.AUTO_PROVIDER;
+    if (MANUAL_FULFILLMENT_FAMILIES.has(normalized)) return PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT;
+    return PROVIDER_EXECUTION_MODES.DISABLED;
+};
+
+const canAutoExecuteFamily = (familyKey) => AUTO_PROVIDER_FAMILIES.has(normalizeFamilyKey(familyKey));
+
+const validateExecutionModeForFamily = (familyKey, mode) => {
+    const normalized = normalizeFamilyKey(familyKey);
+    const requestedMode = asString(mode || getDefaultExecutionMode(normalized)).toUpperCase();
+    const allowedModes = getAllowedExecutionModes(normalized);
+    if (!allowedModes.includes(requestedMode)) {
+        if (DISABLED_FAMILIES.has(normalized)) {
+            return {
+                ok: false,
+                code: 'FAMILY_DISABLED_UNAVAILABLE',
+                message: 'This FazerCards family is currently unavailable.',
+                allowedModes,
+            };
+        }
+        return {
+            ok: false,
+            code: requestedMode === PROVIDER_EXECUTION_MODES.AUTO_PROVIDER
+                ? 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED'
+                : 'CUSTOMER_PURCHASE_NOT_ALLOWED',
+            message: requestedMode === PROVIDER_EXECUTION_MODES.AUTO_PROVIDER
+                ? 'Auto provider execution is not allowed for this FazerCards family contract.'
+                : 'Customer purchase is not allowed for this FazerCards family contract.',
+            allowedModes,
+        };
+    }
+
+    return {
+        ok: true,
+        mode: requestedMode,
+        allowedModes,
+    };
+};
+
 const buildPayloadFromContract = ({ familyKey, providerProduct, fields = {}, quantity = 1 } = {}) => {
     const contract = getContractOrUnknown(familyKey);
     if (contract.familyKey === 'TOPUPS') return buildTopupPayload({ providerProduct, fields });
@@ -720,10 +787,15 @@ module.exports = {
     RISK_LEVELS,
     PARSED_STATUSES,
     CONTRACT_CODES,
+    PROVIDER_EXECUTION_MODES,
     getContract,
     getContractOrUnknown,
     listContracts,
     getContractSummary,
+    getAllowedExecutionModes,
+    getDefaultExecutionMode,
+    canAutoExecuteFamily,
+    validateExecutionModeForFamily,
     buildPayloadFromContract,
     parseResponseForFamily,
     parseTopupResponse,

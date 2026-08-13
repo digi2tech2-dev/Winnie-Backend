@@ -9,6 +9,7 @@ const { getConversionRate } = require('../../services/currencyConverter.service'
 const { resolveUserPricingGroup } = require('../groups/group.service');
 const { calculateFinalPrice, getProductFinalUnitPrice } = require('../orders/pricing.service');
 const { buildCustomerPricingFields } = require('./customerPricingPresenter');
+const { NotFoundError } = require('../../shared/errors/AppError');
 
 // ─── Sensitive fields that must NEVER reach non-admin clients ─────────────────
 
@@ -25,8 +26,11 @@ const SENSITIVE_FIELDS = [
     'manualPriceAdjustment',
     'executionType',
     'providerExecutionEnabled',
+    'providerExecutionMode',
     'providerExecutionBlocked',
     'providerBlockReason',
+    'customerPurchaseEnabled',
+    'providerCode',
     'familyKey',
     'fulfillmentMode',
     'providerCategory',
@@ -47,6 +51,27 @@ const SENSITIVE_FIELDS = [
     '__v',
 ];
 
+const buildFazerCardsCustomerHints = (product = {}) => {
+    if (String(product.providerCode || '').trim().toUpperCase() !== 'FAZER_CARDS') return {};
+
+    const fulfillmentMode = String(product.fulfillmentMode || '').trim().toUpperCase();
+    const executionMode = String(product.providerExecutionMode || '').trim().toUpperCase();
+    const hints = {};
+
+    if (fulfillmentMode === 'CODE_DELIVERY') {
+        hints.deliveryType = 'CODE_DELIVERY';
+    } else if (executionMode === 'MANUAL_FULFILLMENT') {
+        hints.deliveryType = 'MANUAL_FULFILLMENT';
+        hints.fulfillmentNotice = 'This order will be processed manually.';
+    } else {
+        hints.deliveryType = 'DIGITAL_SERVICE';
+    }
+
+    if (product.providerRegion && !product.region) hints.region = product.providerRegion;
+    if (product.providerPlatform && !product.platform) hints.platform = product.providerPlatform;
+    return hints;
+};
+
 /**
  * Strip sensitive business fields from a product before sending to customers.
  * Works on both Mongoose documents and plain objects.
@@ -54,14 +79,33 @@ const SENSITIVE_FIELDS = [
 const sanitizeProductForCustomer = (product) => {
     if (!product) return product;
     const obj = typeof product.toObject === 'function' ? product.toObject() : { ...product };
+    const customerHints = buildFazerCardsCustomerHints(obj);
     for (const field of SENSITIVE_FIELDS) {
         delete obj[field];
     }
-    return obj;
+    return { ...obj, ...customerHints };
 };
 
 const sanitizeProductsForCustomer = (products) =>
     (Array.isArray(products) ? products : []).map(sanitizeProductForCustomer);
+
+const assertProductVisibleToCustomer = (product) => {
+    const obj = product && typeof product.toObject === 'function' ? product.toObject() : product;
+    if (
+        !obj
+        || obj.isActive !== true
+        || obj.visibleInStore === false
+        || obj.deletedAt
+    ) {
+        throw new NotFoundError('Product');
+    }
+    if (
+        String(obj.providerCode || '').trim().toUpperCase() === 'FAZER_CARDS'
+        && (obj.customerPurchaseEnabled !== true || obj.status !== 'available')
+    ) {
+        throw new NotFoundError('Product');
+    }
+};
 
 const applyCustomerGroupPricing = async (products, user) => {
     const list = Array.isArray(products) ? products : [products];
@@ -124,6 +168,7 @@ const listProducts = catchAsync(async (req, res) => {
 const getProduct = catchAsync(async (req, res) => {
     const product = await productService.getProductById(req.params.id);
     const isAdmin = req.user?.role === 'ADMIN';
+    if (!isAdmin) assertProductVisibleToCustomer(product);
     const pricedProduct = isAdmin ? product : await applyCustomerGroupPricing(product, req.user);
     const responseProduct = isAdmin ? pricedProduct : sanitizeProductForCustomer(pricedProduct);
     sendSuccess(res, sanitizePricingForSupervisor(responseProduct, req.user));

@@ -38,6 +38,7 @@ const ORDER_ACTIONS = Object.freeze({
     REFUNDED: 'ORDER_REFUNDED',
     PROCESSING: 'ORDER_PROCESSING',
     MANUAL_REVIEW: 'ORDER_MANUAL_REVIEW',
+    DELIVERED_CODES_REVEALED: 'ORDER_DELIVERED_CODES_REVEALED',
 });
 
 /** Actions on the Wallet / financial layer. */

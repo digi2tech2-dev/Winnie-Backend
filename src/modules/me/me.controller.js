@@ -32,18 +32,147 @@ const {
     normalizeSubmittedCustomFields,
 } = require('../payments/paymentCustomFields');
 
+const FAZER_CARDS_CUSTOMER_PRODUCT_FILTER = {
+    $or: [
+        { providerCode: { $ne: 'FAZER_CARDS' } },
+        {
+            providerCode: 'FAZER_CARDS',
+            customerPurchaseEnabled: true,
+            status: 'available',
+        },
+    ],
+};
+
+const CUSTOMER_PROVIDER_SENSITIVE_FIELDS = [
+    'provider',
+    'providerProduct',
+    'providerPrice',
+    'providerMapping',
+    'syncPriceWithProvider',
+    'enableManualPrice',
+    'manualPriceAdjustment',
+    'executionType',
+    'providerExecutionEnabled',
+    'providerExecutionMode',
+    'providerExecutionBlocked',
+    'providerBlockReason',
+    'customerPurchaseEnabled',
+    'providerCode',
+    'familyKey',
+    'fulfillmentMode',
+    'providerCategory',
+    'providerCategoryName',
+    'providerOfferId',
+    'providerOfferName',
+    'providerRegion',
+    'providerPlatform',
+    'providerStock',
+    'rawPayload',
+    'externalProductId',
+    'costPrice',
+];
+
+const CUSTOMER_ORDER_PROVIDER_SENSITIVE_FIELDS = [
+    'providerRawResponse',
+    'providerRequestId',
+    'providerIdempotencyKey',
+    'providerTargetSnapshot',
+    'providerErrorCode',
+    'providerErrorMessage',
+    'providerMessage',
+    'providerOrderId',
+    'providerStatus',
+    'providerCode',
+    'familyKey',
+    'fulfillmentMode',
+];
+
+const CODE_DELIVERY_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
+
+const isCodeDeliveryOrder = (order = {}) => {
+    const familyKey = String(order.familyKey || '').trim().toUpperCase();
+    const fulfillmentMode = String(order.fulfillmentMode || '').trim().toUpperCase();
+    return fulfillmentMode === 'CODE_DELIVERY' || CODE_DELIVERY_FAMILIES.has(familyKey);
+};
+
+const sanitizeCustomerOrder = (order = {}, deliveredCodeCount = 0) => {
+    const safe = { ...(order || {}) };
+    if (isCodeDeliveryOrder(order)) {
+        safe.deliveryType = 'CODE_DELIVERY';
+        safe.hasDeliveredCodes = deliveredCodeCount > 0;
+        safe.deliveredCodeCount = deliveredCodeCount;
+    }
+    if (
+        order.status === 'MANUAL_REVIEW'
+        && String(order.providerCode || '').trim().toUpperCase().includes('FAZER')
+        && (
+            order.providerErrorCode === 'FAZERCARDS_MANUAL_FULFILLMENT_REQUIRED'
+            || order.providerErrorCode === 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED'
+        )
+    ) {
+        safe.fulfillmentNotice = 'Your order is being processed manually.';
+    }
+    for (const field of CUSTOMER_ORDER_PROVIDER_SENSITIVE_FIELDS) {
+        delete safe[field];
+    }
+    return safe;
+};
+
+const sanitizeCustomerOrders = async (orders = []) => {
+    const list = Array.isArray(orders) ? orders : [];
+    const codeDeliveryOrderIds = list
+        .filter(isCodeDeliveryOrder)
+        .map((order) => order._id)
+        .filter(Boolean);
+    let countByOrderId = new Map();
+
+    if (codeDeliveryOrderIds.length > 0) {
+        const { ProviderDeliveredCode } = require('../providers/fazercards/providerDeliveredCode.model');
+        const counts = await ProviderDeliveredCode.aggregate([
+            { $match: { order: { $in: codeDeliveryOrderIds } } },
+            { $group: { _id: '$order', count: { $sum: 1 } } },
+        ]);
+        countByOrderId = new Map(counts.map((item) => [String(item._id), Number(item.count || 0)]));
+    }
+
+    return list.map((order) => sanitizeCustomerOrder(order, countByOrderId.get(String(order._id)) || 0));
+};
+
+const buildFazerCardsCustomerHints = (product = {}) => {
+    if (String(product.providerCode || '').trim().toUpperCase() !== 'FAZER_CARDS') return {};
+    const fulfillmentMode = String(product.fulfillmentMode || '').trim().toUpperCase();
+    const executionMode = String(product.providerExecutionMode || '').trim().toUpperCase();
+    const hints = {};
+
+    if (fulfillmentMode === 'CODE_DELIVERY') {
+        hints.deliveryType = 'CODE_DELIVERY';
+    } else if (executionMode === 'MANUAL_FULFILLMENT') {
+        hints.deliveryType = 'MANUAL_FULFILLMENT';
+        hints.fulfillmentNotice = 'This order will be processed manually.';
+    } else {
+        hints.deliveryType = 'DIGITAL_SERVICE';
+    }
+
+    if (product.providerRegion && !product.region) hints.region = product.providerRegion;
+    if (product.providerPlatform && !product.platform) hints.platform = product.providerPlatform;
+    return hints;
+};
+
 const exposeSafeCustomerProduct = (product) => {
     const plain = product && typeof product.toObject === 'function' ? product.toObject() : { ...(product || {}) };
     const xenaProduct = isXenaProductLike(plain);
     const canonical = xenaProduct ? canonicalizeXenaProductForResponse(plain) : plain;
-    delete canonical.providerProduct;
+    const customerHints = buildFazerCardsCustomerHints(canonical);
+    for (const field of CUSTOMER_PROVIDER_SENSITIVE_FIELDS) {
+        delete canonical[field];
+    }
 
     if (xenaProduct) {
         canonical.providerCode = XENA_PROVIDER_CODE;
         canonical.providerProductExternalId = XENA_EXTERNAL_PRODUCT_ID;
     }
 
-    return canonical;
+    return { ...canonical, ...customerHints };
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -291,7 +420,8 @@ const getOrders = catchAsync(async (req, res) => {
         Order.countDocuments(filter),
     ]);
 
-    sendPaginated(res, sanitizePricingForSupervisor(orders, req.user), { page, limit, total, pages: Math.ceil(total / limit) }, 'Orders retrieved.');
+    const safeOrders = await sanitizeCustomerOrders(orders);
+    sendPaginated(res, sanitizePricingForSupervisor(safeOrders, req.user), { page, limit, total, pages: Math.ceil(total / limit) }, 'Orders retrieved.');
 });
 
 /**
@@ -300,6 +430,17 @@ const getOrders = catchAsync(async (req, res) => {
 const getOrder = catchAsync(async (req, res) => {
     const order = await orderService.getOrderById(req.params.id, req.user._id);
     sendSuccess(res, sanitizePricingForSupervisor(order, req.user));
+});
+
+const revealOrderDeliveredCodes = catchAsync(async (req, res) => {
+    const auditContext = {
+        actorId: req.user._id,
+        actorRole: req.user.role,
+        ipAddress: req.ip ?? null,
+        userAgent: req.get('User-Agent') ?? null,
+    };
+    const result = await orderService.revealDeliveredCodes(req.params.id, req.user._id, auditContext);
+    sendSuccess(res, result, 'Delivered codes revealed successfully.');
 });
 
 // =============================================================================
@@ -371,7 +512,12 @@ const getProducts = catchAsync(async (req, res) => {
     const { resolveUserPricingGroup } = require('../groups/group.service');
     const { calculateFinalPrice, getProductFinalUnitPrice } = require('../orders/pricing.service');
 
-    const filter = { isActive: true, visibleInStore: { $ne: false }, deletedAt: null };
+    const filter = {
+        isActive: true,
+        visibleInStore: { $ne: false },
+        deletedAt: null,
+        $and: [FAZER_CARDS_CUSTOMER_PRODUCT_FILTER],
+    };
     if (req.query.search) {
         filter.$or = [
             { name: { $regex: req.query.search, $options: 'i' } },
@@ -444,6 +590,7 @@ const getProduct = catchAsync(async (req, res) => {
         isActive: true,
         visibleInStore: { $ne: false },
         deletedAt: null,
+        $and: [FAZER_CARDS_CUSTOMER_PRODUCT_FILTER],
     })
         .populate('providerProduct', 'externalProductId')
         .lean();
@@ -606,6 +753,7 @@ module.exports = {
     getTransactions,
     getOrders,
     getOrder,
+    revealOrderDeliveredCodes,
     placeOrder,
     quoteOrder,
     getProducts,

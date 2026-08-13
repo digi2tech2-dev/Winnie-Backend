@@ -10,6 +10,18 @@ const { calculateFinalPrice, getProductFinalUnitPrice } = require('../orders/pri
 const { validateDynamicFields } = require('../orders/orderFields.validator');
 const { BusinessRuleError } = require('../../shared/errors/AppError');
 
+const FAZER_CARDS_CUSTOMER_PRODUCT_FILTER = {
+    $or: [
+        { providerCode: { $ne: 'FAZER_CARDS' } },
+        {
+            providerCode: 'FAZER_CARDS',
+            visibleInStore: { $ne: false },
+            customerPurchaseEnabled: true,
+            status: 'available',
+        },
+    ],
+};
+
 const RESERVED_ORDER_KEYS = new Set([
     'productId',
     'qty',
@@ -82,6 +94,7 @@ const listProducts = async (user) => {
         isActive: true,
         isAvailableForApi: { $ne: false },
         deletedAt: null,
+        $and: [FAZER_CARDS_CUSTOMER_PRODUCT_FILTER],
     })
         .select('name basePrice finalPrice minQty maxQty executionType dynamicFields orderFields displayOrder')
         .sort({ displayOrder: 1, name: 1 });
@@ -119,6 +132,7 @@ const getApiProductForOrder = async (productId) => {
         isActive: true,
         isAvailableForApi: { $ne: false },
         deletedAt: null,
+        $and: [FAZER_CARDS_CUSTOMER_PRODUCT_FILTER],
     }).select('dynamicFields orderFields');
 
     if (!product) {

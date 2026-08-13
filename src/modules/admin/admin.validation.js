@@ -531,6 +531,15 @@ const fazerCardsCodeDeliveryLivePilotSchema = Joi.object({
     operatorNote: Joi.string().trim().max(500).allow('', null),
 });
 
+const fazerCardsManualDeliveredCodeSchema = Joi.object({
+    code: Joi.string().trim().max(4096).allow('', null),
+    pin: Joi.string().trim().max(4096).allow('', null),
+    serial: Joi.string().trim().max(4096).allow('', null),
+    metadata: Joi.object().unknown(true).default({}),
+}).or('code', 'pin', 'serial').messages({
+    'object.missing': 'code, pin, or serial is required',
+});
+
 const listFazerCardsProviderProductsQuery = Joi.object({
     ...pagination,
     search: Joi.string().trim().max(200).allow('', null),
@@ -675,6 +684,7 @@ module.exports = {
         fazerCardsUnifiedDryRun: fazerCardsUnifiedDryRunSchema,
         fazerCardsCodeDeliveryDryRun: fazerCardsCodeDeliveryDryRunSchema,
         fazerCardsCodeDeliveryLivePilot: fazerCardsCodeDeliveryLivePilotSchema,
+        fazerCardsManualDeliveredCode: fazerCardsManualDeliveredCodeSchema,
         fazerCardsProviderProductImport: fazerCardsProviderProductImportSchema,
         listFazerCardsProviderProductsQuery,
         // Orders

@@ -127,6 +127,7 @@ const config = {
             timeoutMs: parseInt(process.env.FAZERCARDS_TIMEOUT_MS || '20000', 10),
             topupOrderStatusPath: process.env.FAZERCARDS_TOPUP_ORDER_STATUS_PATH || null,
             realOrdersEnabled: process.env.FAZERCARDS_REAL_ORDERS_ENABLED === 'true',
+            customerPurchaseEnabled: process.env.FAZERCARDS_CUSTOMER_PURCHASE_ENABLED !== 'false',
             maxOrderUsd: process.env.FAZERCARDS_MAX_ORDER_USD === undefined
                 ? 1.00
                 : parseFloat(process.env.FAZERCARDS_MAX_ORDER_USD),

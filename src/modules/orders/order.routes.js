@@ -55,6 +55,29 @@ router.get('/my', requireActiveUser, authorizeRoles('CUSTOMER', 'ADMIN'), orderC
  */
 router.get('/my/:id', requireActiveUser, authorizeRoles('CUSTOMER', 'ADMIN'), orderIdParamValidation, validate, orderController.getMyOrder);
 
+/**
+ * @route  GET /api/orders/my/:id/delivered-codes
+ * @desc   Reveal encrypted delivered codes for a completed owned order
+ * @access Active Customer only
+ */
+router.get(
+    '/my/:id/delivered-codes',
+    requireActiveUser,
+    authorizeRoles('CUSTOMER', 'ADMIN'),
+    orderIdParamValidation,
+    validate,
+    orderController.revealDeliveredCodes
+);
+
+router.get(
+    '/:id/delivered-codes',
+    requireActiveUser,
+    authorizeRoles('CUSTOMER', 'ADMIN'),
+    orderIdParamValidation,
+    validate,
+    orderController.revealDeliveredCodes
+);
+
 // ── Admin Routes ──────────────────────────────────────────────────────────────
 
 /**

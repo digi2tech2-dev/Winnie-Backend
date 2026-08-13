@@ -24,9 +24,18 @@ const mongoose = require('mongoose');
  *   - Toggle active / deactivate
  */
 
-const { Product, PRICING_MODES, MARKUP_TYPES, EXECUTION_TYPES, PRODUCT_STATUSES, computeFinalPrice } = require('./product.model');
+const {
+    Product,
+    PRICING_MODES,
+    MARKUP_TYPES,
+    EXECUTION_TYPES,
+    PRODUCT_STATUSES,
+    PROVIDER_EXECUTION_MODES,
+    computeFinalPrice,
+} = require('./product.model');
 const { ProviderProduct } = require('../providers/providerProduct.model');
 const { PROVIDER_CODES } = require('../providers/provider.constants');
+const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
 const {
     canonicalizeXenaProductForResponse,
     canonicalizeXenaProductUpdate,
@@ -72,6 +81,93 @@ const assertProviderProductAllowedForCustomerCatalog = (pp) => {
     }
 };
 
+const isFazerCardsProviderCode = (value) => {
+    const normalized = String(value || '').trim();
+    return normalized.toUpperCase() === PROVIDER_CODES.FAZER_CARDS
+        || normalized.toLowerCase() === 'fazer-cards'
+        || normalized.toLowerCase() === 'fazercards';
+};
+
+const inferFazerCardsFamilyKey = (product = {}, providerProduct = {}) => {
+    const explicit = String(product.familyKey || providerProduct.familyKey || providerProduct.rawPayload?.family || '').trim().toUpperCase();
+    if (explicit) return explicit;
+    const external = String(product.externalProductId || providerProduct.externalProductId || '').trim();
+    if (external.startsWith('FAZER_TOPUP:')) return 'TOPUPS';
+    if (external.startsWith('FAZER_GIFTCARD:')) return 'GIFTCARDS';
+    if (external.startsWith('FAZER_GAMEKEY:')) return 'GAME_KEYS';
+    if (external.startsWith('FAZER_TELEGRAM:')) return 'TELEGRAM';
+    if (external.startsWith('FAZER_STEAM_TOPUP:')) return 'STEAM_TOPUP';
+    if (external.startsWith('FAZER_MANUAL_SERVICE:')) return 'MANUAL_SERVICES';
+    if (external.startsWith('FAZER_STEAM_GIFT:')) return 'STEAM_GIFTS';
+    return null;
+};
+
+const validateFazerCardsProductSettings = ({ product, safe, providerProduct }) => {
+    const providerCode = safe.providerCode
+        || product.providerCode
+        || providerProduct?.providerCode
+        || product.provider?.providerCode
+        || product.provider?.slug;
+    if (!isFazerCardsProviderCode(providerCode)) return safe;
+
+    const familyKey = inferFazerCardsFamilyKey({ ...product.toObject?.(), ...safe }, providerProduct || product.providerProduct);
+    const contract = fazerCardsContracts.getContractOrUnknown(familyKey);
+    const requestedMode = safe.providerExecutionMode
+        || product.providerExecutionMode
+        || fazerCardsContracts.getDefaultExecutionMode(familyKey);
+    const modeValidation = fazerCardsContracts.validateExecutionModeForFamily(familyKey, requestedMode);
+    if (!modeValidation.ok) {
+        throw new BusinessRuleError(modeValidation.message, modeValidation.code);
+    }
+
+    safe.providerExecutionMode = modeValidation.mode;
+    safe.familyKey = safe.familyKey || familyKey;
+    safe.fulfillmentMode = safe.fulfillmentMode || providerProduct?.fulfillmentMode || product.fulfillmentMode || contract.fulfillmentMode;
+
+    const enablesAutoExecution = safe.providerExecutionEnabled === true
+        || (safe.providerExecutionEnabled === undefined && product.providerExecutionEnabled === true);
+    if (enablesAutoExecution && modeValidation.mode !== PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
+        throw new BusinessRuleError(
+            'Auto provider execution is not allowed for this FazerCards family contract.',
+            'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED'
+        );
+    }
+
+    const enablesCustomerPurchase = safe.customerPurchaseEnabled === true
+        || (safe.customerPurchaseEnabled === undefined && product.customerPurchaseEnabled === true);
+    if (enablesCustomerPurchase && contract.canCustomerPurchase !== true) {
+        throw new BusinessRuleError(
+            contract.supportStage === fazerCardsContracts.SUPPORT_STAGES.DISABLED_UNAVAILABLE
+                ? 'This FazerCards family is currently unavailable.'
+                : 'Customer purchase is not allowed for this FazerCards family contract.',
+            contract.supportStage === fazerCardsContracts.SUPPORT_STAGES.DISABLED_UNAVAILABLE
+                ? 'FAMILY_DISABLED_UNAVAILABLE'
+                : 'CUSTOMER_PURCHASE_NOT_ALLOWED'
+        );
+    }
+
+    if (modeValidation.mode === PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
+        safe.executionType = safe.providerExecutionEnabled === true
+            ? EXECUTION_TYPES.AUTOMATIC
+            : (safe.executionType || product.executionType || EXECUTION_TYPES.MANUAL);
+    } else {
+        safe.executionType = EXECUTION_TYPES.MANUAL;
+        if (safe.providerExecutionEnabled === true) {
+            throw new BusinessRuleError(
+                'Auto provider execution is not allowed for this FazerCards family contract.',
+                'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED'
+            );
+        }
+        safe.providerExecutionEnabled = false;
+    }
+
+    if (modeValidation.mode === PROVIDER_EXECUTION_MODES.DISABLED && enablesCustomerPurchase) {
+        throw new BusinessRuleError('Customer purchase is not allowed for this FazerCards family.', 'CUSTOMER_PURCHASE_NOT_ALLOWED');
+    }
+
+    return safe;
+};
+
 // =============================================================================
 // USER-FACING QUERIES
 // =============================================================================
@@ -109,6 +205,19 @@ const listProducts = async ({
     if (activeOnly) {
         filter.isActive = true;
         filter.visibleInStore = { $ne: false };
+        filter.$and = [
+            ...(filter.$and || []),
+            {
+                $or: [
+                    { providerCode: { $ne: PROVIDER_CODES.FAZER_CARDS } },
+                    {
+                        providerCode: PROVIDER_CODES.FAZER_CARDS,
+                        customerPurchaseEnabled: true,
+                        status: PRODUCT_STATUSES.AVAILABLE,
+                    },
+                ],
+            },
+        ];
     }
     if (category) filter.category = String(category).trim();
     if (status) {
@@ -215,7 +324,9 @@ const createProduct = async ({
     visibleInStore = true,
     isPaused = false,
     status = PRODUCT_STATUSES.AVAILABLE,
+    customerPurchaseEnabled = true,
     executionType = 'manual',
+    providerExecutionMode = PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT,
     orderFields = [],
     dynamicFields = [],
     providerMapping = {},
@@ -288,10 +399,12 @@ const createProduct = async ({
         visibleInStore,
         isPaused,
         status,
+        customerPurchaseEnabled,
         pricingMode,
         markupType,
         markupValue,
         executionType: resolvedExecutionType,
+        providerExecutionMode,
         orderFields,
         dynamicFields,
         providerMapping,
@@ -337,10 +450,15 @@ const publishFromProviderProduct = async ({
     visibleInStore = true,
     isPaused = false,
     status = PRODUCT_STATUSES.AVAILABLE,
+    customerPurchaseEnabled = true,
     pricingMode = PRICING_MODES.MANUAL,
     markupType = MARKUP_TYPES.PERCENTAGE,
     markupValue = 0,
     executionType = 'automatic',
+    providerExecutionEnabled = true,
+    providerExecutionMode = PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT,
+    providerExecutionBlocked = false,
+    providerBlockReason = null,
     createdBy = null,            // accepted here for the createProductFromProvider alias
 }, adminUserId = null) => {
     // Resolve createdBy from either param location
@@ -418,10 +536,15 @@ const publishFromProviderProduct = async ({
         visibleInStore,
         isPaused,
         status,
+        customerPurchaseEnabled,
         pricingMode,
         markupType,
         markupValue,
         executionType,
+        providerExecutionEnabled,
+        providerExecutionMode,
+        providerExecutionBlocked,
+        providerBlockReason,
         provider: pp.provider._id,
         providerProduct: pp._id,
         createdBy: resolvedCreatedBy,
@@ -454,14 +577,16 @@ const publishFromProviderProduct = async ({
 const updateProduct = async (productId, updates) => {
     const product = await Product.findById(productId)
         .populate('provider', 'name slug code')
-        .populate('providerProduct', 'rawPrice rawPayload externalProductId provider');
+        .populate('providerProduct', 'rawPrice rawPayload externalProductId provider providerCode familyKey fulfillmentMode');
     if (!product) throw new NotFoundError('Product');
 
     const ALLOWED = [
         'name', 'description', 'image', 'category', 'displayOrder', 'isActive',
-        'visibleInStore', 'isPaused', 'status',
+        'visibleInStore', 'isPaused', 'status', 'customerPurchaseEnabled',
         'basePrice', 'minQty', 'maxQty', 'pricingMode', 'markupType', 'markupValue',
-        'executionType', 'providerExecutionEnabled', 'orderFields', 'dynamicFields', 'providerMapping',
+        'executionType', 'providerExecutionEnabled', 'providerExecutionMode',
+        'providerExecutionBlocked', 'providerBlockReason',
+        'orderFields', 'dynamicFields', 'providerMapping',
         'provider', 'providerProduct',
         'syncPriceWithProvider', 'enableManualPrice', 'manualPriceAdjustment', 'finalPrice',
     ];
@@ -503,7 +628,7 @@ const updateProduct = async (productId, updates) => {
 
     if (providerLinkChanged) {
         const newPP = await ProviderProduct.findById(incomingProviderProduct)
-            .select('rawPrice rawPayload externalProductId provider providerCode isBlocked isSupported')
+            .select('rawPrice rawPayload externalProductId provider providerCode isBlocked isSupported familyKey fulfillmentMode')
             .populate('provider', 'slug providerCode');
         if (newPP) {
             assertProviderProductAllowedForCustomerCatalog(newPP);
@@ -608,6 +733,13 @@ const updateProduct = async (productId, updates) => {
     if (safe.executionType === EXECUTION_TYPES.AUTOMATIC && !nextProviderProduct) {
         safe.executionType = EXECUTION_TYPES.MANUAL;
     }
+
+    const effectiveProviderProduct = providerLinkTargetProduct || product.providerProduct;
+    safe = validateFazerCardsProductSettings({
+        product,
+        safe,
+        providerProduct: effectiveProviderProduct,
+    });
 
     safe = canonicalizeXenaProductUpdate(safe, {
         ...product.toObject(),

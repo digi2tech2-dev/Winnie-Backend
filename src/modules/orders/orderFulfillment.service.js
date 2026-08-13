@@ -22,7 +22,9 @@
 const mongoose = require('mongoose');
 const { Order, ORDER_STATUS, MAX_RETRY_COUNT, ORDER_EXECUTION_TYPES } = require('../orders/order.model');
 const { getExternalProductId } = require('../products/product.service');
-const { ProviderProduct } = require('../providers/providerProduct.model');
+const { ProviderProduct, FULFILLMENT_MODES } = require('../providers/providerProduct.model');
+const { PROVIDER_CODES } = require('../providers/provider.constants');
+const config = require('../../config/config');
 const { refundWalletAtomic } = require('../wallet/wallet.service');
 const {
     LEDGER_TRANSACTION_TYPES,
@@ -44,6 +46,8 @@ const {
     notifyOrderManualReview,
     notifyOrderRefunded,
 } = require('../notifications/notification.events');
+const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
+const { storeDeliveredCodesForOrder, sanitizeProviderCodePayload } = require('../providers/fazercards/fazercardsDelivery.service');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IDEMPOTENT REFUND
@@ -242,6 +246,332 @@ const buildProviderParams = (order, product, providerProduct) => {
     return mapped;
 };
 
+const normalizeProviderCode = (value) => String(value || '').trim().toUpperCase();
+
+const isFazerCardsCodeDeliveryOrder = (product = {}, providerProduct = {}) => {
+    const safeProduct = product || {};
+    const safeProviderProduct = providerProduct || {};
+    return normalizeProviderCode(safeProduct.providerCode || safeProviderProduct.providerCode) === PROVIDER_CODES.FAZER_CARDS
+        && safeProviderProduct.fulfillmentMode === FULFILLMENT_MODES.CODE_DELIVERY
+        && ['GIFTCARDS', 'GAME_KEYS'].includes(String(safeProviderProduct.familyKey || safeProduct.familyKey || '').trim().toUpperCase());
+};
+
+const getCodeDeliveryMaxOrderUsd = () => {
+    const max = Number(config.providers.fazerCards.codeDeliveryMaxOrderUsd);
+    return Number.isFinite(max) && max > 0 ? max : null;
+};
+
+const buildCodeDeliveryManualReviewResult = ({
+    providerIdempotencyKey,
+    providerErrorCode,
+    providerErrorMessage,
+    providerRequestId = null,
+    providerOrderId = null,
+    providerStatus = 'Unknown',
+    rawResponse = null,
+} = {}) => ({
+    success: false,
+    manualReview: true,
+    providerOrderId,
+    providerStatus,
+    providerRequestId,
+    providerIdempotencyKey,
+    providerErrorCode,
+    providerErrorMessage,
+    providerRawResponse: rawResponse,
+    rawResponse: sanitizeProviderCodePayload(rawResponse || { errorCode: providerErrorCode, message: providerErrorMessage }),
+    errorMessage: providerErrorMessage,
+});
+
+const buildCodeDeliveryRejectedResult = ({
+    providerIdempotencyKey,
+    providerErrorCode,
+    providerErrorMessage,
+    rawResponse = null,
+} = {}) => ({
+    success: false,
+    providerOrderId: null,
+    providerStatus: 'Cancelled',
+    providerIdempotencyKey,
+    providerErrorCode,
+    providerErrorMessage,
+    rawResponse: sanitizeProviderCodePayload(rawResponse || { errorCode: providerErrorCode, message: providerErrorMessage }),
+    errorMessage: providerErrorMessage,
+});
+
+const getFazerCardsBalance = async (adapter) => {
+    if (typeof adapter.getBalance === 'function') return adapter.getBalance();
+    if (adapter.client && typeof adapter.client.getBalance === 'function') {
+        const response = await adapter.client.getBalance();
+        const raw = response?.data || {};
+        const balance = raw.balance ?? raw.data?.balance ?? raw.wallet?.balance ?? raw.available_balance;
+        return { balance, currency: raw.currency || raw.data?.currency || 'USD', requestId: response?.requestId || null, raw };
+    }
+    throw new Error('FazerCards balance preflight is unavailable.');
+};
+
+const placeFazerCardsCodeDeliveryOrder = async ({
+    order,
+    product,
+    providerProduct,
+    adapter,
+    providerDoc = null,
+} = {}) => {
+    const familyKey = String(providerProduct.familyKey || product.familyKey || '').trim().toUpperCase();
+    const providerIdempotencyKey = `fazercards:code-delivery:${order._id.toString()}`;
+    const unitCost = Number(providerProduct.costPrice ?? providerProduct.rawPrice);
+    const quantity = Number(order.quantity || 1);
+    const totalProviderCost = Number.isFinite(unitCost) && Number.isFinite(quantity)
+        ? Number((unitCost * quantity).toFixed(6))
+        : null;
+
+    if (product.providerExecutionMode !== fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_MANUAL_FULFILLMENT_REQUIRED',
+            providerErrorMessage: 'Manual fulfillment required because provider execution mode is not AUTO_PROVIDER.',
+        });
+    }
+    if (product.providerExecutionEnabled !== true) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED',
+            providerErrorMessage: 'FazerCards provider execution is disabled for this product.',
+        });
+    }
+    if (product.providerExecutionBlocked === true || providerProduct.executionBlocked === true) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_PROVIDER_EXECUTION_BLOCKED',
+            providerErrorMessage: product.providerBlockReason || providerProduct.blockReason || 'FazerCards provider execution is blocked.',
+        });
+    }
+    if (providerProduct.isSupported !== true) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_PROVIDER_PRODUCT_UNSUPPORTED',
+            providerErrorMessage: 'FazerCards ProviderProduct is not marked as supported.',
+        });
+    }
+    if (providerProduct.isBlocked === true) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: providerProduct.blockReason || 'FAZERCARDS_PROVIDER_PRODUCT_BLOCKED',
+            providerErrorMessage: 'FazerCards ProviderProduct is blocked.',
+        });
+    }
+    if (config.providers.fazerCards.enabled !== true) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_DISABLED',
+            providerErrorMessage: 'FazerCards integration is disabled.',
+            rawResponse: { gate: 'FAZERCARDS_ENABLED' },
+        });
+    }
+    if (config.providers.fazerCards.realOrdersEnabled !== true) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_REAL_ORDERS_DISABLED',
+            providerErrorMessage: 'FazerCards real orders are disabled by global safety gate.',
+            rawResponse: { gate: 'FAZERCARDS_REAL_ORDERS_ENABLED' },
+        });
+    }
+    if (config.providers.fazerCards.codeDeliveryEnabled !== true) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_CODE_DELIVERY_DISABLED',
+            providerErrorMessage: 'FazerCards code delivery is disabled by global safety gate.',
+            rawResponse: { gate: 'FAZERCARDS_CODE_DELIVERY_ENABLED' },
+        });
+    }
+    if (!Number.isFinite(unitCost) || unitCost <= 0 || totalProviderCost === null) {
+        return buildCodeDeliveryRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_PROVIDER_PRODUCT_INVALID_COST',
+            providerErrorMessage: 'FazerCards ProviderProduct has an invalid cost price.',
+        });
+    }
+
+    const maxOrderUsd = getCodeDeliveryMaxOrderUsd();
+    if (maxOrderUsd !== null && totalProviderCost > maxOrderUsd) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_CODE_DELIVERY_MAX_COST_GUARD',
+            providerErrorMessage: 'FazerCards code-delivery order blocked by max cost guard.',
+            rawResponse: { gate: 'FAZERCARDS_CODE_DELIVERY_MAX_ORDER_USD', totalProviderCost, maxOrderUsd },
+        });
+    }
+
+    const contractPayload = fazerCardsContracts.buildPayloadFromContract({
+        familyKey,
+        providerProduct,
+        quantity,
+    });
+    if (contractPayload.success !== true) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: contractPayload.code || 'CONTRACT_UNCONFIRMED',
+            providerErrorMessage: contractPayload.message || 'FazerCards code-delivery payload contract is not confirmed.',
+            rawResponse: {
+                contract: familyKey,
+                missing: contractPayload.missing || [],
+            },
+        });
+    }
+
+    let balanceResult;
+    try {
+        balanceResult = await getFazerCardsBalance(adapter);
+    } catch (err) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerRequestId: err.requestId || null,
+            providerErrorCode: 'FAZERCARDS_BALANCE_UNKNOWN',
+            providerErrorMessage: 'FazerCards balance could not be checked; provider execution requires manual review.',
+            rawResponse: err.providerBody || { errorCode: err.code || 'FAZERCARDS_BALANCE_UNKNOWN', message: err.safeUpstreamMessage || err.message },
+        });
+    }
+
+    const balance = Number(balanceResult?.balance);
+    if (!Number.isFinite(balance)) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerRequestId: balanceResult?.requestId || null,
+            providerErrorCode: 'FAZERCARDS_BALANCE_UNKNOWN',
+            providerErrorMessage: 'FazerCards balance response did not include a valid balance.',
+            rawResponse: balanceResult?.raw || { balance: balanceResult?.balance ?? null },
+        });
+    }
+    if (balance < totalProviderCost) {
+        return buildCodeDeliveryRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_INSUFFICIENT_PROVIDER_BALANCE',
+            providerErrorMessage: 'FazerCards balance is insufficient for this code-delivery order.',
+            rawResponse: { gate: 'FAZERCARDS_BALANCE_PREFLIGHT', balance, totalProviderCost },
+        });
+    }
+
+    let response;
+    try {
+        if (familyKey === 'GIFTCARDS') {
+            const payload = contractPayload.payload;
+            response = await adapter.client.createGiftCardOrder({
+                categoryId: payload.category_id,
+                cardId: payload.card_id,
+                quantity: payload.quantity,
+                idempotencyKey: providerIdempotencyKey,
+            });
+        } else {
+            const payload = contractPayload.payload;
+            response = await adapter.client.createGameKeyOrder({
+                gameId: payload.game_id,
+                keyId: payload.key_id,
+                quantity: payload.quantity,
+                idempotencyKey: providerIdempotencyKey,
+            });
+        }
+    } catch (err) {
+        const httpStatus = Number(err.httpStatus || err.statusCode || 0);
+        const retryUnsafe = err.code === 'FAZERCARDS_TIMEOUT'
+            || err.code === 'FAZERCARDS_NETWORK_ERROR'
+            || httpStatus === 0
+            || httpStatus === 429
+            || httpStatus >= 500;
+
+        if (retryUnsafe) {
+            return buildCodeDeliveryManualReviewResult({
+                providerIdempotencyKey,
+                providerRequestId: err.requestId || null,
+                providerErrorCode: err.code || 'FAZERCARDS_CODE_DELIVERY_UNKNOWN',
+                providerErrorMessage: 'FazerCards code-delivery order outcome is uncertain and requires manual review.',
+                rawResponse: err.providerBody || { errorCode: err.code || 'FAZERCARDS_CODE_DELIVERY_UNKNOWN', message: err.safeUpstreamMessage || err.message },
+            });
+        }
+
+        return buildCodeDeliveryRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: err.code || 'FAZERCARDS_CODE_DELIVERY_REJECTED',
+            providerErrorMessage: err.safeUpstreamMessage || err.message || 'FazerCards code-delivery order was rejected.',
+            rawResponse: err.providerBody || { errorCode: err.code, message: err.safeUpstreamMessage || err.message },
+        });
+    }
+
+    const data = response?.data || {};
+    const parsed = fazerCardsContracts.parseResponseForFamily(familyKey, data);
+    let codeStorage = {
+        deliveredCodeCount: 0,
+        hasPin: false,
+        hasSerial: false,
+        storedEncrypted: false,
+    };
+    if (parsed.status !== fazerCardsContracts.PARSED_STATUSES.FAILED) {
+        codeStorage = await storeDeliveredCodesForOrder({
+            order,
+            providerDoc,
+            providerProduct,
+            product,
+            familyKey,
+            rawResponse: data,
+        });
+    }
+
+    const base = {
+        success: parsed.status !== fazerCardsContracts.PARSED_STATUSES.FAILED,
+        manualReview: parsed.status === fazerCardsContracts.PARSED_STATUSES.MANUAL_REVIEW,
+        providerOrderId: parsed.providerOrderId || null,
+        providerStatus: parsed.providerStatus,
+        providerRequestId: response?.requestId || null,
+        providerIdempotencyKey,
+        providerErrorCode: parsed.status === fazerCardsContracts.PARSED_STATUSES.MANUAL_REVIEW ? (parsed.code || 'FAZERCARDS_CODE_DELIVERY_MANUAL_REVIEW') : null,
+        providerErrorMessage: parsed.warnings?.[0] || null,
+        rawResponse: {
+            ...sanitizeProviderCodePayload(data),
+            deliveredCodeCount: codeStorage.deliveredCodeCount,
+            storedEncrypted: codeStorage.storedEncrypted,
+        },
+        errorMessage: parsed.warnings?.[0] || null,
+    };
+
+    if (parsed.status === fazerCardsContracts.PARSED_STATUSES.COMPLETED && codeStorage.deliveredCodeCount <= 0) {
+        return {
+            ...base,
+            success: false,
+            manualReview: true,
+            providerErrorCode: 'FAZERCARDS_CODE_DELIVERY_CODE_MISSING',
+            providerErrorMessage: 'Provider response did not contain a recognized code payload.',
+            errorMessage: 'Provider response did not contain a recognized code payload.',
+        };
+    }
+
+    if (parsed.status === fazerCardsContracts.PARSED_STATUSES.PROCESSING) {
+        return { ...base, success: true, providerStatus: 'Pending' };
+    }
+
+    if (parsed.status === fazerCardsContracts.PARSED_STATUSES.FAILED) {
+        return {
+            ...base,
+            success: false,
+            manualReview: false,
+            providerStatus: 'Cancelled',
+            providerErrorCode: base.providerErrorCode || 'FAZERCARDS_CODE_DELIVERY_ORDER_FAILED',
+            providerErrorMessage: base.providerErrorMessage || 'FazerCards code-delivery order failed.',
+            errorMessage: base.errorMessage || 'FazerCards code-delivery order failed.',
+        };
+    }
+
+    if (parsed.status === fazerCardsContracts.PARSED_STATUSES.MANUAL_REVIEW) {
+        return {
+            ...base,
+            success: false,
+            manualReview: true,
+            providerErrorCode: base.providerErrorCode || 'FAZERCARDS_CODE_DELIVERY_MANUAL_REVIEW',
+            providerErrorMessage: base.providerErrorMessage || 'FazerCards code-delivery order requires manual review.',
+        };
+    }
+
+    return { ...base, success: true, providerStatus: 'Completed' };
+};
+
 const buildProviderResultUpdate = (result = {}) => {
     const update = {
         providerOrderId: result.providerOrderId,
@@ -333,7 +663,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     try {
 
     const order = await Order.findById(orderId)
-        .populate('productId', 'name providerProduct providerMapping provider providerCode providerExecutionEnabled fulfillmentMode');
+        .populate('productId', 'name providerProduct providerMapping provider providerCode providerExecutionEnabled providerExecutionMode providerExecutionBlocked providerBlockReason familyKey fulfillmentMode');
     if (!order) {
         console.error(`[Fulfillment] executeOrder: order ${orderId} not found`);
         return { order: null, placed: false, refunded: false };
@@ -421,7 +751,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     try {
         if (order.productId?.providerProduct) {
             providerProduct = await ProviderProduct.findById(order.productId.providerProduct)
-                .select('externalProductId rawPayload providerCode category offerId fulfillmentMode isSupported isBlocked requiredFields costPrice rawPrice')
+                .select('externalProductId rawPayload providerCode familyKey category categoryName offerId offerName fulfillmentMode supportLevel executionBlocked isSupported isBlocked blockReason requiredFields costPrice rawPrice currency stock minQty maxQty')
                 .lean();
             externalProductId = providerProduct?.externalProductId ?? null;
         }
@@ -441,6 +771,15 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
 
     let result;
     try {
+        const useFazerCardsCodeDelivery = isFazerCardsCodeDeliveryOrder(order.productId, providerProduct);
+        if (useFazerCardsCodeDelivery) {
+            result = await placeFazerCardsCodeDeliveryOrder({
+                order,
+                product: order.productId,
+                providerProduct,
+                adapter: resolvedProvider,
+            });
+        } else {
         if (!externalProductId) {
             const missingExternalIdError = new Error('Provider product externalProductId is missing');
             missingExternalIdError.providerBody = {
@@ -468,6 +807,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             providerProduct,
             ...mappedCustomerFields,   // ← spread translated customer fields onto params
         });
+        }
     } catch (err) {
         // Classify the error: transient (network/timeout) vs hard rejection.
         //
@@ -495,7 +835,6 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 rawResponse: { message: err.message, isTransient: true },
                 errorMessage: err.message,
             };
-            result.providerStatus = 'Cancelled';
         } else {
             // Hard failure: provider explicitly rejected or gave an unexpected error.
             result = {
@@ -508,7 +847,19 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         }
     }
 
-    console.log(`[Fulfillment] Provider response for order ${orderId}:`, JSON.stringify(result));
+    const logResult = isFazerCardsCodeDeliveryOrder(order.productId, providerProduct)
+        ? {
+            success: result?.success,
+            manualReview: result?.manualReview,
+            providerStatus: result?.providerStatus,
+            providerOrderId: result?.providerOrderId || null,
+            providerRequestId: result?.providerRequestId || null,
+            providerErrorCode: result?.providerErrorCode || null,
+            deliveredCodeCount: result?.rawResponse?.deliveredCodeCount || 0,
+            storedEncrypted: result?.rawResponse?.storedEncrypted === true,
+        }
+        : result;
+    console.log(`[Fulfillment] Provider response for order ${orderId}:`, JSON.stringify(logResult));
 
     // ── Interpret result ───────────────────────────────────────────────────────
     let newStatus;

@@ -12,6 +12,8 @@ const fazerCardsCatalogSvc = require('../providers/fazercards/fazercardsCatalog.
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
+const { createAuditLog } = require('../audit/audit.service');
+const { ORDER_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 
 // GET /admin/providers
 const listProviders = catchAsync(async (req, res) => {
@@ -269,6 +271,31 @@ const getFazerCardsDeliveredCodeDebug = catchAsync(async (req, res) => {
     sendSuccess(res, { debug }, 'FazerCards delivered code debug retrieved');
 });
 
+const storeFazerCardsManualDeliveredCode = catchAsync(async (req, res) => {
+    const result = await fazerCardsCatalogSvc.storeManualDeliveredCode({
+        orderId: req.params.orderId,
+        ...req.body,
+    });
+    createAuditLog({
+        actorId: req.user?._id,
+        actorRole: ACTOR_ROLES.ADMIN,
+        ipAddress: req.ip ?? null,
+        userAgent: req.get('User-Agent') ?? null,
+        action: ORDER_ACTIONS.MANUAL_REVIEW,
+        entityType: ENTITY_TYPES.ORDER,
+        entityId: req.params.orderId,
+        metadata: {
+            action: 'admin_manual_delivered_code_stored',
+            deliveredCodeId: result.id,
+            hasCode: result.hasCode,
+            hasPin: result.hasPin,
+            hasSerial: result.hasSerial,
+            storedEncrypted: result.storedEncrypted,
+        },
+    });
+    sendSuccess(res, { deliveredCode: result }, 'FazerCards delivered code stored securely');
+});
+
 const syncFazerCardsOrderStatus = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.syncOrderStatus(req.params.orderId);
     sendSuccess(res, data, 'FazerCards order status synced');
@@ -324,6 +351,7 @@ module.exports = {
     getFazerCardsCodeDeliveryLivePilotDebug,
     listFazerCardsCodeDeliveryPilotCodes,
     getFazerCardsDeliveredCodeDebug,
+    storeFazerCardsManualDeliveredCode,
     syncFazerCardsOrderStatus,
     getFazerCardsOrderProviderDebug,
 };
