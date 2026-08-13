@@ -19,6 +19,7 @@ const { WalletTransaction } = require('../modules/wallet/walletTransaction.model
 const { User } = require('../modules/users/user.model');
 const productService = require('../modules/products/product.service');
 const fazerCardsCatalogSvc = require('../modules/providers/fazercards/fazercardsCatalog.service');
+const fazerCardsContracts = require('../modules/providers/fazercards/fazercardsContracts');
 const { FazerCardsClient } = require('../modules/providers/fazercards/fazercards.client');
 const { ProviderDeliveredCode } = require('../modules/providers/fazercards/providerDeliveredCode.model');
 const { ProviderPilotOrder } = require('../modules/providers/fazercards/providerPilotOrder.model');
@@ -459,6 +460,133 @@ describe('FazerCards client foundation', () => {
 
         expect(() => fazer.getTopupOrderStatus({ providerOrderId: 'fc_order_1' }))
             .toThrow(/status endpoint is not confirmed/);
+    });
+});
+
+describe('FazerCards family contracts', () => {
+    it('lists all known family contracts and summarizes support stages', () => {
+        const contracts = fazerCardsContracts.listContracts();
+        const familyKeys = contracts.map((contract) => contract.familyKey);
+        expect(familyKeys).toEqual(expect.arrayContaining([
+            'TOPUPS',
+            'GIFTCARDS',
+            'GAME_KEYS',
+            'TELEGRAM',
+            'STEAM_TOPUP',
+            'MANUAL_SERVICES',
+            'STEAM_GIFTS',
+        ]));
+
+        const summary = fazerCardsContracts.getContractSummary();
+        expect(summary.families.TOPUPS.supportStage).toBe('PILOT_READY');
+        expect(summary.families.GIFTCARDS.executionStage).toBe('ADMIN_PILOT_ONLY');
+        expect(summary.families.STEAM_GIFTS.supportStage).toBe('DISABLED_UNAVAILABLE');
+        expect(summary.nextBestExecutionOrder).toEqual(expect.arrayContaining(['GIFTCARDS', 'GAME_KEYS', 'TOPUPS']));
+    });
+
+    it('service exposes contract list, one contract, and summary without provider calls', () => {
+        const list = fazerCardsCatalogSvc.listContracts();
+        const single = fazerCardsCatalogSvc.getContract('giftcards');
+        const summary = fazerCardsCatalogSvc.getContractsSummary();
+
+        expect(list.contracts).toHaveLength(7);
+        expect(single.contract).toMatchObject({
+            familyKey: 'GIFTCARDS',
+            fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+            supportStage: 'PILOT_READY',
+        });
+        expect(summary.families.TELEGRAM.supportStage).toBe('IMPORT_READY');
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('builds confirmed TOPUPS payloads and preserves numeric-looking IDs as strings', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct();
+        const built = fazerCardsContracts.buildPayloadFromContract({
+            familyKey: 'TOPUPS',
+            providerProduct: providerProduct.toObject(),
+            fields: { user_id: '00123456789' },
+        });
+
+        expect(built).toMatchObject({
+            success: true,
+            wouldCall: 'POST /topups/order',
+            payload: {
+                category_id: '8_ball_pool',
+                offer_id: 'golden_spin',
+                fields: { user_id: '00123456789' },
+            },
+        });
+        expect(typeof built.payload.fields.user_id).toBe('string');
+    });
+
+    it('builds confirmed GIFTCARDS and GAME_KEYS payloads', async () => {
+        const { providerProduct: giftCard } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
+        const { providerProduct: gameKey } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GAME_KEYS' });
+
+        const giftCardPayload = fazerCardsContracts.buildPayloadFromContract({
+            familyKey: 'GIFTCARDS',
+            providerProduct: giftCard.toObject(),
+            quantity: 2,
+        });
+        const gameKeyPayload = fazerCardsContracts.buildPayloadFromContract({
+            familyKey: 'GAME_KEYS',
+            providerProduct: gameKey.toObject(),
+            quantity: 1,
+        });
+
+        expect(giftCardPayload).toMatchObject({
+            success: true,
+            wouldCall: 'POST /giftcards/order',
+            payload: { category_id: 'acash_my', card_id: '10_myr', quantity: 2 },
+        });
+        expect(gameKeyPayload).toMatchObject({
+            success: true,
+            wouldCall: 'POST /gamekeys/order',
+            payload: { game_id: 'against_the_storm_cis', key_id: 'keepers_of_the_stone', quantity: 1 },
+        });
+    });
+
+    it.each(['TELEGRAM', 'STEAM_TOPUP', 'MANUAL_SERVICES'])('%s payload contract is unconfirmed', async (familyKey) => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey });
+        const built = fazerCardsContracts.buildPayloadFromContract({
+            familyKey,
+            providerProduct: providerProduct.toObject(),
+            fields: { telegram_username: 'pilot_user' },
+            quantity: 1,
+        });
+
+        expect(built).toMatchObject({
+            success: false,
+            dryRun: false,
+            code: 'CONTRACT_UNCONFIRMED',
+            wouldCall: null,
+            payload: null,
+        });
+    });
+
+    it('response parsers keep delivered code plaintext out of parsed safe results', () => {
+        const parsed = fazerCardsContracts.parseGiftCardResponse({
+            ok: true,
+            order: { id: 'fgc_1', status: 'completed' },
+            cards: [{ code: 'SECRET-CODE-123', pin: 'PIN-999', serial: 'SERIAL-1' }],
+        });
+        const serialized = JSON.stringify(parsed);
+
+        expect(parsed.status).toBe('COMPLETED');
+        expect(parsed.deliveredCodeCount).toBe(1);
+        expect(parsed.hasPin).toBe(true);
+        expect(parsed.hasSerial).toBe(true);
+        expect(serialized).not.toContain('SECRET-CODE-123');
+        expect(serialized).not.toContain('PIN-999');
+        expect(serialized).not.toContain('SERIAL-1');
+        expect(serialized).toContain('[REDACTED_CODE]');
+
+        const unconfirmed = fazerCardsContracts.parseTelegramResponse({ order: { id: 'tg_1', status: 'success' } });
+        expect(unconfirmed).toMatchObject({
+            status: 'MANUAL_REVIEW',
+            code: 'CONTRACT_UNCONFIRMED',
+            manualReview: true,
+        });
     });
 });
 
@@ -1651,7 +1779,7 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
         expect(await WalletTransaction.countDocuments({})).toBe(0);
     });
 
-    it('unified dry-run previews unimplemented families without provider order endpoints', async () => {
+    it('unified dry-run refuses unconfirmed family contracts without provider order endpoints', async () => {
         const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
         const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
             sellPrice: 1.75,
@@ -1665,22 +1793,27 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
         });
 
         expect(result).toMatchObject({
-            success: true,
-            dryRun: true,
+            success: false,
+            dryRun: false,
+            code: 'CONTRACT_UNCONFIRMED',
             wouldCall: null,
             executionAvailable: false,
+            contract: {
+                familyKey: 'TELEGRAM',
+                supportStage: 'IMPORT_READY',
+                executionStage: 'NONE',
+                providerPayloadSchema: { confirmed: false },
+            },
             product: {
                 familyKey: 'TELEGRAM',
                 fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
                 providerExecutionEnabled: false,
                 providerExecutionBlocked: true,
             },
-            payload: {
-                product: 'telegram_stars',
-                quantity: 25,
-                fields: { telegram_username: 'pilot_user' },
-            },
+            payload: null,
         });
+        expect(result.blockers).toContain('Provider order endpoint and payload shape are unconfirmed.');
+        expect(result.warnings).toContain('Dry run was not built because this FazerCards family contract is unconfirmed.');
         expect(result.warnings).toContain('Telegram live execution is not implemented yet.');
         expect(axios.create).not.toHaveBeenCalled();
         expect(await Order.countDocuments({})).toBe(0);
@@ -1702,6 +1835,15 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
             readyForLiveExecution: false,
             familyKey: 'STEAM_TOPUP',
             fulfillmentMode: FULFILLMENT_MODES.STEAM_TOPUP_WITH_LOGIN,
+            supportStage: 'IMPORT_READY',
+            executionStage: 'NONE',
+            canCustomerPurchase: false,
+            canLivePilot: false,
+            contract: {
+                familyKey: 'STEAM_TOPUP',
+                riskLevel: 'HIGH',
+                providerPayloadSchema: { confirmed: false },
+            },
             checks: {
                 familyCatalogSupported: true,
                 executionImplemented: false,
@@ -1716,6 +1858,8 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
                 requiredFieldKeys: ['steamLogin'],
             },
         });
+        expect(result.blockers).toContain('Steam top-up execution contract is unconfirmed.');
+        expect(result.requiredCapabilities).toContain('Official Steam top-up input and execution contract confirmation');
         expect(result.warnings).toContain('Steam Wallet Top-up live execution is not implemented yet.');
         expect(axios.create).not.toHaveBeenCalled();
     });

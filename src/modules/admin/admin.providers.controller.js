@@ -181,6 +181,21 @@ const getFazerCardsCatalogSummary = catchAsync(async (req, res) => {
     sendSuccess(res, data, 'FazerCards catalog summary retrieved');
 });
 
+const listFazerCardsContracts = catchAsync(async (req, res) => {
+    const data = fazerCardsCatalogSvc.listContracts();
+    sendSuccess(res, data, 'FazerCards contracts retrieved');
+});
+
+const getFazerCardsContractsSummary = catchAsync(async (req, res) => {
+    const data = fazerCardsCatalogSvc.getContractsSummary();
+    sendSuccess(res, data, 'FazerCards contract summary retrieved');
+});
+
+const getFazerCardsContract = catchAsync(async (req, res) => {
+    const data = fazerCardsCatalogSvc.getContract(req.params.familyKey);
+    sendSuccess(res, data, 'FazerCards contract retrieved');
+});
+
 const backfillFazerCardsCatalogFamilies = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.backfillLegacyFamilies();
     sendSuccess(res, data, 'FazerCards legacy catalog families backfilled');
@@ -292,6 +307,9 @@ module.exports = {
     syncFazerCardsCatalogFamily,
     syncFazerCardsCatalogAll,
     getFazerCardsCatalogSummary,
+    listFazerCardsContracts,
+    getFazerCardsContractsSummary,
+    getFazerCardsContract,
     backfillFazerCardsCatalogFamilies,
     listFazerCardsProviderProducts,
     getFazerCardsProviderProductDetails,
