@@ -116,6 +116,22 @@ const createProductValidation = [
         .isIn(Object.values(PROVIDER_EXECUTION_MODES))
         .withMessage(`providerExecutionMode must be one of: ${Object.values(PROVIDER_EXECUTION_MODES).join(', ')}`),
 
+    body('providerExecutionBlocked')
+        .optional()
+        .isBoolean().withMessage('providerExecutionBlocked must be a boolean'),
+
+    body('providerBlockReason')
+        .optional({ nullable: true })
+        .isString().trim().isLength({ max: 200 }).withMessage('providerBlockReason must be a string up to 200 characters'),
+
+    body('familyKey')
+        .optional({ nullable: true })
+        .isString().trim().isLength({ max: 80 }).withMessage('familyKey must be a string up to 80 characters'),
+
+    body('fulfillmentMode')
+        .optional({ nullable: true })
+        .isString().trim().isLength({ max: 80 }).withMessage('fulfillmentMode must be a string up to 80 characters'),
+
     body('provider')
         .optional({ nullable: true })
         .isMongoId().withMessage('provider must be a valid ObjectId'),
@@ -239,6 +255,22 @@ const publishProductValidation = [
         .optional()
         .isIn(Object.values(PROVIDER_EXECUTION_MODES))
         .withMessage(`providerExecutionMode must be one of: ${Object.values(PROVIDER_EXECUTION_MODES).join(', ')}`),
+
+    body('providerExecutionBlocked')
+        .optional()
+        .isBoolean().withMessage('providerExecutionBlocked must be a boolean'),
+
+    body('providerBlockReason')
+        .optional({ nullable: true })
+        .isString().trim().isLength({ max: 200 }).withMessage('providerBlockReason must be a string up to 200 characters'),
+
+    body('familyKey')
+        .optional({ nullable: true })
+        .isString().trim().isLength({ max: 80 }).withMessage('familyKey must be a string up to 80 characters'),
+
+    body('fulfillmentMode')
+        .optional({ nullable: true })
+        .isString().trim().isLength({ max: 80 }).withMessage('fulfillmentMode must be a string up to 80 characters'),
 ];
 
 // ─── Admin: update product ────────────────────────────────────────────────────
@@ -339,6 +371,22 @@ const updateProductValidation = [
         .optional()
         .isIn(Object.values(PROVIDER_EXECUTION_MODES))
         .withMessage(`providerExecutionMode must be one of: ${Object.values(PROVIDER_EXECUTION_MODES).join(', ')}`),
+
+    body('providerExecutionBlocked')
+        .optional()
+        .isBoolean().withMessage('providerExecutionBlocked must be a boolean'),
+
+    body('providerBlockReason')
+        .optional({ nullable: true })
+        .isString().trim().isLength({ max: 200 }).withMessage('providerBlockReason must be a string up to 200 characters'),
+
+    body('familyKey')
+        .optional({ nullable: true })
+        .isString().trim().isLength({ max: 80 }).withMessage('familyKey must be a string up to 80 characters'),
+
+    body('fulfillmentMode')
+        .optional({ nullable: true })
+        .isString().trim().isLength({ max: 80 }).withMessage('fulfillmentMode must be a string up to 80 characters'),
 
     body('provider')
         .optional({ nullable: true })

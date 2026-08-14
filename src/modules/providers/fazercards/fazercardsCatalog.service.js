@@ -47,8 +47,55 @@ const UNIMPLEMENTED_FAMILY_BLOCK_REASONS = Object.freeze({
     MANUAL_SERVICES: 'MANUAL_SERVICE_EXECUTION_NOT_IMPLEMENTED',
     STEAM_GIFTS: 'STEAM_GIFTS_CATALOG_UNAVAILABLE',
 });
+const IMPORTED_PRODUCT_LAUNCH_SELECT = '_id name providerProduct isActive visibleInStore status customerPurchaseEnabled providerExecutionMode providerExecutionEnabled providerExecutionBlocked providerBlockReason familyKey fulfillmentMode';
 let syncAllInProgress = false;
 let lastSyncAllSummary = null;
+
+const buildCustomerVisibilityStatus = (product = {}) => {
+    const status = String(product?.status || '').trim().toLowerCase();
+    const reasons = [];
+
+    if (product?.deletedAt) reasons.push('deletedAt=set');
+    if (product?.isActive !== true) reasons.push('isActive=false');
+    if (product?.visibleInStore === false) reasons.push('visibleInStore=false');
+    if (status !== PRODUCT_STATUSES.AVAILABLE) reasons.push(`status=${status || 'missing'}`);
+    if (product?.customerPurchaseEnabled !== true) reasons.push('customerPurchaseEnabled=false');
+    if (product?.isPaused === true) reasons.push('isPaused=true');
+    if (product?.isAvailableForApi === false) reasons.push('isAvailableForApi=false');
+
+    return {
+        visibleToCustomer: reasons.length === 0,
+        reasons,
+    };
+};
+
+const summarizeImportedLaunchProduct = (product = null) => {
+    if (!product) return null;
+    const visibility = buildCustomerVisibilityStatus(product);
+    return {
+        id: product._id,
+        name: product.name,
+        isActive: product.isActive === true,
+        visibleInStore: product.visibleInStore !== false,
+        status: product.status || null,
+        customerPurchaseEnabled: product.customerPurchaseEnabled === true,
+        providerExecutionMode: product.providerExecutionMode || null,
+        providerExecutionEnabled: product.providerExecutionEnabled === true,
+        providerExecutionBlocked: product.providerExecutionBlocked === true,
+        providerBlockReason: product.providerBlockReason || null,
+        familyKey: product.familyKey || null,
+        fulfillmentMode: product.fulfillmentMode || null,
+        visibleToCustomer: visibility.visibleToCustomer,
+        visibilityReasons: visibility.reasons,
+        customerVisibilityStatus: visibility,
+    };
+};
+
+const diffLaunchFields = (product = {}, update = {}) => (
+    Object.entries(update)
+        .filter(([key, value]) => String(product?.[key] ?? '') !== String(value ?? ''))
+        .map(([key]) => key)
+);
 
 const findFazerCardsProvider = () => Provider.findOne({
     deletedAt: null,
@@ -902,7 +949,7 @@ const listProviderProducts = async ({
         const importedProducts = await Product.find({
             providerProduct: { $ne: null },
             deletedAt: null,
-        }).select('_id name providerProduct isActive visibleInStore status').lean();
+        }).select(IMPORTED_PRODUCT_LAUNCH_SELECT).lean();
         importedProductMap = new Map(importedProducts.map((product) => [
             String(product.providerProduct),
             product,
@@ -945,7 +992,7 @@ const listProviderProducts = async ({
         const importedProducts = await Product.find({
             providerProduct: { $in: products.map((product) => product._id) },
             deletedAt: null,
-        }).select('_id name providerProduct isActive visibleInStore status').lean();
+        }).select(IMPORTED_PRODUCT_LAUNCH_SELECT).lean();
         importedProductMap = new Map(importedProducts.map((product) => [
             String(product.providerProduct),
             product,
@@ -958,13 +1005,7 @@ const listProviderProducts = async ({
             return {
                 ...product,
                 imported: Boolean(importedProduct),
-                importedProduct: importedProduct ? {
-                    id: importedProduct._id,
-                    name: importedProduct.name,
-                    isActive: importedProduct.isActive,
-                    visibleInStore: importedProduct.visibleInStore,
-                    status: importedProduct.status,
-                } : null,
+                importedProduct: summarizeImportedLaunchProduct(importedProduct),
             };
         }),
         pagination: {
@@ -1074,7 +1115,15 @@ const getProviderProductDetails = async (id) => {
         providerCode: PROVIDER_CODES.FAZER_CARDS,
     }).populate('provider', 'name slug providerCode').lean();
     if (!product) throw new NotFoundError('ProviderProduct');
-    return product;
+    const importedProduct = await Product.findOne({
+        providerProduct: product._id,
+        deletedAt: null,
+    }).select(IMPORTED_PRODUCT_LAUNCH_SELECT).lean();
+    return {
+        ...product,
+        imported: Boolean(importedProduct),
+        importedProduct: summarizeImportedLaunchProduct(importedProduct),
+    };
 };
 
 const PRODUCT_FIELD_TYPES = new Set(['text', 'textarea', 'number', 'select', 'url', 'email', 'tel', 'date']);
@@ -3392,21 +3441,38 @@ const bulkUpdateLaunchControls = async (payload = {}, adminId = null, auditConte
 
         const validation = validateBulkLaunchProductUpdate(product, payload);
         const update = validation.ok ? buildBulkLaunchUpdateSet(product, payload, validation.requestedMode) : {};
+        const simulatedProduct = validation.ok ? { ...product, ...update } : product;
+        const visibility = buildCustomerVisibilityStatus(simulatedProduct);
+        const changedFields = validation.ok ? diffLaunchFields(product, update) : [];
         results.push({
             productId,
             productName: product.name,
             ok: validation.ok,
+            success: validation.ok,
             familyKey: validation.familyKey,
             requestedMode: validation.requestedMode,
             contract: validation.contract,
             errors: validation.errors,
+            changedFields,
+            visibleToCustomer: visibility.visibleToCustomer,
+            visibilityReasons: visibility.reasons,
+            customerVisibilityStatus: visibility,
             update,
         });
     }
 
     if (!dryRun) {
         for (const result of results.filter((item) => item.ok)) {
-            await Product.findByIdAndUpdate(result.productId, { $set: result.update }, { runValidators: true });
+            const updatedProduct = await Product.findByIdAndUpdate(
+                result.productId,
+                { $set: result.update },
+                { new: true, runValidators: true }
+            ).lean();
+            const visibility = buildCustomerVisibilityStatus(updatedProduct);
+            result.visibleToCustomer = visibility.visibleToCustomer;
+            result.visibilityReasons = visibility.reasons;
+            result.customerVisibilityStatus = visibility;
+            result.importedProduct = summarizeImportedLaunchProduct(updatedProduct);
             await createAuditLog({
                 actorId: adminId || result.productId,
                 actorRole: ACTOR_ROLES.ADMIN,
@@ -3433,6 +3499,29 @@ const bulkUpdateLaunchControls = async (payload = {}, adminId = null, auditConte
         wouldUpdate: dryRun ? successful : 0,
         failed: results.length - successful,
         results,
+    };
+};
+
+const updateSingleProductLaunchControls = async (productId, payload = {}, adminId = null, auditContext = {}) => {
+    const result = await bulkUpdateLaunchControls({
+        ...payload,
+        productIds: [productId],
+        dryRun: false,
+    }, adminId, auditContext);
+    const productResult = result.results[0];
+    if (!productResult?.ok) {
+        const firstError = productResult?.errors?.[0] || {};
+        throw new BusinessRuleError(
+            firstError.message || 'FazerCards product launch settings are invalid.',
+            firstError.code || 'FAZERCARDS_LAUNCH_UPDATE_INVALID'
+        );
+    }
+
+    return {
+        success: true,
+        product: productResult.importedProduct,
+        result: productResult,
+        launchStatus: productResult.customerVisibilityStatus,
     };
 };
 
@@ -3586,6 +3675,7 @@ module.exports = {
     failManualOrder,
     addManualOrderNote,
     bulkUpdateLaunchControls,
+    updateSingleProductLaunchControls,
     syncOrderStatus,
     getOrderProviderDebug,
 };

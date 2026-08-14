@@ -3234,6 +3234,158 @@ describe('FazerCards Phase 9 launch operations', () => {
         });
     });
 
+    it('admin product update persists FazerCards launch metadata and reports customer visibility status', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.75,
+            name: 'Telegram Admin Edit Candidate',
+        });
+
+        const updated = await productService.updateProduct(product._id, {
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            customerPurchaseEnabled: true,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+            providerExecutionEnabled: false,
+            providerExecutionBlocked: true,
+            providerBlockReason: 'TELEGRAM_EXECUTION_NOT_IMPLEMENTED',
+            familyKey: 'TELEGRAM',
+            fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
+        });
+        const persisted = await Product.findById(product._id).lean();
+        const response = productService.attachCustomerVisibilityStatus(updated);
+
+        expect(persisted).toMatchObject({
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            customerPurchaseEnabled: true,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+            providerExecutionEnabled: false,
+            providerExecutionBlocked: true,
+            providerBlockReason: 'TELEGRAM_EXECUTION_NOT_IMPLEMENTED',
+            familyKey: 'TELEGRAM',
+            fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
+        });
+        expect(response.customerVisibilityStatus).toEqual({
+            visibleToCustomer: true,
+            reasons: [],
+        });
+    });
+
+    it('imported provider product listing includes linked Winnie Product launch metadata', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.75,
+            name: 'Telegram Imported Metadata Candidate',
+        });
+        await fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+        });
+
+        const listed = await fazerCardsCatalogSvc.listProviderProducts({ imported: 'true', familyKey: 'TELEGRAM' });
+        const importedProduct = listed.products[0].importedProduct;
+
+        expect(importedProduct).toMatchObject({
+            id: product._id,
+            name: 'Telegram Imported Metadata Candidate',
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            customerPurchaseEnabled: true,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+            visibleToCustomer: true,
+            visibilityReasons: [],
+        });
+    });
+
+    it('single product launch applies valid manual launch controls and returns visibility details', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.75,
+            name: 'Telegram Single Launch Candidate',
+        });
+
+        const result = await fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+        });
+        const updated = await Product.findById(product._id).lean();
+
+        expect(result).toMatchObject({
+            success: true,
+            launchStatus: { visibleToCustomer: true, reasons: [] },
+            result: {
+                success: true,
+                productId: product._id.toString(),
+                productName: 'Telegram Single Launch Candidate',
+                visibleToCustomer: true,
+                visibilityReasons: [],
+            },
+        });
+        expect(result.result.changedFields).toEqual(expect.arrayContaining([
+            'customerPurchaseEnabled',
+            'isActive',
+            'visibleInStore',
+            'status',
+        ]));
+        expect(updated.customerPurchaseEnabled).toBe(true);
+        expect(updated.status).toBe(PRODUCT_STATUSES.AVAILABLE);
+    });
+
+    it('single product launch rejects invalid auto execution by family contract', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.75,
+            name: 'Telegram Invalid Auto Candidate',
+        });
+
+        await expect(fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'AUTO_PROVIDER',
+        })).rejects.toMatchObject({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED' });
+    });
+
+    it('bulk launch returns per-product customer visibility reasons', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.75,
+            name: 'Telegram Bulk Visibility Candidate',
+        });
+
+        const result = await fazerCardsCatalogSvc.bulkUpdateLaunchControls({
+            productIds: [product._id.toString()],
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: false,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+            dryRun: true,
+        });
+
+        expect(result.results[0]).toMatchObject({
+            success: true,
+            visibleToCustomer: false,
+            visibilityReasons: ['visibleInStore=false'],
+        });
+        expect(result.results[0].changedFields).toEqual(expect.arrayContaining([
+            'customerPurchaseEnabled',
+            'isActive',
+            'status',
+        ]));
+    });
+
     it('catalog sync status reports in-progress flag, last sync, and current summary without order calls', async () => {
         const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
 

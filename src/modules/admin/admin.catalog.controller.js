@@ -245,7 +245,8 @@ const sanitizeAdminProductResponse = (payload, user) => {
     const source = isSupervisorRole(user)
         ? addSupervisorCurrentLinkageSummary(payload)
         : payload;
-    const sanitized = sanitizePricingForSupervisor(source, user);
+    const withVisibility = productService.attachCustomerVisibilityStatus(source);
+    const sanitized = sanitizePricingForSupervisor(withVisibility, user);
     return isSupervisorRole(user)
         ? stripSupervisorAdminProductPriceFields(sanitized)
         : sanitized;

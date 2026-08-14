@@ -63,6 +63,47 @@ const dynamicFieldsFromOrderFields = (orderFields = []) => (
     }))
 );
 
+const buildCustomerVisibilityStatus = (product = {}) => {
+    const obj = product && typeof product.toObject === 'function' ? product.toObject() : (product || {});
+    const status = String(obj.status || '').trim().toLowerCase();
+    const providerCode = String(
+        obj.providerCode
+        || obj.provider?.providerCode
+        || obj.provider?.code
+        || obj.provider?.slug
+        || ''
+    ).trim().toUpperCase().replace(/-/g, '_');
+    const isFazerCards = providerCode === PROVIDER_CODES.FAZER_CARDS || providerCode === 'FAZERCARDS';
+    const reasons = [];
+
+    if (obj.deletedAt) reasons.push('deletedAt=set');
+    if (obj.isActive !== true) reasons.push('isActive=false');
+    if (obj.visibleInStore === false) reasons.push('visibleInStore=false');
+    if (isFazerCards && status !== PRODUCT_STATUSES.AVAILABLE) reasons.push(`status=${status || 'missing'}`);
+    if (isFazerCards && obj.customerPurchaseEnabled !== true) reasons.push('customerPurchaseEnabled=false');
+    if (obj.isPaused === true) reasons.push('isPaused=true');
+    if (obj.isAvailableForApi === false) reasons.push('isAvailableForApi=false');
+
+    return {
+        visibleToCustomer: reasons.length === 0,
+        reasons,
+    };
+};
+
+const attachCustomerVisibilityStatus = (payload) => {
+    if (Array.isArray(payload)) return payload.map(attachCustomerVisibilityStatus);
+    if (!payload || typeof payload !== 'object' || payload instanceof Date || Buffer.isBuffer(payload)) return payload;
+
+    const obj = typeof payload.toObject === 'function'
+        ? payload.toObject({ getters: true, virtuals: false, flattenMaps: true })
+        : { ...payload };
+
+    return {
+        ...obj,
+        customerVisibilityStatus: buildCustomerVisibilityStatus(obj),
+    };
+};
+
 const assertProviderProductAllowedForCustomerCatalog = (pp) => {
     if (!pp) return;
 
@@ -586,6 +627,7 @@ const updateProduct = async (productId, updates) => {
         'basePrice', 'minQty', 'maxQty', 'pricingMode', 'markupType', 'markupValue',
         'executionType', 'providerExecutionEnabled', 'providerExecutionMode',
         'providerExecutionBlocked', 'providerBlockReason',
+        'familyKey', 'fulfillmentMode',
         'orderFields', 'dynamicFields', 'providerMapping',
         'provider', 'providerProduct',
         'syncPriceWithProvider', 'enableManualPrice', 'manualPriceAdjustment', 'finalPrice',
@@ -902,6 +944,8 @@ module.exports = {
     toggleProductStatus,
     deleteProduct,
     getExternalProductId,
+    buildCustomerVisibilityStatus,
+    attachCustomerVisibilityStatus,
 
     // Canonical alias names used by admin catalog API
     createProductFromProvider: publishFromProviderProduct,  // prompt-specified name

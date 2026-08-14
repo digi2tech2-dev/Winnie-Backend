@@ -609,6 +609,16 @@ const fazerCardsBulkLaunchSchema = Joi.object({
     dryRun: Joi.boolean().default(false),
 }).min(2);
 
+const fazerCardsProductLaunchSchema = Joi.object({
+    customerPurchaseEnabled: Joi.boolean(),
+    isActive: Joi.boolean(),
+    visibleInStore: Joi.boolean(),
+    status: Joi.string().trim().lowercase().valid('available', 'unavailable'),
+    providerExecutionMode: Joi.string().trim().uppercase().valid('AUTO_PROVIDER', 'MANUAL_FULFILLMENT', 'DISABLED'),
+    providerExecutionBlocked: Joi.boolean(),
+    providerBlockReason: Joi.string().trim().max(200).allow('', null),
+}).min(1);
+
 const listFazerCardsProviderProductsQuery = Joi.object({
     ...pagination,
     search: Joi.string().trim().max(200).allow('', null),
@@ -759,6 +769,7 @@ module.exports = {
         fazerCardsManualFail: fazerCardsManualFailSchema,
         fazerCardsManualNote: fazerCardsManualNoteSchema,
         fazerCardsBulkLaunch: fazerCardsBulkLaunchSchema,
+        fazerCardsProductLaunch: fazerCardsProductLaunchSchema,
         fazerCardsProviderProductImport: fazerCardsProviderProductImportSchema,
         listFazerCardsProviderProductsQuery,
         // Orders
