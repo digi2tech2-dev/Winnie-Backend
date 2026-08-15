@@ -14,6 +14,7 @@ const { Provider } = require('../modules/providers/provider.model');
 const { ProviderProduct, FULFILLMENT_MODES } = require('../modules/providers/providerProduct.model');
 const { Product, EXECUTION_TYPES, PRODUCT_STATUSES } = require('../modules/products/product.model');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('../modules/orders/order.model');
+const orderService = require('../modules/orders/order.service');
 const { executeOrder } = require('../modules/orders/orderFulfillment.service');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { User } = require('../modules/users/user.model');
@@ -3107,6 +3108,78 @@ describe('FazerCards Phase 9 launch operations', () => {
         expect(JSON.stringify(result)).not.toContain('MANUAL-SECRET-CODE');
         expect(isEncryptedSecret(stored.codeEncrypted)).toBe(true);
         expect(decryptSecret(stored.codeEncrypted)).toBe('MANUAL-SECRET-CODE');
+    });
+
+    it('delivered-code reveal rejects other users, incomplete orders, and non-code-delivery orders', async () => {
+        const completed = await createManualFazerOrder({ familyKey: 'GIFTCARDS', codeDelivery: true });
+        await fazerCardsCatalogSvc.completeManualOrder(completed.order._id, {
+            deliveredCodes: [{ code: 'OWNED-SECRET-CODE' }],
+        });
+        const { customer: otherCustomer } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
+
+        await expect(
+            orderService.revealDeliveredCodes(completed.order._id, otherCustomer._id)
+        ).rejects.toMatchObject({ statusCode: 404 });
+
+        const incomplete = await createManualFazerOrder({ familyKey: 'GAME_KEYS', codeDelivery: true });
+        await fazerCardsCatalogSvc.storeManualDeliveredCode({
+            orderId: incomplete.order._id,
+            code: 'NOT-COMPLETE-CODE',
+        });
+        await expect(
+            orderService.revealDeliveredCodes(incomplete.order._id, incomplete.customer._id)
+        ).rejects.toMatchObject({ code: 'ORDER_NOT_COMPLETED' });
+
+        const nonCodeOrder = await createManualFazerOrder({ familyKey: 'TELEGRAM', status: ORDER_STATUS.COMPLETED });
+        await expect(
+            orderService.revealDeliveredCodes(nonCodeOrder.order._id, nonCodeOrder.customer._id)
+        ).rejects.toMatchObject({ code: 'ORDER_NOT_CODE_DELIVERY' });
+    });
+
+    it('normal customer order list/detail never expose plaintext delivered codes before reveal', async () => {
+        const { order, customer } = await createManualFazerOrder({ familyKey: 'GIFTCARDS', codeDelivery: true });
+        await fazerCardsCatalogSvc.completeManualOrder(order._id, {
+            deliveredCodes: [{ code: 'LIST-HIDDEN-CODE', pin: '7788', serial: 'SER-HIDDEN' }],
+        });
+
+        const detail = await orderService.getOrderById(order._id, customer._id);
+        const list = await orderService.listOrdersForUser(customer._id);
+        const serialized = JSON.stringify({ detail, list });
+
+        expect(detail.hasDeliveredCodes).toBe(true);
+        expect(detail.deliveredCodeCount).toBe(1);
+        expect(serialized).not.toContain('LIST-HIDDEN-CODE');
+        expect(serialized).not.toContain('7788');
+        expect(serialized).not.toContain('SER-HIDDEN');
+        expect(serialized).not.toContain('codeEncrypted');
+        expect(serialized).not.toContain('pinEncrypted');
+        expect(serialized).not.toContain('serialEncrypted');
+        expect(serialized).not.toContain('providerRawResponse');
+        expect(serialized).not.toContain('providerOrderId');
+    });
+
+    it('valid delivered-code reveal returns plaintext only from reveal endpoint and records reveal metadata', async () => {
+        const { order, customer } = await createManualFazerOrder({ familyKey: 'GAME_KEYS', codeDelivery: true });
+        await fazerCardsCatalogSvc.completeManualOrder(order._id, {
+            deliveredCodes: [{ code: 'REVEAL-ONLY-KEY', serial: 'GK-SERIAL-1' }],
+        });
+
+        const result = await orderService.revealDeliveredCodes(order._id, customer._id);
+        const stored = await ProviderDeliveredCode.findOne({ order: order._id }).select('+codeEncrypted +serialEncrypted');
+
+        expect(result.items).toHaveLength(1);
+        expect(result.items[0]).toMatchObject({
+            code: 'REVEAL-ONLY-KEY',
+            serial: 'GK-SERIAL-1',
+            revealCount: 1,
+        });
+        expect(result.items[0].pin).toBeNull();
+        expect(result.warning).toContain('Plaintext codes are returned only by this reveal endpoint.');
+        expect(stored.revealCount).toBe(1);
+        expect(stored.revealedAt).toBeInstanceOf(Date);
+        expect(stored.revealedBy.toString()).toBe(customer._id.toString());
+        expect(isEncryptedSecret(stored.codeEncrypted)).toBe(true);
+        expect(decryptSecret(stored.codeEncrypted)).toBe('REVEAL-ONLY-KEY');
     });
 
     it('manual fail refunds once only', async () => {
