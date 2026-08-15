@@ -62,14 +62,14 @@ const buildFazerCardsCustomerHints = (product = {}) => {
     if (fulfillmentMode === 'CODE_DELIVERY') {
         hints.deliveryType = 'CODE_DELIVERY';
     } else if (executionMode === 'MANUAL_FULFILLMENT') {
-        hints.deliveryType = 'MANUAL_FULFILLMENT';
+        hints.deliveryType = 'DIGITAL_SERVICE';
     } else {
         hints.deliveryType = 'DIGITAL_SERVICE';
     }
     if (executionMode === 'AUTO_PROVIDER') {
-        hints.fulfillmentNotice = 'سيتم تنفيذ الطلب تلقائياً من المورد.';
+        hints.fulfillmentNotice = 'يتم تنفيذ الطلب تلقائياً.';
     } else if (executionMode === 'MANUAL_FULFILLMENT') {
-        hints.fulfillmentNotice = 'سيتم تنفيذ طلبك بواسطة فريقنا في أسرع وقت.';
+        hints.fulfillmentNotice = 'طلبك قيد التنفيذ.';
     }
 
     const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({ product });

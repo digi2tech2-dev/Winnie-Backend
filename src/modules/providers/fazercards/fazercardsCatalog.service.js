@@ -41,6 +41,15 @@ const SYNC_ALL_DEFAULT_FAMILIES = Object.freeze([
 const DRAFT_IMPORT_FAMILIES = new Set(SYNC_ALL_DEFAULT_FAMILIES);
 const CODE_DELIVERY_IMPORT_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
 const AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']);
+const LAUNCH_PUBLISH_FAMILIES = Object.freeze([
+    'TOPUPS',
+    'GIFTCARDS',
+    'GAME_KEYS',
+    'TELEGRAM',
+    'STEAM_TOPUP',
+    'MANUAL_SERVICES',
+]);
+const ALL_LAUNCH_FAMILIES = Object.freeze([...LAUNCH_PUBLISH_FAMILIES, 'STEAM_GIFTS']);
 const UNIMPLEMENTED_FAMILY_BLOCK_REASONS = Object.freeze({
     TELEGRAM: 'TELEGRAM_EXECUTION_NOT_IMPLEMENTED',
     STEAM_TOPUP: 'STEAM_TOPUP_EXECUTION_NOT_IMPLEMENTED',
@@ -3479,6 +3488,89 @@ const buildBulkLaunchUpdateSet = (product, payload, validatedMode) => {
     return update;
 };
 
+const normalizePublishFamilyFilter = (familyKey) => {
+    const normalized = String(familyKey || '').trim().toUpperCase();
+    if (!normalized || normalized === 'ALL') return null;
+    if (!ALL_LAUNCH_FAMILIES.includes(normalized)) {
+        throw new BusinessRuleError('Unknown FazerCards family.', 'FAZERCARDS_UNKNOWN_FAMILY');
+    }
+    return normalized;
+};
+
+const getPublishFamilies = ({ familyKey = null, providerExecutionMode } = {}) => {
+    const familyFilter = normalizePublishFamilyFilter(familyKey);
+    if (familyFilter) return [familyFilter];
+    if (providerExecutionMode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
+        return [...AUTO_PROVIDER_FAMILIES];
+    }
+    return [...LAUNCH_PUBLISH_FAMILIES];
+};
+
+const publishEligibleLaunchControls = async (payload = {}, adminId = null, auditContext = {}) => {
+    const requestedMode = String(payload.providerExecutionMode || '').trim().toUpperCase();
+    if (![
+        fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER,
+        fazerCardsContracts.PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT,
+    ].includes(requestedMode)) {
+        throw new BusinessRuleError('providerExecutionMode is required.', 'FAZERCARDS_LAUNCH_MODE_REQUIRED');
+    }
+
+    const families = getPublishFamilies({
+        familyKey: payload.familyKey,
+        providerExecutionMode: requestedMode,
+    });
+    const limit = Math.min(Math.max(Number(payload.limit) || 500, 1), 1000);
+    const products = await Product.find({
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        deletedAt: null,
+        providerProduct: { $ne: null },
+        familyKey: { $in: families },
+    })
+        .select('_id')
+        .limit(limit)
+        .lean();
+    const productIds = products.map((product) => product._id.toString());
+
+    if (productIds.length === 0) {
+        return {
+            success: true,
+            dryRun: payload.dryRun === true,
+            total: 0,
+            updated: 0,
+            wouldUpdate: 0,
+            failed: 0,
+            publishScope: {
+                familyKey: normalizePublishFamilyFilter(payload.familyKey) || 'ALL',
+                families,
+                providerExecutionMode: requestedMode,
+                limit,
+            },
+            results: [],
+        };
+    }
+
+    const result = await bulkUpdateLaunchControls({
+        productIds,
+        customerPurchaseEnabled: true,
+        isActive: true,
+        visibleInStore: true,
+        status: PRODUCT_STATUSES.AVAILABLE,
+        providerExecutionMode: requestedMode,
+        providerExecutionEnabled: requestedMode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER,
+        dryRun: payload.dryRun === true,
+    }, adminId, auditContext);
+
+    return {
+        ...result,
+        publishScope: {
+            familyKey: normalizePublishFamilyFilter(payload.familyKey) || 'ALL',
+            families,
+            providerExecutionMode: requestedMode,
+            limit,
+        },
+    };
+};
+
 const bulkUpdateLaunchControls = async (payload = {}, adminId = null, auditContext = {}) => {
     const productIds = [...new Set((Array.isArray(payload.productIds) ? payload.productIds : [])
         .map((id) => String(id || '').trim())
@@ -3741,6 +3833,7 @@ module.exports = {
     failManualOrder,
     addManualOrderNote,
     bulkUpdateLaunchControls,
+    publishEligibleLaunchControls,
     updateSingleProductLaunchControls,
     syncOrderStatus,
     getOrderProviderDebug,

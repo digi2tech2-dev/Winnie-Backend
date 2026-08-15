@@ -270,18 +270,21 @@ const sanitizeOrderForCustomer = (order) => {
     const plain = order && typeof order.toObject === 'function' ? order.toObject() : { ...(order || {}) };
     if (plain.status === ORDER_STATUS.COMPLETED) {
         plain.customerStatusMessage = plain.hasDeliveredCodes
-            ? 'Your digital code is ready to reveal.'
-            : 'Your order is complete.';
+            ? 'الكود الرقمي جاهز للعرض'
+            : 'تم إكمال الطلب';
     } else if (plain.status === ORDER_STATUS.PROCESSING) {
-        plain.customerStatusMessage = 'Your order is being processed.';
+        plain.customerStatusMessage = 'طلبك قيد التنفيذ';
     } else if (plain.status === ORDER_STATUS.MANUAL_REVIEW) {
         plain.customerStatusMessage = 'طلبك قيد التنفيذ بواسطة الفريق';
     } else if (plain.status === ORDER_STATUS.FAILED || plain.status === ORDER_STATUS.CANCELED) {
         plain.customerStatusMessage = plain.refunded
-            ? 'Your order failed and the eligible refund has been processed.'
-            : 'Your order could not be completed. Support will review it.';
+            ? 'تم رد الرصيد'
+            : 'فشل الطلب';
     } else {
-        plain.customerStatusMessage = 'Your order has been received.';
+        plain.customerStatusMessage = 'طلبك قيد التنفيذ';
+    }
+    if (plain.status === ORDER_STATUS.MANUAL_REVIEW) {
+        plain.customerStatusMessage = 'طلبك قيد التنفيذ';
     }
 
     if (
@@ -292,7 +295,7 @@ const sanitizeOrderForCustomer = (order) => {
             || plain.providerErrorCode === 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED'
         )
     ) {
-        plain.fulfillmentNotice = 'سيتم تنفيذ طلبك بواسطة فريقنا في أسرع وقت.';
+        plain.fulfillmentNotice = 'طلبك قيد التنفيذ.';
     }
 
     for (const field of [

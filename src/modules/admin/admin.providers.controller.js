@@ -348,6 +348,14 @@ const bulkUpdateFazerCardsLaunch = catchAsync(async (req, res) => {
     sendSuccess(res, data, req.body.dryRun === true ? 'FazerCards launch update previewed' : 'FazerCards launch settings updated');
 });
 
+const publishEligibleFazerCardsProducts = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.publishEligibleLaunchControls(req.body, req.user?._id, {
+        ipAddress: req.ip ?? null,
+        userAgent: req.get('User-Agent') ?? null,
+    });
+    sendSuccess(res, data, req.body.dryRun === true ? 'FazerCards publish previewed' : 'FazerCards products published');
+});
+
 const updateFazerCardsProductLaunch = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.updateSingleProductLaunchControls(req.params.productId, req.body, req.user?._id, {
         ipAddress: req.ip ?? null,
@@ -420,6 +428,7 @@ module.exports = {
     failFazerCardsManualOrder,
     noteFazerCardsManualOrder,
     bulkUpdateFazerCardsLaunch,
+    publishEligibleFazerCardsProducts,
     updateFazerCardsProductLaunch,
     syncFazerCardsOrderStatus,
     getFazerCardsOrderProviderDebug,

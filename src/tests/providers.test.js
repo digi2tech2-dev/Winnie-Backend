@@ -3603,6 +3603,105 @@ describe('FazerCards Phase 9 launch operations', () => {
         })).rejects.toMatchObject({ code: 'AUTO_PROVIDER_REQUIRES_CUSTOMER_VISIBLE_PRODUCT' });
     });
 
+    it('publishes eligible FazerCards products without requiring pasted product IDs', async () => {
+        const { providerProduct: giftCardProviderProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
+        const { product: giftCardProduct } = await fazerCardsCatalogSvc.importProviderProduct(giftCardProviderProduct._id, {
+            sellPrice: 3.25,
+            name: 'GiftCard Publish Eligible Candidate',
+        });
+        const { providerProduct: telegramProviderProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const { product: telegramProduct } = await fazerCardsCatalogSvc.importProviderProduct(telegramProviderProduct._id, {
+            sellPrice: 1.75,
+            name: 'Telegram Publish Eligible Candidate',
+        });
+
+        const result = await fazerCardsCatalogSvc.publishEligibleLaunchControls({
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+        });
+        const updatedGiftCard = await Product.findById(giftCardProduct._id).lean();
+        const updatedTelegram = await Product.findById(telegramProduct._id).lean();
+
+        expect(result).toMatchObject({
+            success: true,
+            updated: 2,
+            failed: 0,
+            publishScope: expect.objectContaining({
+                providerExecutionMode: 'MANUAL_FULFILLMENT',
+            }),
+        });
+        expect(updatedGiftCard).toMatchObject({
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            customerPurchaseEnabled: true,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+            providerExecutionEnabled: false,
+        });
+        expect(updatedTelegram).toMatchObject({
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            customerPurchaseEnabled: true,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+            providerExecutionEnabled: false,
+        });
+    });
+
+    it('publish eligible AUTO_PROVIDER updates confirmed families only and leaves unconfirmed families unchanged', async () => {
+        const { providerProduct: topupProviderProduct } = await createFazerTopupProviderProduct();
+        const { product: topupProduct } = await fazerCardsCatalogSvc.importProviderProduct(topupProviderProduct._id, {
+            sellPrice: 1.25,
+            name: 'Topup Publish Auto Candidate',
+        });
+        const { providerProduct: giftCardProviderProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
+        const { product: giftCardProduct } = await fazerCardsCatalogSvc.importProviderProduct(giftCardProviderProduct._id, {
+            sellPrice: 3.25,
+            name: 'GiftCard Publish Auto Candidate',
+        });
+        const { providerProduct: telegramProviderProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const { product: telegramProduct } = await fazerCardsCatalogSvc.importProviderProduct(telegramProviderProduct._id, {
+            sellPrice: 1.75,
+            name: 'Telegram Not Auto Candidate',
+        });
+
+        const result = await fazerCardsCatalogSvc.publishEligibleLaunchControls({
+            providerExecutionMode: 'AUTO_PROVIDER',
+        });
+        const updatedTopup = await Product.findById(topupProduct._id).lean();
+        const updatedGiftCard = await Product.findById(giftCardProduct._id).lean();
+        const updatedTelegram = await Product.findById(telegramProduct._id).lean();
+
+        expect(result).toMatchObject({
+            success: true,
+            total: 2,
+            updated: 2,
+            failed: 0,
+            publishScope: expect.objectContaining({
+                families: expect.arrayContaining(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']),
+                providerExecutionMode: 'AUTO_PROVIDER',
+            }),
+        });
+        expect(updatedTopup).toMatchObject({
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerExecutionEnabled: true,
+            providerExecutionBlocked: false,
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+        });
+        expect(updatedGiftCard).toMatchObject({
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerExecutionEnabled: true,
+            providerExecutionBlocked: false,
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+        });
+        expect(updatedTelegram).toMatchObject({
+            isActive: false,
+            visibleInStore: false,
+            customerPurchaseEnabled: false,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+            providerExecutionEnabled: false,
+        });
+    });
+
     it('bulk launch returns per-product customer visibility reasons', async () => {
         const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
         const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
@@ -3698,8 +3797,8 @@ describe('FazerCards Phase 9 launch operations', () => {
         const customerOrder = await require('../modules/orders/order.service').getOrderById(order._id, customer._id);
         const serialized = JSON.stringify(customerOrder);
 
-        expect(customerOrder.customerStatusMessage).toBe('طلبك قيد التنفيذ بواسطة الفريق');
-        expect(customerOrder.fulfillmentNotice).toBe('سيتم تنفيذ طلبك بواسطة فريقنا في أسرع وقت.');
+        expect(customerOrder.customerStatusMessage).toBe('طلبك قيد التنفيذ');
+        expect(customerOrder.fulfillmentNotice).toBe('طلبك قيد التنفيذ.');
         expect(serialized).not.toContain('providerRawResponse');
         expect(serialized).not.toContain('providerOrderId');
         expect(serialized).not.toContain('providerErrorCode');

@@ -610,6 +610,22 @@ const fazerCardsBulkLaunchSchema = Joi.object({
     dryRun: Joi.boolean().default(false),
 }).min(2);
 
+const fazerCardsPublishEligibleLaunchSchema = Joi.object({
+    familyKey: Joi.string().trim().uppercase().valid(
+        'ALL',
+        'TOPUPS',
+        'GIFTCARDS',
+        'GAME_KEYS',
+        'TELEGRAM',
+        'STEAM_TOPUP',
+        'MANUAL_SERVICES',
+        'STEAM_GIFTS'
+    ).allow('', null),
+    providerExecutionMode: Joi.string().trim().uppercase().valid('AUTO_PROVIDER', 'MANUAL_FULFILLMENT').required(),
+    dryRun: Joi.boolean().default(false),
+    limit: Joi.number().integer().min(1).max(1000).default(500),
+});
+
 const fazerCardsProductLaunchSchema = Joi.object({
     customerPurchaseEnabled: Joi.boolean(),
     isActive: Joi.boolean(),
@@ -771,6 +787,7 @@ module.exports = {
         fazerCardsManualFail: fazerCardsManualFailSchema,
         fazerCardsManualNote: fazerCardsManualNoteSchema,
         fazerCardsBulkLaunch: fazerCardsBulkLaunchSchema,
+        fazerCardsPublishEligibleLaunch: fazerCardsPublishEligibleLaunchSchema,
         fazerCardsProductLaunch: fazerCardsProductLaunchSchema,
         fazerCardsProviderProductImport: fazerCardsProviderProductImportSchema,
         listFazerCardsProviderProductsQuery,
