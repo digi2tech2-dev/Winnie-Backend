@@ -47,7 +47,7 @@ const UNIMPLEMENTED_FAMILY_BLOCK_REASONS = Object.freeze({
     MANUAL_SERVICES: 'MANUAL_SERVICE_EXECUTION_NOT_IMPLEMENTED',
     STEAM_GIFTS: 'STEAM_GIFTS_CATALOG_UNAVAILABLE',
 });
-const IMPORTED_PRODUCT_LAUNCH_SELECT = '_id name providerProduct isActive visibleInStore status customerPurchaseEnabled providerExecutionMode providerExecutionEnabled providerExecutionBlocked providerBlockReason familyKey fulfillmentMode';
+const IMPORTED_PRODUCT_LAUNCH_SELECT = '_id name externalProductId providerProduct isActive visibleInStore status customerPurchaseEnabled providerExecutionMode providerExecutionEnabled providerExecutionBlocked providerBlockReason familyKey fulfillmentMode orderFields dynamicFields';
 let syncAllInProgress = false;
 let lastSyncAllSummary = null;
 
@@ -62,6 +62,10 @@ const buildCustomerVisibilityStatus = (product = {}) => {
     if (product?.customerPurchaseEnabled !== true) reasons.push('customerPurchaseEnabled=false');
     if (product?.isPaused === true) reasons.push('isPaused=true');
     if (product?.isAvailableForApi === false) reasons.push('isAvailableForApi=false');
+    const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({ product });
+    if (!manualFieldValidation.ok) {
+        reasons.push(manualFieldValidation.reason || 'manual fulfillment requires customer fields');
+    }
 
     return {
         visibleToCustomer: reasons.length === 0,
@@ -72,6 +76,7 @@ const buildCustomerVisibilityStatus = (product = {}) => {
 const summarizeImportedLaunchProduct = (product = null) => {
     if (!product) return null;
     const visibility = buildCustomerVisibilityStatus(product);
+    const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({ product });
     return {
         id: product._id,
         name: product.name,
@@ -88,6 +93,8 @@ const summarizeImportedLaunchProduct = (product = null) => {
         visibleToCustomer: visibility.visibleToCustomer,
         visibilityReasons: visibility.reasons,
         customerVisibilityStatus: visibility,
+        manualFieldWarning: manualFieldValidation.ok ? null : manualFieldValidation.message,
+        manualFieldSuggestions: manualFieldValidation.suggestions || [],
     };
 };
 
@@ -3352,6 +3359,20 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
     const requestedMode = updates.providerExecutionMode || product.providerExecutionMode || fazerCardsContracts.getDefaultExecutionMode(familyKey);
     const modeValidation = fazerCardsContracts.validateExecutionModeForFamily(familyKey, requestedMode);
     const errors = [];
+    const validatedMode = modeValidation.ok ? modeValidation.mode : String(requestedMode || '').trim().toUpperCase();
+    const simulatedProduct = {
+        ...product,
+        ...updates,
+        providerExecutionMode: validatedMode,
+        providerProduct,
+    };
+    const simulatedStatus = String(simulatedProduct.status || '').trim().toLowerCase();
+    const launchingForCustomers = simulatedProduct.customerPurchaseEnabled === true
+        && simulatedProduct.isActive === true
+        && simulatedProduct.visibleInStore !== false
+        && simulatedStatus === PRODUCT_STATUSES.AVAILABLE
+        && simulatedProduct.isPaused !== true
+        && simulatedProduct.isAvailableForApi !== false;
     const enablingCustomerPurchase = updates.customerPurchaseEnabled === true;
     const enablingVisibility = updates.isActive === true
         || updates.visibleInStore === true
@@ -3370,6 +3391,21 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
     if (modeValidation.ok && modeValidation.mode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER && fazerCardsContracts.canAutoExecuteFamily(familyKey) !== true) {
         errors.push({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED', message: 'Auto provider execution is not allowed for this FazerCards family contract.' });
     }
+    const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({
+        product: simulatedProduct,
+        providerProduct,
+        familyKey,
+        providerExecutionMode: validatedMode,
+        fulfillmentMode: simulatedProduct.fulfillmentMode,
+    });
+    if (launchingForCustomers && !manualFieldValidation.ok) {
+        errors.push({
+            code: manualFieldValidation.code || 'MANUAL_PRODUCT_REQUIRES_CUSTOMER_FIELDS',
+            message: manualFieldValidation.message || 'Manual fulfillment products require customer input fields before launch.',
+            reason: manualFieldValidation.reason || 'manual fulfillment requires customer fields',
+            suggestions: manualFieldValidation.suggestions || [],
+        });
+    }
 
     return {
         ok: errors.length === 0,
@@ -3379,7 +3415,7 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
             executionStage: contract.executionStage,
             allowedModes: modeValidation.allowedModes || fazerCardsContracts.getAllowedExecutionModes(familyKey),
         },
-        requestedMode: modeValidation.ok ? modeValidation.mode : String(requestedMode || '').trim().toUpperCase(),
+        requestedMode: validatedMode,
         errors,
     };
 };
@@ -3423,7 +3459,7 @@ const bulkUpdateLaunchControls = async (payload = {}, adminId = null, auditConte
 
     const dryRun = payload.dryRun === true;
     const products = await Product.find({ _id: { $in: productIds }, deletedAt: null })
-        .populate('providerProduct', 'providerCode familyKey fulfillmentMode externalProductId')
+        .populate('providerProduct', 'providerCode familyKey fulfillmentMode externalProductId rawName categoryName offerName requiredFields')
         .lean();
     const productsById = new Map(products.map((product) => [product._id.toString(), product]));
     const results = [];

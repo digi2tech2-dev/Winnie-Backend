@@ -31,6 +31,7 @@ const {
     mergeSubmittedCustomFieldValues,
     normalizeSubmittedCustomFields,
 } = require('../payments/paymentCustomFields');
+const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
 
 const FAZER_CARDS_CUSTOMER_PRODUCT_FILTER = {
     $or: [
@@ -151,6 +152,12 @@ const buildFazerCardsCustomerHints = (product = {}) => {
         hints.fulfillmentNotice = 'This order will be processed manually.';
     } else {
         hints.deliveryType = 'DIGITAL_SERVICE';
+    }
+
+    const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({ product });
+    if (!manualFieldValidation.ok) {
+        hints.purchaseDisabled = true;
+        hints.purchaseUnavailableReason = 'This product is temporarily unavailable while setup is completed.';
     }
 
     if (product.providerRegion && !product.region) hints.region = product.providerRegion;

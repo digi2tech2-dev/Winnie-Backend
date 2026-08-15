@@ -83,6 +83,16 @@ const buildCustomerVisibilityStatus = (product = {}) => {
     if (isFazerCards && obj.customerPurchaseEnabled !== true) reasons.push('customerPurchaseEnabled=false');
     if (obj.isPaused === true) reasons.push('isPaused=true');
     if (obj.isAvailableForApi === false) reasons.push('isAvailableForApi=false');
+    if (isFazerCards) {
+        const providerProduct = obj.providerProduct && typeof obj.providerProduct === 'object' ? obj.providerProduct : {};
+        const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({
+            product: obj,
+            providerProduct,
+        });
+        if (!manualFieldValidation.ok) {
+            reasons.push(manualFieldValidation.reason || 'manual fulfillment requires customer fields');
+        }
+    }
 
     return {
         visibleToCustomer: reasons.length === 0,
@@ -184,6 +194,33 @@ const validateFazerCardsProductSettings = ({ product, safe, providerProduct }) =
             contract.supportStage === fazerCardsContracts.SUPPORT_STAGES.DISABLED_UNAVAILABLE
                 ? 'FAMILY_DISABLED_UNAVAILABLE'
                 : 'CUSTOMER_PURCHASE_NOT_ALLOWED'
+        );
+    }
+
+    const nextProduct = {
+        ...(typeof product.toObject === 'function' ? product.toObject() : product),
+        ...safe,
+        providerProduct: providerProduct || product.providerProduct,
+    };
+    const nextStatus = String(nextProduct.status || '').trim().toLowerCase();
+    const launchingForCustomers = nextProduct.customerPurchaseEnabled === true
+        && nextProduct.isActive === true
+        && nextProduct.visibleInStore !== false
+        && nextStatus === PRODUCT_STATUSES.AVAILABLE
+        && nextProduct.isPaused !== true
+        && nextProduct.isAvailableForApi !== false;
+    const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({
+        product: nextProduct,
+        providerProduct,
+        familyKey,
+        providerExecutionMode: modeValidation.mode,
+        fulfillmentMode: safe.fulfillmentMode,
+    });
+    if (launchingForCustomers && !manualFieldValidation.ok) {
+        throw new BusinessRuleError(
+            manualFieldValidation.message || 'Manual fulfillment products require customer input fields before launch.',
+            manualFieldValidation.code || 'MANUAL_PRODUCT_REQUIRES_CUSTOMER_FIELDS',
+            { suggestions: manualFieldValidation.suggestions || [] }
         );
     }
 

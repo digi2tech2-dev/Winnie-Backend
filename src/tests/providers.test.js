@@ -3307,6 +3307,130 @@ describe('FazerCards Phase 9 launch operations', () => {
         });
     });
 
+    it.each(['GIFTCARDS', 'GAME_KEYS'])('allows %s manual launch without customer fields because quantity-only code delivery is valid', async (familyKey) => {
+        const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 3.25,
+            name: `${familyKey} Quantity Only Candidate`,
+        });
+
+        const result = await fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.launchStatus).toEqual({ visibleToCustomer: true, reasons: [] });
+    });
+
+    it.each([
+        ['TELEGRAM', { requiredFields: [] }],
+        ['STEAM_TOPUP', { requiredFields: [] }],
+        ['MANUAL_SERVICES', { requiredFields: [] }],
+    ])('rejects manual launch for %s when no required customer fields are configured', async (familyKey, overrides) => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey, overrides });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.75,
+            name: `${familyKey} Missing Fields Candidate`,
+        });
+
+        await expect(fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+        })).rejects.toMatchObject({ code: 'MANUAL_PRODUCT_REQUIRES_CUSTOMER_FIELDS' });
+
+        const dryRun = await fazerCardsCatalogSvc.bulkUpdateLaunchControls({
+            productIds: [product._id.toString()],
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+            dryRun: true,
+        });
+
+        expect(dryRun.results[0].errors).toEqual(expect.arrayContaining([
+            expect.objectContaining({ code: 'MANUAL_PRODUCT_REQUIRES_CUSTOMER_FIELDS' }),
+        ]));
+        expect((await Product.findById(product._id)).customerPurchaseEnabled).toBe(false);
+    });
+
+    it('rejects via-login manual launch and customer purchase without login/account fields before debit/order creation', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({
+            familyKey: 'MANUAL_SERVICES',
+            overrides: {
+                externalProductId: 'FAZER_MANUAL_SERVICE:roblox_via_login:160_robux',
+                rawName: 'Roblox (Robux via login) - 160 Robux',
+                requiredFields: [],
+            },
+        });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 2.25,
+            name: 'Roblox (Robux via login) - 160 Robux',
+        });
+
+        await expect(fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+        })).rejects.toMatchObject({ code: 'MANUAL_PRODUCT_REQUIRES_CUSTOMER_FIELDS' });
+
+        await Product.findByIdAndUpdate(product._id, {
+            $set: {
+                customerPurchaseEnabled: true,
+                isActive: true,
+                visibleInStore: true,
+                status: PRODUCT_STATUSES.AVAILABLE,
+                providerExecutionMode: 'MANUAL_FULFILLMENT',
+                providerExecutionEnabled: false,
+            },
+        });
+        const forcedVisible = await Product.findById(product._id).populate('providerProduct');
+        const visibility = productService.attachCustomerVisibilityStatus(forcedVisible).customerVisibilityStatus;
+        const { customer } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
+        const beforeWallet = (await User.findById(customer._id)).walletBalance;
+
+        expect(visibility.visibleToCustomer).toBe(false);
+        expect(visibility.reasons).toContain('manual fulfillment requires customer fields');
+        await expect(orderService.createOrder({
+            userId: customer._id,
+            productId: product._id,
+            quantity: 1,
+            idempotencyKey: 'roblox-via-login-missing-fields',
+        })).rejects.toMatchObject({ code: 'MANUAL_PRODUCT_REQUIRES_CUSTOMER_FIELDS' });
+        expect(await Order.countDocuments({ productId: product._id })).toBe(0);
+        expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(0);
+        expect((await User.findById(customer._id)).walletBalance).toBe(beforeWallet);
+    });
+
+    it('allows top-up manual launch when provider required fields were copied to product order fields', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct();
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.25,
+            name: '8 Ball Pool Manual Field Candidate',
+        });
+
+        const result = await fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
+        });
+        const updated = await Product.findById(product._id).lean();
+
+        expect(result.launchStatus).toEqual({ visibleToCustomer: true, reasons: [] });
+        expect(updated.orderFields.map((field) => field.key)).toContain('user_id');
+    });
+
     it('admin product update persists FazerCards launch metadata and reports customer visibility status', async () => {
         const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
         const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {

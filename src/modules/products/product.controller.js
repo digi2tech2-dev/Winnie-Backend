@@ -10,6 +10,7 @@ const { resolveUserPricingGroup } = require('../groups/group.service');
 const { calculateFinalPrice, getProductFinalUnitPrice } = require('../orders/pricing.service');
 const { buildCustomerPricingFields } = require('./customerPricingPresenter');
 const { NotFoundError } = require('../../shared/errors/AppError');
+const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
 
 // ─── Sensitive fields that must NEVER reach non-admin clients ─────────────────
 
@@ -65,6 +66,12 @@ const buildFazerCardsCustomerHints = (product = {}) => {
         hints.fulfillmentNotice = 'This order will be processed manually.';
     } else {
         hints.deliveryType = 'DIGITAL_SERVICE';
+    }
+
+    const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({ product });
+    if (!manualFieldValidation.ok) {
+        hints.purchaseDisabled = true;
+        hints.purchaseUnavailableReason = 'This product is temporarily unavailable while setup is completed.';
     }
 
     if (product.providerRegion && !product.region) hints.region = product.providerRegion;

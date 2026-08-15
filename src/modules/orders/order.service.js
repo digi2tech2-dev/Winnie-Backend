@@ -184,6 +184,13 @@ const _assertProductAvailable = (product) => {
                     : 'CUSTOMER_PURCHASE_NOT_ALLOWED'
             );
         }
+        const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({ product });
+        if (!manualFieldValidation.ok) {
+            throw new BusinessRuleError(
+                'This product is not configured for purchase. Manual fulfillment requires customer fields.',
+                manualFieldValidation.code || 'MANUAL_PRODUCT_REQUIRES_CUSTOMER_FIELDS'
+            );
+        }
     }
 };
 
@@ -206,6 +213,34 @@ const getFazerCardsExecutionMode = (product = {}) => {
         isManualFulfillment: validation.mode === PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT,
         isAutoProvider: validation.mode === PROVIDER_EXECUTION_MODES.AUTO_PROVIDER,
     };
+};
+
+const assertFazerCardsManualCustomerInput = (product, fazerCardsMode, customerInput) => {
+    if (fazerCardsMode?.isManualFulfillment !== true) return;
+    const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({ product });
+    if (!manualFieldValidation.ok) {
+        throw new BusinessRuleError(
+            'This product is not configured for purchase. Manual fulfillment requires customer fields.',
+            manualFieldValidation.code || 'MANUAL_PRODUCT_REQUIRES_CUSTOMER_FIELDS'
+        );
+    }
+    if (manualFieldValidation.required !== true) return;
+
+    const submittedValues = customerInput?.values && typeof customerInput.values === 'object'
+        ? customerInput.values
+        : {};
+    const missing = (manualFieldValidation.requiredFields || [])
+        .filter((field) => field.isActive !== false && field.required !== false)
+        .map((field) => field.key)
+        .filter(Boolean)
+        .filter((key) => submittedValues[key] === undefined || submittedValues[key] === null || submittedValues[key] === '');
+
+    if (missing.length) {
+        throw new BusinessRuleError(
+            `Required customer field(s) missing for manual fulfillment: ${missing.join(', ')}.`,
+            'INVALID_ORDER_FIELDS'
+        );
+    }
 };
 
 const normalizeUpper = (value) => String(value || '').trim().toUpperCase();
@@ -623,6 +658,7 @@ const _attemptCreateOrder = async (
             // can forward them to the provider (e.g. { link: '...' }).
             customerInput = { values: orderFieldsValues, fieldsSnapshot: [] };
         }
+        assertFazerCardsManualCustomerInput(product, fazerCardsMode, customerInput);
 
         // â”€â”€ 2c. JIT Provider Price Verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         //

@@ -47,6 +47,10 @@ const PROVIDER_EXECUTION_MODES = Object.freeze({
 const AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']);
 const MANUAL_FULFILLMENT_FAMILIES = new Set(['TELEGRAM', 'STEAM_TOPUP', 'MANUAL_SERVICES']);
 const DISABLED_FAMILIES = new Set(['STEAM_GIFTS']);
+const CODE_DELIVERY_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
+const CUSTOMER_FIELD_REQUIRED_FAMILIES = new Set(['TOPUPS', 'TELEGRAM', 'STEAM_TOPUP', 'MANUAL_SERVICES']);
+const LOGIN_LIKE_PRODUCT_PATTERN = /\b(via\s+login|login|username|account)\b/i;
+const CUSTOMER_LOGIN_FIELD_PATTERN = /(login|username|user[_\s-]?name|account|user[_\s-]?id|player[_\s-]?id|uid|profile|roblox)/i;
 
 const asString = (value, fallback = '') => {
     if (value === undefined || value === null) return fallback;
@@ -81,6 +85,130 @@ const normalizeRequiredFields = (requiredFields = []) => (
         })
         .filter(Boolean)
 );
+
+const normalizeCustomerFieldDefinitions = (product = {}, providerProduct = {}) => {
+    const sources = [
+        { fields: product?.orderFields, source: 'product.orderFields', keyProp: 'key' },
+        { fields: product?.dynamicFields, source: 'product.dynamicFields', keyProp: 'name' },
+        { fields: product?.requiredFields, source: 'product.requiredFields', keyProp: 'key' },
+        { fields: providerProduct?.requiredFields, source: 'providerProduct.requiredFields', keyProp: 'key' },
+    ];
+
+    const seen = new Set();
+    const normalized = [];
+    for (const { fields, source, keyProp } of sources) {
+        for (const field of Array.isArray(fields) ? fields : []) {
+            const key = getRequiredFieldKey(
+                typeof field === 'string'
+                    ? field
+                    : { ...field, key: field?.[keyProp] || field?.key || field?.name }
+            );
+            const label = typeof field === 'string'
+                ? key
+                : asString(firstValue(field?.label, field?.title, field?.name, field?.key), key);
+            if (!key && !label) continue;
+            const identity = `${source}:${key || label}`;
+            if (seen.has(identity)) continue;
+            seen.add(identity);
+            normalized.push({
+                key,
+                label,
+                type: typeof field === 'string' ? 'text' : asString(field?.type, 'text'),
+                required: typeof field === 'string' ? true : field?.required !== false,
+                isActive: typeof field === 'string' ? true : field?.isActive !== false && field?.active !== false,
+                source,
+            });
+        }
+    }
+
+    return normalized;
+};
+
+const fieldMatches = (field, pattern) => pattern.test(`${field.key || ''} ${field.label || ''}`);
+
+const productLooksLoginBased = (product = {}, providerProduct = {}) => (
+    [
+        product?.name,
+        product?.externalProductId,
+        product?.providerOfferName,
+        product?.providerCategoryName,
+        providerProduct?.rawName,
+        providerProduct?.name,
+        providerProduct?.externalProductId,
+        providerProduct?.offerName,
+        providerProduct?.categoryName,
+    ].some((value) => LOGIN_LIKE_PRODUCT_PATTERN.test(asString(value)))
+);
+
+const validateManualCustomerFieldsForProduct = ({
+    product = {},
+    providerProduct = {},
+    familyKey,
+    fulfillmentMode,
+    providerExecutionMode,
+} = {}) => {
+    const normalizedFamilyKey = normalizeFamilyKey(familyKey || product?.familyKey || providerProduct?.familyKey);
+    const normalizedFulfillmentMode = asString(fulfillmentMode || product?.fulfillmentMode || providerProduct?.fulfillmentMode).toUpperCase();
+    const normalizedMode = asString(
+        providerExecutionMode || product?.providerExecutionMode || getDefaultExecutionMode(normalizedFamilyKey)
+    ).toUpperCase();
+    const fields = normalizeCustomerFieldDefinitions(product, providerProduct);
+    const requiredFields = fields.filter((field) => field.isActive !== false && field.required !== false);
+    const loginLikeProduct = productLooksLoginBased(product, providerProduct);
+    const hasAnyRequiredField = requiredFields.length > 0;
+    const hasLoginField = requiredFields.some((field) => fieldMatches(field, CUSTOMER_LOGIN_FIELD_PATTERN));
+    const suggestions = [];
+
+    if (normalizedMode !== PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT) {
+        return { ok: true, required: false, fields, requiredFields, suggestions };
+    }
+    if (normalizedFulfillmentMode === FULFILLMENT_MODES.CODE_DELIVERY || CODE_DELIVERY_FAMILIES.has(normalizedFamilyKey)) {
+        return { ok: true, required: false, fields, requiredFields, suggestions };
+    }
+    if (!CUSTOMER_FIELD_REQUIRED_FAMILIES.has(normalizedFamilyKey) && !loginLikeProduct) {
+        return { ok: true, required: false, fields, requiredFields, suggestions };
+    }
+
+    if (normalizedFamilyKey === 'TELEGRAM') suggestions.push('telegram_username');
+    if (normalizedFamilyKey === 'STEAM_TOPUP') suggestions.push('steam_login', 'steam_profile', 'steam_username');
+    if (loginLikeProduct) suggestions.push('account_username', 'login');
+    if (normalizedFamilyKey === 'MANUAL_SERVICES') suggestions.push('account_username');
+    if (normalizedFamilyKey === 'TOPUPS') suggestions.push('user_id', 'account_id', 'player_id');
+
+    if (!hasAnyRequiredField) {
+        return {
+            ok: false,
+            required: true,
+            code: 'MANUAL_PRODUCT_REQUIRES_CUSTOMER_FIELDS',
+            message: 'Manual fulfillment products require customer input fields before launch.',
+            reason: 'manual fulfillment requires customer fields',
+            fields,
+            requiredFields,
+            suggestions: [...new Set(suggestions)],
+        };
+    }
+
+    if (loginLikeProduct && !hasLoginField) {
+        return {
+            ok: false,
+            required: true,
+            code: 'MANUAL_PRODUCT_REQUIRES_CUSTOMER_FIELDS',
+            message: 'Login-based manual fulfillment products require a login, username, account, or profile field.',
+            reason: 'manual fulfillment requires login/account customer field',
+            fields,
+            requiredFields,
+            suggestions: [...new Set(suggestions)],
+        };
+    }
+
+    return {
+        ok: true,
+        required: true,
+        fields,
+        requiredFields,
+        suggestions: [...new Set(suggestions)],
+    };
+};
 
 const buildFieldPayload = (input = {}, requiredFields = []) => {
     const fields = normalizeRequiredFields(requiredFields);
@@ -805,6 +933,8 @@ module.exports = {
     parseSteamTopupResponse,
     parseManualServiceResponse,
     getMissingCapabilities,
+    normalizeCustomerFieldDefinitions,
+    validateManualCustomerFieldsForProduct,
     redactSecrets,
     extractDeliveredCodes,
 };
