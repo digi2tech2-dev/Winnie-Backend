@@ -314,6 +314,118 @@ const extractGameKeyIdentifiers = (providerProduct = {}) => {
     };
 };
 
+const parsePositiveInteger = (value, fallback = null) => {
+    if (value === undefined || value === null || value === '') return fallback;
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+};
+
+const parsePositiveNumber = (value, fallback = null) => {
+    if (value === undefined || value === null || value === '') return fallback;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const getFieldValue = (fields = {}, keys = []) => {
+    const source = fields && typeof fields === 'object' ? fields : {};
+    for (const key of keys) {
+        if (source[key] !== undefined && source[key] !== null && source[key] !== '') {
+            return source[key];
+        }
+    }
+    return undefined;
+};
+
+const getTelegramProductKind = (providerProduct = {}) => {
+    const raw = providerProduct.rawPayload || {};
+    const fulfillmentMode = asString(providerProduct.fulfillmentMode).toUpperCase();
+    const external = asString(providerProduct.externalProductId).toUpperCase();
+    const offerId = asString(providerProduct.offerId).toLowerCase();
+    const kind = asString(firstValue(raw.kind, raw.response?.kind, raw.type, '')).toLowerCase();
+    if (
+        fulfillmentMode === FULFILLMENT_MODES.TELEGRAM_PREMIUM
+        || kind.includes('premium')
+        || external.includes(':PREMIUM')
+        || offerId.includes('premium')
+    ) return 'premium';
+    if (
+        fulfillmentMode === FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP
+        || kind.includes('stars')
+        || external.includes(':STARS')
+        || offerId === 'stars'
+    ) return 'stars';
+    return null;
+};
+
+const extractTelegramIdentifiers = (providerProduct = {}) => {
+    const raw = providerProduct.rawPayload || {};
+    const externalParts = extractExternalParts(providerProduct.externalProductId, 'FAZER_TELEGRAM:');
+    const kind = getTelegramProductKind(providerProduct);
+    const rawMonths = firstValue(
+        raw.plan?.months,
+        raw.months,
+        providerProduct.months,
+        asString(providerProduct.offerId).match(/premium[_:-]?(\d+)/i)?.[1],
+        externalParts[1]
+    );
+    return {
+        kind,
+        months: parsePositiveInteger(rawMonths, null),
+        externalKind: asString(externalParts[0]).toUpperCase() || null,
+    };
+};
+
+const extractSteamTopupIdentifiers = (providerProduct = {}) => {
+    const raw = providerProduct.rawPayload || {};
+    const rate = raw.rate && typeof raw.rate === 'object' ? raw.rate : {};
+    const externalParts = extractExternalParts(providerProduct.externalProductId, 'FAZER_STEAM_TOPUP:');
+    const currency = asString(firstValue(
+        raw.currency,
+        raw.steamCurrency,
+        raw.rateCurrency,
+        rate.currency,
+        rate.code,
+        providerProduct.offerId,
+        externalParts[0]
+    )).toUpperCase();
+    const amount = parsePositiveNumber(firstValue(
+        raw.amount,
+        raw.steamAmount,
+        raw.walletAmount,
+        raw.topupAmount,
+        rate.amount,
+        rate.steamAmount,
+        rate.walletAmount,
+        rate.value
+    ), null);
+    return { currency, amount };
+};
+
+const extractManualServiceIdentifiers = (providerProduct = {}) => {
+    const raw = providerProduct.rawPayload || {};
+    const externalParts = extractExternalParts(providerProduct.externalProductId, 'FAZER_MANUAL_SERVICE:');
+    return {
+        manualServiceId: asString(firstValue(
+            providerProduct.category,
+            raw.category?.manual_service_id,
+            raw.category?.manualServiceId,
+            raw.category?.id,
+            raw.manual_service_id,
+            raw.manualServiceId,
+            externalParts[0]
+        )),
+        productId: asString(firstValue(
+            providerProduct.offerId,
+            raw.offer?.product_id,
+            raw.offer?.productId,
+            raw.offer?.id,
+            raw.product_id,
+            raw.productId,
+            externalParts[1]
+        )),
+    };
+};
+
 const buildContractError = (message, code = CONTRACT_CODES.CONTRACT_UNCONFIRMED, details = {}) => ({
     success: false,
     dryRun: false,
@@ -388,6 +500,144 @@ const buildGameKeyPayload = ({ providerProduct, quantity = 1 } = {}) => {
             quantity: normalized.quantity,
         },
         requiredFields: [],
+    };
+};
+
+const buildTelegramPayload = ({ providerProduct, fields = {}, quantity = 1 } = {}) => {
+    const telegramUsername = asString(getFieldValue(fields, [
+        'telegram_username',
+        'telegramUsername',
+        'username',
+        'telegram',
+    ]));
+    if (!telegramUsername) {
+        return buildContractError('Telegram username is required.', CONTRACT_CODES.CUSTOMER_INPUT_MISSING, {
+            missing: ['telegram_username'],
+        });
+    }
+
+    const identifiers = extractTelegramIdentifiers(providerProduct);
+    if (identifiers.kind === 'stars') {
+        const starsQuantity = parsePositiveInteger(firstValue(
+            fields.quantity,
+            fields.amount,
+            fields.stars,
+            quantity
+        ), null);
+        if (starsQuantity === null || starsQuantity < 50 || starsQuantity > 10000) {
+            return buildContractError('Telegram Stars quantity must be between 50 and 10000.', 'TELEGRAM_STARS_QUANTITY_INVALID', {
+                min: 50,
+                max: 10000,
+            });
+        }
+        return {
+            success: true,
+            wouldCall: 'POST /telegram/stars/buy',
+            payload: {
+                telegram_username: telegramUsername,
+                quantity: starsQuantity,
+            },
+            requiredFields: [{ key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true }],
+        };
+    }
+
+    if (identifiers.kind === 'premium') {
+        const months = parsePositiveInteger(firstValue(fields.months, identifiers.months), null);
+        if (![3, 6, 12].includes(months)) {
+            return buildContractError('Telegram Premium months must be one of 3, 6, or 12.', 'TELEGRAM_PREMIUM_MONTHS_INVALID', {
+                allowed: [3, 6, 12],
+            });
+        }
+        return {
+            success: true,
+            wouldCall: 'POST /telegram/premium/buy',
+            payload: {
+                telegram_username: telegramUsername,
+                months,
+            },
+            requiredFields: [{ key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true }],
+        };
+    }
+
+    return buildContractError('Telegram product kind must be stars or premium.', CONTRACT_CODES.PAYLOAD_IDENTIFIER_MISSING, {
+        missing: ['telegram_product_kind'],
+    });
+};
+
+const buildSteamTopupPayload = ({ providerProduct, fields = {} } = {}) => {
+    const steamLogin = asString(getFieldValue(fields, [
+        'steamLogin',
+        'steam_login',
+        'steam_username',
+        'steamUsername',
+        'steam_profile',
+        'steamProfile',
+    ]));
+    if (!steamLogin) {
+        return buildContractError('Steam Login is required.', CONTRACT_CODES.CUSTOMER_INPUT_MISSING, {
+            missing: ['steamLogin'],
+        });
+    }
+
+    const identifiers = extractSteamTopupIdentifiers(providerProduct);
+    const missing = [
+        !identifiers.currency ? 'currency' : null,
+        !identifiers.amount ? 'amount' : null,
+    ].filter(Boolean);
+    if (missing.length) {
+        return buildContractError('Steam top-up currency and amount are required.', CONTRACT_CODES.PAYLOAD_IDENTIFIER_MISSING, {
+            missing,
+        });
+    }
+
+    return {
+        success: true,
+        wouldCall: 'POST /steam-topup/order',
+        precheckWouldCall: 'POST /steam-topup/check-login',
+        payload: {
+            steamLogin,
+            currency: identifiers.currency,
+            amount: identifiers.amount,
+        },
+        requiredFields: [{ key: 'steamLogin', label: 'Steam Login', type: 'text', required: true }],
+    };
+};
+
+const buildManualServicePayload = ({ providerProduct, fields = {} } = {}) => {
+    const identifiers = extractManualServiceIdentifiers(providerProduct);
+    const missing = [
+        !identifiers.manualServiceId ? 'manual_service_id' : null,
+        !identifiers.productId ? 'product_id' : null,
+    ].filter(Boolean);
+    if (missing.length) {
+        return buildContractError('Manual service identifiers are required.', CONTRACT_CODES.PAYLOAD_IDENTIFIER_MISSING, {
+            missing,
+        });
+    }
+
+    const requiredFields = normalizeRequiredFields(providerProduct?.requiredFields);
+    if (requiredFields.length === 0) {
+        return buildContractError('Manual service customer fields must be confirmed before provider order payload can be built.', CONTRACT_CODES.CONTRACT_UNCONFIRMED, {
+            missing: ['requiredFields'],
+        });
+    }
+
+    const built = buildFieldPayload(fields, requiredFields);
+    if (built.missing.length) {
+        return buildContractError(`Missing FazerCards manual service field(s): ${built.missing.join(', ')}.`, CONTRACT_CODES.CUSTOMER_INPUT_MISSING, {
+            missing: built.missing,
+        });
+    }
+
+    return {
+        success: true,
+        wouldCall: 'POST /manual-services/order',
+        payload: {
+            manual_service_id: identifiers.manualServiceId,
+            product_id: identifiers.productId,
+            fields: built.payload,
+        },
+        requiredFields: built.fields,
     };
 };
 
@@ -653,9 +903,9 @@ const parseUnconfirmedResponse = (data = {}, familyKey = 'UNKNOWN') => ({
     warnings: [`${familyKey} response contract is unconfirmed; manual review is required.`],
 });
 
-const parseTelegramResponse = (data = {}) => parseUnconfirmedResponse(data, 'TELEGRAM');
-const parseSteamTopupResponse = (data = {}) => parseUnconfirmedResponse(data, 'STEAM_TOPUP');
-const parseManualServiceResponse = (data = {}) => parseUnconfirmedResponse(data, 'MANUAL_SERVICES');
+const parseTelegramResponse = (data = {}) => parseProviderOrderResponse(data);
+const parseSteamTopupResponse = (data = {}) => parseProviderOrderResponse(data);
+const parseManualServiceResponse = (data = {}) => parseProviderOrderResponse(data);
 
 const CONTRACTS = Object.freeze({
     TOPUPS: Object.freeze({
@@ -751,59 +1001,84 @@ const CONTRACTS = Object.freeze({
         familyKey: 'TELEGRAM',
         displayName: 'Telegram',
         fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
-        supportStage: SUPPORT_STAGES.IMPORT_READY,
-        executionStage: EXECUTION_STAGES.NONE,
+        supportStage: SUPPORT_STAGES.DRY_RUN_READY,
+        executionStage: EXECUTION_STAGES.CUSTOMER_FLOW_NOT_READY,
         riskLevel: RISK_LEVELS.MEDIUM,
-        catalogStatus: 'catalog_only',
+        catalogStatus: 'implemented',
         canImportDraft: true,
-        canDryRun: false,
+        canDryRun: true,
         canLivePilot: false,
         canCustomerPurchase: true,
         customerInputSchema: {
             fields: [
                 { key: 'telegram_username', type: 'text', required: true },
-                { key: 'quantity_or_plan', type: 'text', required: true },
+                { key: 'quantity', type: 'number', required: true, min: 50, max: 10000, mode: 'TELEGRAM_STARS' },
+                { key: 'months', type: 'number', required: true, allowed: [3, 6, 12], mode: 'TELEGRAM_PREMIUM' },
             ],
         },
-        providerPayloadSchema: { confirmed: false, endpoint: null, body: 'UNCONFIRMED' },
-        expectedResponseSchema: { confirmed: false },
-        storageStrategy: 'ORDER_PROVIDER_METADATA_UNCONFIRMED',
-        customerDeliveryStrategy: 'NO_CODE_DELIVERY_EXPECTED_UNCONFIRMED',
-        requiredCapabilities: ['Official Telegram order endpoint/payload confirmation'],
-        blockers: ['Provider order endpoint and payload shape are unconfirmed for auto execution.'],
-        warnings: ['Customer orders are allowed only through manual fulfillment. Do not send Telegram order data to FazerCards until the provider contract is confirmed.'],
+        providerPayloadSchema: {
+            confirmed: true,
+            endpoints: ['POST /telegram/stars/buy', 'POST /telegram/premium/buy'],
+            bodies: {
+                TELEGRAM_STARS: { telegram_username: 'string', quantity: 'integer 50..10000' },
+                TELEGRAM_PREMIUM: { telegram_username: 'string', months: 'integer one of 3,6,12' },
+            },
+            async: true,
+        },
+        expectedResponseSchema: {
+            confirmed: true,
+            providerOrderIdPaths: ['order.id', 'order.order_id', 'data.id', 'data.order_id', 'id', 'order_id'],
+            statusPaths: ['order.status', 'data.status', 'status', 'state'],
+        },
+        storageStrategy: 'ORDER_PROVIDER_METADATA',
+        customerDeliveryStrategy: 'NO_CODE_DELIVERY_STATUS_ONLY',
+        requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'webhook/status sync'],
+        blockers: ['AUTO_PROVIDER remains disabled until controlled Telegram go-live is explicitly approved.'],
+        warnings: ['Telegram provider fulfillment is asynchronous. Balance is debited by FazerCards immediately after a real buy request.'],
     }),
     STEAM_TOPUP: Object.freeze({
         familyKey: 'STEAM_TOPUP',
         displayName: 'Steam Wallet Top-up',
         fulfillmentMode: FULFILLMENT_MODES.STEAM_TOPUP_WITH_LOGIN,
-        supportStage: SUPPORT_STAGES.IMPORT_READY,
-        executionStage: EXECUTION_STAGES.NONE,
+        supportStage: SUPPORT_STAGES.DRY_RUN_READY,
+        executionStage: EXECUTION_STAGES.CUSTOMER_FLOW_NOT_READY,
         riskLevel: RISK_LEVELS.HIGH,
-        catalogStatus: 'catalog_only',
+        catalogStatus: 'implemented',
         canImportDraft: true,
-        canDryRun: false,
+        canDryRun: true,
         canLivePilot: false,
         canCustomerPurchase: true,
-        customerInputSchema: { fields: [] },
-        providerPayloadSchema: { confirmed: false, endpoint: null, body: 'UNCONFIRMED' },
-        expectedResponseSchema: { confirmed: false },
-        storageStrategy: 'ORDER_PROVIDER_METADATA_UNCONFIRMED',
-        customerDeliveryStrategy: 'NO_CODE_DELIVERY_EXPECTED_UNCONFIRMED',
-        requiredCapabilities: ['Official Steam top-up input and execution contract confirmation'],
-        blockers: ['Steam top-up execution contract is unconfirmed.', 'May involve account/login-like data.'],
-        warnings: ['Customer orders are allowed only through manual fulfillment. High risk; do not invent login/password fields.'],
+        customerInputSchema: {
+            fields: [{ key: 'steamLogin', type: 'text', required: true }],
+        },
+        providerPayloadSchema: {
+            confirmed: true,
+            precheckEndpoint: 'POST /steam-topup/check-login',
+            endpoint: 'POST /steam-topup/order',
+            body: { steamLogin: 'string', currency: 'string', amount: 'number' },
+            async: true,
+        },
+        expectedResponseSchema: {
+            confirmed: true,
+            providerOrderIdPaths: ['order.id', 'order.order_id', 'data.id', 'data.order_id', 'id', 'order_id'],
+            statusPaths: ['order.status', 'data.status', 'status', 'state'],
+        },
+        storageStrategy: 'ORDER_PROVIDER_METADATA',
+        customerDeliveryStrategy: 'NO_CODE_DELIVERY_STATUS_ONLY',
+        requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'steam-topup check-login preflight', 'webhook/status sync'],
+        blockers: ['AUTO_PROVIDER remains disabled until Steam check-login/order/status live verification is approved.'],
+        warnings: ['High risk: wrong Steam login can deliver value to the wrong recipient. check-login must pass before any real provider order.'],
     }),
     MANUAL_SERVICES: Object.freeze({
         familyKey: 'MANUAL_SERVICES',
         displayName: 'Manual Services',
         fulfillmentMode: FULFILLMENT_MODES.MANUAL_SERVICE,
-        supportStage: SUPPORT_STAGES.IMPORT_READY,
-        executionStage: EXECUTION_STAGES.NONE,
+        supportStage: SUPPORT_STAGES.DRY_RUN_READY,
+        executionStage: EXECUTION_STAGES.CUSTOMER_FLOW_NOT_READY,
         riskLevel: RISK_LEVELS.HIGH,
-        catalogStatus: 'catalog_only',
+        catalogStatus: 'implemented',
         canImportDraft: true,
-        canDryRun: false,
+        canDryRun: true,
         canLivePilot: false,
         canCustomerPurchase: true,
         customerInputSchema: {
@@ -811,13 +1086,23 @@ const CONTRACTS = Object.freeze({
             fields: [],
             dynamicRequiredFields: true,
         },
-        providerPayloadSchema: { confirmed: false, endpoint: null, body: 'UNCONFIRMED' },
-        expectedResponseSchema: { confirmed: false },
-        storageStrategy: 'ORDER_MANUAL_WORKFLOW_UNIMPLEMENTED',
-        customerDeliveryStrategy: 'MANUAL_ADMIN_WORKFLOW_NOT_IMPLEMENTED',
-        requiredCapabilities: ['Manual workflow/chat execution design'],
-        blockers: ['Manual service auto-execution workflow is not implemented.'],
-        warnings: ['Customer orders are allowed only through manual fulfillment.'],
+        providerPayloadSchema: {
+            confirmed: true,
+            endpoint: 'POST /manual-services/order',
+            body: { manual_service_id: 'string', product_id: 'string', fields: 'object<string,string>' },
+            chatEndpoints: ['GET /manual-services/orders/{orderId}/chat', 'POST /manual-services/orders/{orderId}/chat'],
+            attachmentUpload: 'NEEDS_VERIFY',
+        },
+        expectedResponseSchema: {
+            confirmed: true,
+            providerOrderIdPaths: ['order.id', 'order.order_id', 'data.id', 'data.order_id', 'id', 'order_id'],
+            statusPaths: ['order.status', 'data.status', 'status', 'state'],
+        },
+        storageStrategy: 'ORDER_PROVIDER_METADATA_AND_ADMIN_NOTES',
+        customerDeliveryStrategy: 'ADMIN_MANAGED_MANUAL_WORKFLOW',
+        requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'manual service fields', 'manual service chat admin workflow'],
+        blockers: ['AUTO_PROVIDER remains disabled until manual service operations workflow is explicitly approved.'],
+        warnings: ['Provider-side manual service order and chat contracts are documented, but customer fulfillment remains team-managed by default.'],
     }),
     STEAM_GIFTS: Object.freeze({
         familyKey: 'STEAM_GIFTS',
@@ -826,18 +1111,23 @@ const CONTRACTS = Object.freeze({
         supportStage: SUPPORT_STAGES.DISABLED_UNAVAILABLE,
         executionStage: EXECUTION_STAGES.NONE,
         riskLevel: RISK_LEVELS.HIGH,
-        catalogStatus: 'unavailable_404',
+        catalogStatus: 'DOCS_PRESENT_ACCESS_UNCONFIRMED',
         canImportDraft: false,
         canDryRun: false,
         canLivePilot: false,
         canCustomerPurchase: false,
         customerInputSchema: { fields: [] },
-        providerPayloadSchema: { confirmed: false, endpoint: null, body: 'UNAVAILABLE' },
+        providerPayloadSchema: {
+            confirmed: true,
+            access: 'DOCS_PRESENT_ACCESS_UNCONFIRMED',
+            endpoint: 'POST /steam-gifts/order',
+            body: { invite_url: 'string', sub_id: 'string', app_id: 'string', region: 'string' },
+        },
         expectedResponseSchema: { confirmed: false },
         storageStrategy: 'NONE',
         customerDeliveryStrategy: 'NONE',
-        requiredCapabilities: ['Working Steam Gifts catalog endpoint'],
-        blockers: ['Production catalog endpoint returned HTTP 404.'],
+        requiredCapabilities: ['Working Steam Gifts catalog endpoint', 'Account access for Steam Gifts'],
+        blockers: ['Production catalog endpoint returned HTTP 404.', 'NOT_AVAILABLE_FOR_ACCOUNT until catalog access succeeds.'],
         warnings: ['Family is disabled until discovery is reconfirmed.'],
     }),
 });
@@ -1036,6 +1326,9 @@ const buildPayloadFromContract = ({ familyKey, providerProduct, fields = {}, qua
     if (contract.familyKey === 'TOPUPS') return buildTopupPayload({ providerProduct, fields });
     if (contract.familyKey === 'GIFTCARDS') return buildGiftCardPayload({ providerProduct, quantity });
     if (contract.familyKey === 'GAME_KEYS') return buildGameKeyPayload({ providerProduct, quantity });
+    if (contract.familyKey === 'TELEGRAM') return buildTelegramPayload({ providerProduct, fields, quantity });
+    if (contract.familyKey === 'STEAM_TOPUP') return buildSteamTopupPayload({ providerProduct, fields });
+    if (contract.familyKey === 'MANUAL_SERVICES') return buildManualServicePayload({ providerProduct, fields });
     return buildUnconfirmedPayload({ contract });
 };
 
@@ -1088,6 +1381,9 @@ module.exports = {
     parseTelegramResponse,
     parseSteamTopupResponse,
     parseManualServiceResponse,
+    extractTelegramIdentifiers,
+    extractSteamTopupIdentifiers,
+    extractManualServiceIdentifiers,
     getMissingCapabilities,
     normalizeCustomerFieldDefinitions,
     validateManualCustomerFieldsForProduct,

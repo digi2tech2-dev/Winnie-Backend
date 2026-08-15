@@ -222,6 +222,88 @@ class FazerCardsClient {
         });
     }
 
+    buyTelegramStars({ telegram_username, quantity, idempotencyKey } = {}) {
+        return this.request('post', '/telegram/stars/buy', {
+            data: {
+                telegram_username,
+                quantity,
+            },
+            headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+            context: 'telegram_stars_buy',
+        });
+    }
+
+    buyTelegramPremium({ telegram_username, months, idempotencyKey } = {}) {
+        return this.request('post', '/telegram/premium/buy', {
+            data: {
+                telegram_username,
+                months,
+            },
+            headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+            context: 'telegram_premium_buy',
+        });
+    }
+
+    checkSteamTopupLogin({ steamLogin } = {}) {
+        return this.request('post', '/steam-topup/check-login', {
+            data: { steamLogin },
+            context: 'steam_topup_check_login',
+        });
+    }
+
+    buySteamTopup({ steamLogin, currency, amount, idempotencyKey } = {}) {
+        return this.request('post', '/steam-topup/order', {
+            data: {
+                steamLogin,
+                currency,
+                amount,
+            },
+            headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+            context: 'steam_topup_order',
+        });
+    }
+
+    createManualServiceOrder({ manual_service_id, product_id, fields, idempotencyKey } = {}) {
+        return this.request('post', '/manual-services/order', {
+            data: {
+                manual_service_id,
+                product_id,
+                fields: fields || {},
+            },
+            headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+            context: 'manual_service_order',
+        });
+    }
+
+    getManualServiceChat(providerOrderId) {
+        const id = String(providerOrderId || '').trim();
+        if (!id) {
+            throw new BusinessRuleError('FazerCards manual service order id is required.', 'FAZERCARDS_PROVIDER_ORDER_ID_REQUIRED');
+        }
+
+        return this.request('get', `/manual-services/orders/${encodeURIComponent(id)}/chat`, {
+            context: 'manual_service_chat',
+        });
+    }
+
+    sendManualServiceChat(providerOrderId, { message, attachment } = {}) {
+        const id = String(providerOrderId || '').trim();
+        if (!id) {
+            throw new BusinessRuleError('FazerCards manual service order id is required.', 'FAZERCARDS_PROVIDER_ORDER_ID_REQUIRED');
+        }
+        if (attachment) {
+            throw new BusinessRuleError(
+                'FazerCards manual service chat attachments require multipart support verification.',
+                'FAZERCARDS_MANUAL_SERVICE_ATTACHMENT_NEEDS_VERIFY'
+            );
+        }
+
+        return this.request('post', `/manual-services/orders/${encodeURIComponent(id)}/chat`, {
+            data: { message },
+            context: 'manual_service_chat_message',
+        });
+    }
+
     getOrder(orderId) {
         const id = String(orderId || '').trim();
         if (!id) {

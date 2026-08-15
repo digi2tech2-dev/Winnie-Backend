@@ -15,6 +15,7 @@ const {
     extractTopupIdentifiers,
     buildTopupFields,
     normalizeTopupOrderStatus,
+    normalizeRequiredFields,
 } = require('./fazercards.adapter');
 const { sanitizePayload } = require('./fazercards.client');
 const {
@@ -527,8 +528,8 @@ const normalizeTelegramProducts = (starsData = {}, premiumData = {}) => {
             offerId: 'stars',
             offerName: 'Stars',
             fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
-            minQty: parseNumber(firstValue(starsData.min_amount, starsData.minAmount), 1) || 1,
-            maxQty: parseNumber(firstValue(starsData.max_amount, starsData.maxAmount), 9999) || 9999,
+            minQty: parseNumber(firstValue(starsData.min_amount, starsData.minAmount), 50) || 50,
+            maxQty: parseNumber(firstValue(starsData.max_amount, starsData.maxAmount), 10000) || 10000,
             requiredFields: [{ key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true }],
             rawPayload: { family: family.familyKey, kind: 'telegram_stars', response: starsData },
         }));
@@ -554,6 +555,25 @@ const normalizeTelegramProducts = (starsData = {}, premiumData = {}) => {
     return products;
 };
 
+const mergeRequiredFields = (...fieldGroups) => {
+    const seen = new Set();
+    const fields = [];
+    for (const group of fieldGroups) {
+        for (const field of Array.isArray(group) ? group : []) {
+            const key = String(field?.key || field?.name || field?.id || '').trim();
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            fields.push(field);
+        }
+    }
+    return fields;
+};
+
+const normalizeManualServiceFields = (category = {}, offer = {}) => mergeRequiredFields(
+    normalizeRequiredFields(offer),
+    normalizeRequiredFields(category)
+);
+
 const normalizeManualServiceProduct = (category = {}, offer = {}) => {
     const family = getFazerCardsFamily('MANUAL_SERVICES');
     const serviceId = String(firstValue(category.id, category.manual_service_id, category.manualServiceId, 'unknown_service'));
@@ -561,6 +581,7 @@ const normalizeManualServiceProduct = (category = {}, offer = {}) => {
     const categoryName = String(firstValue(category.name, category.title, serviceId));
     const offerName = String(firstValue(offer.name, offer.title, offerId));
     const price = firstValue(offer.price_usd, offer.priceUsd);
+    const requiredFields = normalizeManualServiceFields(category, offer);
     return makeBlockedFamilyProduct(family, {
         externalProductId: `FAZER_MANUAL_SERVICE:${serviceId}:${offerId}`,
         name: `${categoryName} - ${offerName}`,
@@ -572,7 +593,7 @@ const normalizeManualServiceProduct = (category = {}, offer = {}) => {
         offerId,
         offerName,
         subCategory: firstValue(category.kind, null),
-        requiredFields: [],
+        requiredFields,
         rawPayload: { family: family.familyKey, category, offer },
     });
 };
@@ -643,7 +664,11 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor } = {}) => {
             if (!serviceId) continue;
             const offers = await adapter.fetchCatalogPath(`/manual-services/${encodeURIComponent(serviceId)}/offers`, {}, 'manual_service_offers');
             const offerItems = Array.isArray(offers.data?.items) ? offers.data.items : [];
-            const mergedCategory = { ...category, ...(offers.data?.category || {}) };
+            const mergedCategory = {
+                ...category,
+                ...(offers.data?.category || {}),
+                fields: firstValue(offers.data?.fields, offers.data?.requiredFields, offers.data?.inputs, category.fields),
+            };
             for (const offer of offerItems) products.push(normalizeManualServiceProduct(mergedCategory, offer));
         }
         return { products, categoriesFetched: categories.length, offersFetched: products.length, meta: {}, requestId: page.requestId };
@@ -1980,6 +2005,49 @@ const buildUnifiedDryRun = async ({ productId, fields = {}, quantity = 1, orderI
         fields,
         quantity,
     });
+
+    if (contractPayload.success === true) {
+        return {
+            success: true,
+            dryRun: true,
+            wouldCall: contractPayload.wouldCall,
+            precheckWouldCall: contractPayload.precheckWouldCall || null,
+            provider: 'FazerCards',
+            executionAvailable: false,
+            contract,
+            product: {
+                id: product._id.toString(),
+                name: product.name,
+                familyKey: product.familyKey || familyKey,
+                fulfillmentMode: product.fulfillmentMode || providerProduct.fulfillmentMode,
+                providerExecutionEnabled: product.providerExecutionEnabled === true,
+                providerExecutionBlocked: product.providerExecutionBlocked === true,
+            },
+            providerProduct: {
+                id: providerProduct._id.toString(),
+                externalProductId: providerProduct.externalProductId,
+                familyKey,
+                fulfillmentMode: providerProduct.fulfillmentMode,
+                costPrice: String(rawCost),
+                currency: providerProduct.currency || 'USD',
+                stock: providerProduct.stock ?? null,
+                minQty: providerProduct.minQty || 1,
+                maxQty: providerProduct.maxQty || 9999,
+                region: providerProduct.region || null,
+                platform: providerProduct.platform || null,
+                blockReason: getFamilyBlockReason(providerProduct),
+            },
+            payload: contractPayload.payload,
+            requiredFields: contractPayload.requiredFields || providerProduct.requiredFields || [],
+            blockers: contract.blockers || [],
+            warnings: [
+                'Dry run only. No FazerCards order was created.',
+                `${family?.displayName || familyKey} provider payload is documented, but live execution remains disabled in this phase.`,
+                `Product execution is currently ${executionState}.`,
+                ...contract.warnings,
+            ],
+        };
+    }
 
     return {
         success: false,
