@@ -642,6 +642,75 @@ describe('FazerCards family contracts', () => {
             manualReview: true,
         });
     });
+
+    it('detects realistic gift-card code payload variants without storing provider ids as codes', () => {
+        const payload = {
+            ok: true,
+            data: {
+                order: { id: 'fgc_nested_order', status: 'accepted' },
+                codes: ['ACASH-CODE-001'],
+                cards: [
+                    { id: 'card-row-1', card_id: '10_myr', giftCode: 'ACASH-GIFT-002', pin: 'PIN-002', serial: 'SER-002' },
+                    { order_id: 'fgc_nested_order', serial_number: 'SER-ONLY-003' },
+                ],
+                items: [
+                    { activation_code: 'ACASH-ACT-004' },
+                    { id: 'item-row-1', value: 'NOT_CONFIDENT_CODE_VALUE' },
+                ],
+            },
+        };
+
+        const parsed = fazerCardsContracts.parseGiftCardResponse(payload);
+        const extracted = fazerCardsContracts.extractDeliveredCodes(payload);
+        const codes = extracted.map((item) => item.code).filter(Boolean);
+        const serials = extracted.map((item) => item.serial).filter(Boolean);
+        const serialized = JSON.stringify(parsed);
+
+        expect(parsed.status).toBe('COMPLETED');
+        expect(parsed.providerOrderId).toBe('fgc_nested_order');
+        expect(parsed.deliveredCodeCount).toBe(4);
+        expect(codes).toEqual(expect.arrayContaining(['ACASH-CODE-001', 'ACASH-GIFT-002', 'ACASH-ACT-004']));
+        expect(codes).not.toContain('fgc_nested_order');
+        expect(codes).not.toContain('10_myr');
+        expect(codes).not.toContain('NOT_CONFIDENT_CODE_VALUE');
+        expect(serials).toEqual(expect.arrayContaining(['SER-002', 'SER-ONLY-003']));
+        expect(serialized).not.toContain('ACASH-CODE-001');
+        expect(serialized).not.toContain('ACASH-GIFT-002');
+        expect(serialized).not.toContain('ACASH-ACT-004');
+    });
+
+    it('detects realistic game-key payload variants and keeps plaintext out of safe parser output', () => {
+        const payload = {
+            ok: true,
+            order: { order_id: 'fgk_order_1', status: 'created' },
+            keys: [
+                { key: 'GAME-KEY-001', serial: 'GK-SER-001' },
+                { licenseKey: 'GAME-LICENSE-002' },
+            ],
+            data: {
+                activationCodes: ['GAME-ACT-003'],
+                cards: [{ code: 'GAME-CODE-004' }],
+            },
+        };
+
+        const parsed = fazerCardsContracts.parseGameKeyResponse(payload);
+        const extracted = fazerCardsContracts.extractDeliveredCodes(payload);
+        const codes = extracted.map((item) => item.code).filter(Boolean);
+        const serialized = JSON.stringify(parsed);
+
+        expect(parsed.status).toBe('COMPLETED');
+        expect(parsed.providerOrderId).toBe('fgk_order_1');
+        expect(codes).toEqual(expect.arrayContaining([
+            'GAME-KEY-001',
+            'GAME-LICENSE-002',
+            'GAME-ACT-003',
+            'GAME-CODE-004',
+        ]));
+        expect(serialized).not.toContain('GAME-KEY-001');
+        expect(serialized).not.toContain('GAME-LICENSE-002');
+        expect(serialized).not.toContain('GAME-ACT-003');
+        expect(serialized).not.toContain('GAME-CODE-004');
+    });
 });
 
 describe('FazerCards catalog normalization and raw sync', () => {
@@ -2992,6 +3061,114 @@ describe('FazerCards order monitoring and reconcile tools', () => {
         }
     });
 
+    it('generic status sync stores encrypted gift-card codes and returns only safe admin metadata', async () => {
+        configureStatusEndpoint(null);
+        const { order } = await createFazerCodeDeliveryOrder({ familyKey: 'GIFTCARDS', providerOrderId: 'fc_gift_status' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: { 'x-request-id': 'req-gift-status' },
+            data: {
+                ok: true,
+                data: {
+                    order: { id: 'fc_gift_status', status: 'completed' },
+                    cards: [{ gift_code: 'GIFT-STATUS-CODE-1', pin: 'PIN-S1', serial: 'SER-S1' }],
+                },
+            },
+        });
+
+        const result = await fazerCardsCatalogSvc.syncOrderStatus(order._id);
+        const updated = await Order.findById(order._id).lean();
+        const stored = await ProviderDeliveredCode.findOne({ order: order._id })
+            .select('+codeEncrypted +pinEncrypted +serialEncrypted providerRawResponse')
+            .lean();
+        const serialized = JSON.stringify(result);
+
+        expect(result).toMatchObject({
+            action: 'completed',
+            oldStatus: ORDER_STATUS.PROCESSING,
+            newStatus: ORDER_STATUS.COMPLETED,
+            reviewRequired: false,
+            codeStored: true,
+            deliveredCodeCount: 1,
+            providerResult: {
+                providerOrderId: 'fc_gift_status',
+                normalizedStatus: 'COMPLETED',
+                providerRequestId: 'req-gift-status',
+            },
+        });
+        expect(updated.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(isEncryptedSecret(stored.codeEncrypted)).toBe(true);
+        expect(decryptSecret(stored.codeEncrypted)).toBe('GIFT-STATUS-CODE-1');
+        expect(decryptSecret(stored.pinEncrypted)).toBe('PIN-S1');
+        expect(decryptSecret(stored.serialEncrypted)).toBe('SER-S1');
+        expect(stored.providerRawResponse.data.cards[0].gift_code).toBe('[REDACTED_CODE]');
+        expect(serialized).not.toContain('GIFT-STATUS-CODE-1');
+        expect(serialized).not.toContain('PIN-S1');
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'get',
+            url: '/orders/fc_gift_status',
+        }));
+    });
+
+    it('generic status sync stores encrypted game keys and deduplicates repeated status payloads', async () => {
+        configureStatusEndpoint(null);
+        const { order } = await createFazerCodeDeliveryOrder({ familyKey: 'GAME_KEYS', providerOrderId: 'fc_game_status' });
+        const statusPayload = {
+            ok: true,
+            data: {
+                order: { order_id: 'fc_game_status', status: 'fulfilled' },
+                keys: [{ licenseKey: 'GAME-STATUS-KEY-1', serial: 'GAME-SER-1' }],
+            },
+        };
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: statusPayload })
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: statusPayload });
+
+        const first = await fazerCardsCatalogSvc.syncOrderStatus(order._id);
+        const second = await fazerCardsCatalogSvc.syncOrderStatus(order._id);
+        const stored = await ProviderDeliveredCode.find({ order: order._id })
+            .select('+codeEncrypted +serialEncrypted')
+            .lean();
+
+        expect(first).toMatchObject({ action: 'completed', codeStored: true, deliveredCodeCount: 1 });
+        expect(second).toMatchObject({ action: 'completed', codeStored: true, deliveredCodeCount: 1 });
+        expect(stored).toHaveLength(1);
+        expect(decryptSecret(stored[0].codeEncrypted)).toBe('GAME-STATUS-KEY-1');
+        expect(decryptSecret(stored[0].serialEncrypted)).toBe('GAME-SER-1');
+        expect(client.request).toHaveBeenCalledTimes(2);
+        expect(client.request.mock.calls.every(([call]) => call.url === '/orders/fc_game_status')).toBe(true);
+    });
+
+    it('completed code-delivery status without a recognized code stays in manual review', async () => {
+        configureStatusEndpoint(null);
+        const { order } = await createFazerCodeDeliveryOrder({ familyKey: 'GIFTCARDS', providerOrderId: 'fc_gift_missing_code' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: {},
+            data: { ok: true, data: { order: { id: 'fc_gift_missing_code', status: 'completed' } } },
+        });
+
+        const result = await fazerCardsCatalogSvc.syncOrderStatus(order._id);
+        const updated = await Order.findById(order._id).lean();
+
+        expect(result).toMatchObject({
+            action: 'manualReview',
+            newStatus: ORDER_STATUS.MANUAL_REVIEW,
+            reviewRequired: true,
+            codeStored: false,
+            deliveredCodeCount: 0,
+        });
+        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.providerErrorCode).toBe('FAZERCARDS_CODE_DELIVERY_CODE_MISSING');
+        expect(await ProviderDeliveredCode.countDocuments({ order: order._id })).toBe(0);
+    });
+
     it('provider debug returns sanitized internal info without customer field values or API keys', async () => {
         const { order, product, providerProduct } = await createFazerTopupOrder({ providerExecutionEnabled: false });
         await Order.findByIdAndUpdate(order._id, {
@@ -3168,6 +3345,32 @@ describe('FazerCards signed webhooks', () => {
         expect(serializedEvent).not.toContain('ACASH-SECRET-CODE');
         expect(serializedEvent).not.toContain('1234');
         expect(event.rawPayloadSanitized.data.cards[0].code).toBe('[REDACTED_CODE]');
+    });
+
+    it('duplicate completed code-delivery webhooks do not duplicate encrypted delivered codes', async () => {
+        enableWebhook();
+        const { order } = await createFazerCodeDeliveryOrder({ familyKey: 'GAME_KEYS', providerOrderId: 'fc_key_duplicate' });
+        const payload = {
+            event: 'order.completed',
+            event_id: 'evt_key_duplicate',
+            data: {
+                order_id: 'fc_key_duplicate',
+                status: 'completed',
+                keys: [{ license_key: 'DUPLICATE-GAME-KEY', serial: 'DUP-SER-1' }],
+            },
+        };
+
+        const first = await fazerCardsWebhookSvc.processWebhook(signedWebhook(payload));
+        const second = await fazerCardsWebhookSvc.processWebhook(signedWebhook(payload));
+        const stored = await ProviderDeliveredCode.find({ order: order._id }).select('+codeEncrypted +serialEncrypted').lean();
+        const updated = await Order.findById(order._id).lean();
+
+        expect(first).toMatchObject({ processed: true, action: 'completed' });
+        expect(second).toMatchObject({ duplicate: true, processed: false });
+        expect(updated.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(stored).toHaveLength(1);
+        expect(decryptSecret(stored[0].codeEncrypted)).toBe('DUPLICATE-GAME-KEY');
+        expect(decryptSecret(stored[0].serialEncrypted)).toBe('DUP-SER-1');
     });
 
     it('completed code-delivery webhook without code does not falsely complete', async () => {
@@ -3840,6 +4043,54 @@ describe('FazerCards Phase 9 launch operations', () => {
             providerExecutionBlocked: false,
             executionType: EXECUTION_TYPES.AUTOMATIC,
         });
+    });
+
+    it.each([
+        ['TOPUPS', { category: null, offerId: null, externalProductId: 'FAZER_TOPUP_MALFORMED', rawPayload: { category: {}, offer: {} } }, 'AUTO_PROVIDER_TOPUP_CATEGORY_ID_MISSING'],
+        ['GIFTCARDS', { offerId: null, externalProductId: 'FAZER_GIFTCARD:acash_my', rawPayload: { family: 'GIFTCARDS', category: { category_id: 'acash_my' }, offer: {} } }, 'AUTO_PROVIDER_GIFTCARD_CARD_ID_MISSING'],
+        ['GAME_KEYS', { offerId: null, externalProductId: 'FAZER_GAMEKEY:against_the_storm_cis', rawPayload: { family: 'GAME_KEYS', game: { game_id: 'against_the_storm_cis' }, key: {} } }, 'AUTO_PROVIDER_GAMEKEY_KEY_ID_MISSING'],
+    ])('single product launch rejects AUTO_PROVIDER for %s when provider identifiers are incomplete', async (familyKey, providerProductPatch, expectedCode) => {
+        const { providerProduct } = familyKey === 'TOPUPS'
+            ? await createFazerTopupProviderProduct()
+            : await createFazerCodeDeliveryProviderProduct({ familyKey });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: familyKey === 'GAME_KEYS' ? 6.25 : 3.25,
+            name: `${familyKey} Missing Provider Id Candidate`,
+        });
+        await ProviderProduct.findByIdAndUpdate(providerProduct._id, { $set: providerProductPatch });
+
+        await expect(fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerExecutionEnabled: true,
+        })).rejects.toMatchObject({ code: expectedCode });
+    });
+
+    it('admin product update rejects enabling AUTO_PROVIDER when code-delivery provider ids are missing', async () => {
+        const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 3.25,
+            name: 'GiftCard Product Edit Missing Id Candidate',
+        });
+        await ProviderProduct.findByIdAndUpdate(providerProduct._id, {
+            $set: {
+                offerId: null,
+                externalProductId: 'FAZER_GIFTCARD:acash_my',
+                rawPayload: { family: 'GIFTCARDS', category: { category_id: 'acash_my' }, offer: {} },
+            },
+        });
+
+        await expect(productService.updateProduct(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerExecutionEnabled: true,
+        })).rejects.toMatchObject({ code: 'AUTO_PROVIDER_GIFTCARD_CARD_ID_MISSING' });
     });
 
     it('single product launch rejects enabling AUTO_PROVIDER before the product is customer visible', async () => {

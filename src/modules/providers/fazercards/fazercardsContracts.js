@@ -404,13 +404,13 @@ const buildUnconfirmedPayload = ({ contract } = {}) => buildContractError(
 
 const mapProviderStatus = (rawStatus) => {
     const normalized = asString(rawStatus).toLowerCase();
-    if (['completed', 'complete', 'success', 'succeeded'].includes(normalized)) {
+    if (['completed', 'complete', 'success', 'succeeded', 'fulfilled'].includes(normalized)) {
         return { status: PARSED_STATUSES.COMPLETED, providerStatus: 'Completed', known: true, terminalFailure: false };
     }
-    if (['processing', 'pending', 'in_progress', 'in progress', 'inprogress'].includes(normalized)) {
+    if (['processing', 'pending', 'in_progress', 'in progress', 'inprogress', 'created', 'accepted'].includes(normalized)) {
         return { status: PARSED_STATUSES.PROCESSING, providerStatus: 'Pending', known: true, terminalFailure: false };
     }
-    if (['failed', 'error', 'cancelled', 'canceled', 'refunded'].includes(normalized)) {
+    if (['failed', 'error', 'cancelled', 'canceled', 'rejected', 'refunded'].includes(normalized)) {
         return { status: PARSED_STATUSES.FAILED, providerStatus: 'Cancelled', known: true, terminalFailure: true };
     }
     return { status: PARSED_STATUSES.MANUAL_REVIEW, providerStatus: rawStatus ? String(rawStatus) : 'Unknown', known: false, terminalFailure: false };
@@ -437,8 +437,26 @@ const extractOrderId = (data = {}, order = {}) => firstValue(
     null
 );
 
-const SECRET_KEY_PATTERN = /(^|_)(code|pin|serial|voucher|license|claim)(_|$)|cardnumber|card_number|card_no|key_value|game_key|gift_card/i;
-const CODE_COLLECTION_PATTERN = /^(codes|keys|cards|vouchers)$/i;
+const SECRET_KEY_PATTERN = /(^|_)(code|pin|serial|voucher|license|claim|activation|gift|redemption|access)(_|$)|cardcode|card_code|cardnumber|card_number|card_no|pincode|pin_code|serialnumber|serial_number|key_value|game_key|giftcode|gift_code|gift_card|activationcode|activation_code|redemptioncode|redemption_code|licensekey|license_key/i;
+const CODE_COLLECTION_PATTERN = /^(codes|keys|cards|vouchers|giftcodes|gift_codes|activationcodes|activation_codes|licensekeys|license_keys|items)$/i;
+const TRUSTED_STRING_CODE_COLLECTION_PATTERN = /^(codes|keys|cards|vouchers|giftcodes|gift_codes|activationcodes|activation_codes|licensekeys|license_keys)$/i;
+const IDENTIFIER_VALUE_KEYS = [
+    'id',
+    'order_id',
+    'orderId',
+    'providerOrderId',
+    'provider_order_id',
+    'category_id',
+    'categoryId',
+    'card_id',
+    'cardId',
+    'key_id',
+    'keyId',
+    'game_id',
+    'gameId',
+    'offer_id',
+    'offerId',
+];
 
 const redactSecrets = (value, depth = 0, parentKey = '') => {
     if (value === null || value === undefined) return value;
@@ -456,11 +474,34 @@ const redactSecrets = (value, depth = 0, parentKey = '') => {
     return value;
 };
 
+const getIdentifierValues = (obj = {}) => new Set(
+    IDENTIFIER_VALUE_KEYS
+        .map((key) => asString(obj?.[key]))
+        .filter(Boolean)
+);
+
+const isIdentifierValue = (candidate, obj = {}) => {
+    const value = asString(candidate);
+    return value && getIdentifierValues(obj).has(value);
+};
+
+const safeSecretValue = (candidate, obj = {}) => {
+    if (candidate === undefined || candidate === null || candidate === '') return null;
+    if (isIdentifierValue(candidate, obj)) return null;
+    return String(candidate);
+};
+
 const getCodeValueFromObject = (obj = {}, parentKey = '') => {
     const code = firstValue(
         obj.code,
         obj.cardCode,
         obj.card_code,
+        obj.giftCode,
+        obj.gift_code,
+        obj.activationCode,
+        obj.activation_code,
+        obj.redemptionCode,
+        obj.redemption_code,
         obj.voucher,
         obj.voucherCode,
         obj.voucher_code,
@@ -474,18 +515,41 @@ const getCodeValueFromObject = (obj = {}, parentKey = '') => {
         obj.code_value,
         null
     );
-    if (code) return code;
-    if (typeof obj.key === 'string' && !obj.key_id && !obj.keyId) return obj.key;
-    if (typeof obj.value === 'string' && CODE_COLLECTION_PATTERN.test(parentKey)) return obj.value;
+    const safeCode = safeSecretValue(code, obj);
+    if (safeCode) return safeCode;
+    if (typeof obj.key === 'string' && !obj.key_id && !obj.keyId) return safeSecretValue(obj.key, obj);
+    if (typeof obj.value === 'string' && TRUSTED_STRING_CODE_COLLECTION_PATTERN.test(parentKey)) {
+        return safeSecretValue(obj.value, obj);
+    }
     return null;
 };
+
+const getPinValueFromObject = (obj = {}) => safeSecretValue(firstValue(
+    obj.pin,
+    obj.pinCode,
+    obj.pin_code,
+    obj.pinNumber,
+    obj.pin_number,
+    null
+), obj);
+
+const getSerialValueFromObject = (obj = {}) => safeSecretValue(firstValue(
+    obj.serial,
+    obj.serialNumber,
+    obj.serial_number,
+    obj.cardNumber,
+    obj.card_number,
+    obj.cardNo,
+    obj.card_no,
+    null
+), obj);
 
 const extractDeliveredCodes = (value, parentKey = '') => {
     const found = [];
     const visit = (node, key = '') => {
         if (node === null || node === undefined) return;
         if (typeof node === 'string') {
-            if (CODE_COLLECTION_PATTERN.test(key)) {
+            if (TRUSTED_STRING_CODE_COLLECTION_PATTERN.test(key)) {
                 found.push({ code: node, serial: null, pin: null, metadata: { source: key } });
             }
             return;
@@ -497,8 +561,8 @@ const extractDeliveredCodes = (value, parentKey = '') => {
         if (typeof node !== 'object') return;
 
         const code = getCodeValueFromObject(node, key);
-        const pin = firstValue(node.pin, node.pinCode, node.pin_code, null);
-        const serial = firstValue(node.serial, node.serialNumber, node.serial_number, node.cardNumber, node.card_number, null);
+        const pin = getPinValueFromObject(node);
+        const serial = getSerialValueFromObject(node);
         if (code || pin || serial) {
             found.push({
                 code: code ? String(code) : null,
@@ -550,9 +614,11 @@ const parseCodeDeliveryResponse = (data = {}) => {
     const parsed = parseProviderOrderResponse(data);
     const deliveredCodes = extractDeliveredCodes(data);
     const hasRecognizedCodePayload = deliveredCodes.length > 0;
-    const status = parsed.status === PARSED_STATUSES.COMPLETED && !hasRecognizedCodePayload
-        ? PARSED_STATUSES.MANUAL_REVIEW
-        : parsed.status;
+    const status = hasRecognizedCodePayload && parsed.status !== PARSED_STATUSES.FAILED
+        ? PARSED_STATUSES.COMPLETED
+        : parsed.status === PARSED_STATUSES.COMPLETED && !hasRecognizedCodePayload
+            ? PARSED_STATUSES.MANUAL_REVIEW
+            : parsed.status;
     return {
         ...parsed,
         status,
@@ -845,6 +911,94 @@ const getDefaultExecutionMode = (familyKey) => {
 
 const canAutoExecuteFamily = (familyKey) => AUTO_PROVIDER_FAMILIES.has(normalizeFamilyKey(familyKey));
 
+const getAutoProviderIdentifiers = (familyKey, providerProduct = {}) => {
+    const normalized = normalizeFamilyKey(familyKey || providerProduct?.familyKey);
+    if (normalized === 'TOPUPS') return extractTopupIdentifiers(providerProduct);
+    if (normalized === 'GIFTCARDS') return extractGiftCardIdentifiers(providerProduct);
+    if (normalized === 'GAME_KEYS') return extractGameKeyIdentifiers(providerProduct);
+    return {};
+};
+
+const validateCodeDeliveryQuantityRules = (product = {}, providerProduct = {}) => {
+    const errors = [];
+    const minQty = Number(providerProduct.minQty ?? product.minQty ?? 1);
+    const maxQty = Number(providerProduct.maxQty ?? product.maxQty ?? 9999);
+    const stock = Number(providerProduct.stock);
+    if (!Number.isFinite(minQty) || minQty < 1 || !Number.isFinite(maxQty) || maxQty < minQty) {
+        errors.push({
+            code: 'AUTO_PROVIDER_QUANTITY_RULES_INVALID',
+            message: 'Code-delivery auto provider execution requires valid min/max quantity rules.',
+        });
+    }
+    if (providerProduct.stock !== undefined && providerProduct.stock !== null && providerProduct.stock !== '' && Number.isFinite(stock) && stock < minQty) {
+        errors.push({
+            code: 'AUTO_PROVIDER_STOCK_INSUFFICIENT',
+            message: 'Code-delivery auto provider execution requires enough provider stock for the minimum quantity.',
+        });
+    }
+    return errors;
+};
+
+const validateAutoProviderReadinessForProduct = ({
+    product = {},
+    providerProduct = {},
+    familyKey,
+    requireCustomerVisible = true,
+} = {}) => {
+    const normalizedFamilyKey = normalizeFamilyKey(familyKey || product?.familyKey || providerProduct?.familyKey);
+    const errors = [];
+    const identifiers = getAutoProviderIdentifiers(normalizedFamilyKey, providerProduct);
+    const productStatus = asString(product?.status).toLowerCase();
+
+    if (!canAutoExecuteFamily(normalizedFamilyKey)) {
+        errors.push({
+            code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED',
+            message: 'Auto provider execution is not allowed for this FazerCards family contract.',
+        });
+    }
+    if (requireCustomerVisible) {
+        if (product?.isActive !== true) errors.push({ code: 'AUTO_PROVIDER_REQUIRES_ACTIVE_PRODUCT', message: 'Auto provider execution requires an active product.' });
+        if (product?.visibleInStore === false) errors.push({ code: 'AUTO_PROVIDER_REQUIRES_VISIBLE_PRODUCT', message: 'Auto provider execution requires a customer-visible product.' });
+        if (productStatus !== 'available') errors.push({ code: 'AUTO_PROVIDER_REQUIRES_AVAILABLE_PRODUCT', message: 'Auto provider execution requires status=available.' });
+        if (product?.customerPurchaseEnabled !== true) errors.push({ code: 'AUTO_PROVIDER_REQUIRES_CUSTOMER_PURCHASE_ENABLED', message: 'Auto provider execution requires customerPurchaseEnabled=true.' });
+    }
+    if (!providerProduct) {
+        errors.push({ code: 'AUTO_PROVIDER_REQUIRES_PROVIDER_PRODUCT', message: 'Auto provider execution requires a linked FazerCards ProviderProduct.' });
+    } else {
+        if (providerProduct.isSupported !== true) errors.push({ code: 'AUTO_PROVIDER_REQUIRES_SUPPORTED_PROVIDER_PRODUCT', message: 'Auto provider execution requires a supported ProviderProduct.' });
+        if (providerProduct.isBlocked === true) errors.push({ code: 'AUTO_PROVIDER_REQUIRES_UNBLOCKED_PROVIDER_PRODUCT', message: 'Auto provider execution requires an unblocked ProviderProduct.' });
+        if (providerProduct.executionBlocked === true) errors.push({ code: 'AUTO_PROVIDER_REQUIRES_EXECUTION_UNBLOCKED', message: 'Auto provider execution is blocked for this ProviderProduct.' });
+    }
+
+    if (normalizedFamilyKey === 'TOPUPS') {
+        if (!identifiers.categoryId) errors.push({ code: 'AUTO_PROVIDER_TOPUP_CATEGORY_ID_MISSING', message: 'Top-up auto provider execution requires category_id.' });
+        if (!identifiers.offerId) errors.push({ code: 'AUTO_PROVIDER_TOPUP_OFFER_ID_MISSING', message: 'Top-up auto provider execution requires offer_id.' });
+        const requiredFields = normalizeCustomerFieldDefinitions(product, providerProduct)
+            .filter((field) => field.isActive !== false && field.required !== false);
+        if (requiredFields.length === 0) {
+            errors.push({
+                code: 'AUTO_PROVIDER_REQUIRES_CUSTOMER_FIELDS',
+                message: 'Top-up auto provider execution requires customer input fields.',
+            });
+        }
+    } else if (normalizedFamilyKey === 'GIFTCARDS') {
+        if (!identifiers.categoryId) errors.push({ code: 'AUTO_PROVIDER_GIFTCARD_CATEGORY_ID_MISSING', message: 'Gift-card auto provider execution requires category_id.' });
+        if (!identifiers.cardId) errors.push({ code: 'AUTO_PROVIDER_GIFTCARD_CARD_ID_MISSING', message: 'Gift-card auto provider execution requires card_id.' });
+        errors.push(...validateCodeDeliveryQuantityRules(product, providerProduct));
+    } else if (normalizedFamilyKey === 'GAME_KEYS') {
+        if (!identifiers.gameId) errors.push({ code: 'AUTO_PROVIDER_GAMEKEY_GAME_ID_MISSING', message: 'Game-key auto provider execution requires game_id.' });
+        if (!identifiers.keyId) errors.push({ code: 'AUTO_PROVIDER_GAMEKEY_KEY_ID_MISSING', message: 'Game-key auto provider execution requires key_id.' });
+        errors.push(...validateCodeDeliveryQuantityRules(product, providerProduct));
+    }
+
+    return {
+        ok: errors.length === 0,
+        familyKey: normalizedFamilyKey,
+        identifiers,
+        errors,
+    };
+};
+
 const validateExecutionModeForFamily = (familyKey, mode) => {
     const normalized = normalizeFamilyKey(familyKey);
     const requestedMode = asString(mode || getDefaultExecutionMode(normalized)).toUpperCase();
@@ -923,6 +1077,8 @@ module.exports = {
     getAllowedExecutionModes,
     getDefaultExecutionMode,
     canAutoExecuteFamily,
+    getAutoProviderIdentifiers,
+    validateAutoProviderReadinessForProduct,
     validateExecutionModeForFamily,
     buildPayloadFromContract,
     parseResponseForFamily,

@@ -48,7 +48,7 @@ const {
     BusinessRuleError,
 } = require('../../shared/errors/AppError');
 
-const PROVIDER_PRODUCT_ADMIN_SELECT = 'rawName translatedName externalProductId rawPrice costPrice currency minQty maxQty isActive lastSyncedAt providerCode familyKey fulfillmentMode supportLevel executionBlocked isSupported isBlocked blockReason category categoryName offerId offerName region platform stock requiredFields';
+const PROVIDER_PRODUCT_ADMIN_SELECT = 'rawName translatedName externalProductId rawPrice costPrice currency minQty maxQty isActive lastSyncedAt providerCode familyKey fulfillmentMode supportLevel executionBlocked isSupported isBlocked blockReason category categoryName offerId offerName region platform stock requiredFields rawPayload';
 
 const dynamicFieldsFromOrderFields = (orderFields = []) => (
     (Array.isArray(orderFields) ? orderFields : []).map((field) => ({
@@ -224,7 +224,21 @@ const validateFazerCardsProductSettings = ({ product, safe, providerProduct }) =
         );
     }
 
-    if (modeValidation.mode === PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
+    if (modeValidation.mode === PROVIDER_EXECUTION_MODES.AUTO_PROVIDER && nextProduct.providerExecutionEnabled === true) {
+        const autoReadiness = fazerCardsContracts.validateAutoProviderReadinessForProduct({
+            product: nextProduct,
+            providerProduct,
+            familyKey,
+            requireCustomerVisible: true,
+        });
+        if (!autoReadiness.ok) {
+            const firstError = autoReadiness.errors[0] || {};
+            throw new BusinessRuleError(
+                firstError.message || 'This FazerCards product is not ready for auto provider execution.',
+                firstError.code || 'AUTO_PROVIDER_NOT_READY',
+                { errors: autoReadiness.errors }
+            );
+        }
         safe.executionType = safe.providerExecutionEnabled === true
             ? EXECUTION_TYPES.AUTOMATIC
             : (safe.executionType || product.executionType || EXECUTION_TYPES.MANUAL);
@@ -655,7 +669,7 @@ const publishFromProviderProduct = async ({
 const updateProduct = async (productId, updates) => {
     const product = await Product.findById(productId)
         .populate('provider', 'name slug code')
-        .populate('providerProduct', 'rawPrice rawPayload externalProductId provider providerCode familyKey fulfillmentMode');
+        .populate('providerProduct', PROVIDER_PRODUCT_ADMIN_SELECT);
     if (!product) throw new NotFoundError('Product');
 
     const ALLOWED = [

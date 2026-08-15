@@ -86,6 +86,9 @@ const extractFazerCardsOrderId = (payload = {}) => firstValue(
     getPath(payload, 'order.id'),
     getPath(payload, 'order.order_id'),
     getPath(payload, 'order.orderId'),
+    getPath(payload, 'data.order.id'),
+    getPath(payload, 'data.order.order_id'),
+    getPath(payload, 'data.order.orderId'),
     getPath(payload, 'data.id'),
     getPath(payload, 'data.order_id'),
     getPath(payload, 'data.orderId')
@@ -96,6 +99,8 @@ const extractFazerCardsStatus = (payload = {}) => firstValue(
     getPath(payload, 'state'),
     getPath(payload, 'order.status'),
     getPath(payload, 'order.state'),
+    getPath(payload, 'data.order.status'),
+    getPath(payload, 'data.order.state'),
     getPath(payload, 'data.status'),
     getPath(payload, 'data.state')
 );

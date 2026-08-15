@@ -2276,7 +2276,7 @@ const extractDeliveredCodes = (value, parentKey = '') => {
 };
 
 const storeDeliveredCodes = async ({ pilotOrder, providerDoc, providerProduct, product, familyKey, rawResponse }) => {
-    const deliveredCodes = extractDeliveredCodes(rawResponse);
+    const deliveredCodes = fazerCardsContracts.extractDeliveredCodes(rawResponse);
     const stored = [];
     for (const delivered of deliveredCodes) {
         const doc = new ProviderDeliveredCode({
@@ -2920,6 +2920,9 @@ const updateOrderFromFazerCardsStatus = async (order, result, { source = 'fazerc
         order: updated,
         action: 'completed',
         refunded: updated?.refunded === true,
+        deliveredCodeCount: isCodeDeliveryFazerCardsOrder(order)
+            ? await getExistingDeliveredCodeCount(order._id)
+            : 0,
     };
 };
 
@@ -2936,6 +2939,7 @@ const syncOrderStatus = async (orderId, adapterOptions = {}) => {
     const order = await loadOrderForFazerCardsReconcile(orderId);
     assertFazerCardsOrder(order);
     assertFazerCardsOrderSent(order);
+    const oldStatus = order.status;
 
     const product = getOrderProduct(order);
     const providerProduct = getOrderProviderProduct(order);
@@ -2943,14 +2947,23 @@ const syncOrderStatus = async (orderId, adapterOptions = {}) => {
     const adapter = new FazerCardsAdapter(providerDoc, adapterOptions);
     const result = await adapter.getOrderStatus({ providerOrderId: order.providerOrderId });
     const applied = await updateOrderFromFazerCardsStatus(order, result, { source: 'fazercards_status_sync' });
+    const finalDeliveredCodeCount = isCodeDeliveryFazerCardsOrder(order)
+        ? await getExistingDeliveredCodeCount(order._id)
+        : 0;
 
     return {
         success: applied.action !== 'manualReview',
         action: applied.action,
+        oldStatus,
+        newStatus: applied.order?.status || null,
+        reviewRequired: applied.action === 'manualReview',
+        codeStored: finalDeliveredCodeCount > 0,
+        deliveredCodeCount: finalDeliveredCodeCount,
         statusEndpointConfirmed: result.providerErrorCode !== 'FAZERCARDS_STATUS_ENDPOINT_UNCONFIRMED',
         providerResult: {
             providerOrderId: result.providerOrderId ?? order.providerOrderId,
             providerStatus: result.providerStatus,
+            normalizedStatus: result.normalizedStatus ?? null,
             providerRequestId: result.providerRequestId ?? null,
             providerErrorCode: result.providerErrorCode ?? null,
             providerErrorMessage: result.providerErrorMessage ?? null,
@@ -2980,9 +2993,17 @@ const applyProviderStatusPayloadToOrder = async (orderId, payload = {}, {
         fallbackStatus,
     });
     const applied = await updateOrderFromFazerCardsStatus(order, parsed, { source });
+    const finalDeliveredCodeCount = isCodeDeliveryFazerCardsOrder(order)
+        ? await getExistingDeliveredCodeCount(order._id)
+        : 0;
     return {
         success: applied.action !== 'manualReview',
         action: applied.action,
+        oldStatus: order.status,
+        newStatus: applied.order?.status || null,
+        reviewRequired: applied.action === 'manualReview',
+        codeStored: finalDeliveredCodeCount > 0,
+        deliveredCodeCount: finalDeliveredCodeCount,
         providerResult: {
             providerOrderId: parsed.providerOrderId ?? order.providerOrderId,
             providerStatus: parsed.providerStatus,
@@ -3568,26 +3589,20 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
     if (enablingCustomerPurchase && contract.canCustomerPurchase !== true) {
         errors.push({ code: 'CUSTOMER_PURCHASE_NOT_ALLOWED', message: 'Customer purchase is not allowed for this FazerCards family contract.' });
     }
-    if (modeValidation.ok && modeValidation.mode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER && fazerCardsContracts.canAutoExecuteFamily(familyKey) !== true) {
-        errors.push({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED', message: 'Auto provider execution is not allowed for this FazerCards family contract.' });
-    }
     if (enablingAutoProvider && !launchingForCustomers) {
         errors.push({
             code: 'AUTO_PROVIDER_REQUIRES_CUSTOMER_VISIBLE_PRODUCT',
             message: 'Auto provider execution can only be enabled for an active, visible, available customer product.',
         });
     }
-    if (enablingAutoProvider && familyKey === 'TOPUPS') {
-        const topupFieldDefinitions = fazerCardsContracts.normalizeCustomerFieldDefinitions(
-            simulatedProduct,
-            providerProduct
-        );
-        if (topupFieldDefinitions.length === 0) {
-            errors.push({
-                code: 'AUTO_PROVIDER_REQUIRES_CUSTOMER_FIELDS',
-                message: 'Top-up auto provider execution requires customer input fields.',
-            });
-        }
+    if (modeValidation.ok && modeValidation.mode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
+        const autoReadiness = fazerCardsContracts.validateAutoProviderReadinessForProduct({
+            product: simulatedProduct,
+            providerProduct,
+            familyKey,
+            requireCustomerVisible: true,
+        });
+        if (!autoReadiness.ok) errors.push(...autoReadiness.errors);
     }
     const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({
         product: simulatedProduct,
@@ -3750,7 +3765,7 @@ const bulkUpdateLaunchControls = async (payload = {}, adminId = null, auditConte
 
     const dryRun = payload.dryRun === true;
     const products = await Product.find({ _id: { $in: productIds }, deletedAt: null })
-        .populate('providerProduct', 'providerCode familyKey fulfillmentMode externalProductId rawName categoryName offerName requiredFields')
+        .populate('providerProduct', 'providerCode familyKey fulfillmentMode externalProductId rawName category categoryName offerId offerName requiredFields rawPayload minQty maxQty stock isSupported isBlocked executionBlocked blockReason')
         .lean();
     const productsById = new Map(products.map((product) => [product._id.toString(), product]));
     const results = [];

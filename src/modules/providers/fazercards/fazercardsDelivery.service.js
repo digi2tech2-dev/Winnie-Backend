@@ -24,8 +24,21 @@ const storeDeliveredCodesForOrder = async ({
 } = {}) => {
     const deliveredCodes = extractDeliveredCodes(rawResponse);
     const stored = [];
+    const existing = order?._id
+        ? await ProviderDeliveredCode.find({ order: order._id }).select('+codeEncrypted +serialEncrypted +pinEncrypted')
+        : [];
+    const seen = new Set(existing.map((doc) => {
+        const code = doc.codeEncrypted ? doc.getSecretValue('codeEncrypted') : '';
+        const pin = doc.pinEncrypted ? doc.getSecretValue('pinEncrypted') : '';
+        const serial = doc.serialEncrypted ? doc.getSecretValue('serialEncrypted') : '';
+        return [code, pin, serial].join('|');
+    }));
 
     for (const delivered of deliveredCodes) {
+        const dedupeKey = [delivered.code || '', delivered.pin || '', delivered.serial || ''].join('|');
+        if (!dedupeKey.replace(/\|/g, '') || seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+
         const doc = new ProviderDeliveredCode({
             order: order._id,
             provider: providerDoc?._id || product?.provider || providerProduct?.provider || null,
