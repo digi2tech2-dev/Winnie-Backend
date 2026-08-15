@@ -5,6 +5,8 @@ process.env.FAZERCARDS_API_KEY = 'test-fazer-key';
 process.env.FAZERCARDS_API_BASE_URL = 'https://api.fzr.cards/api/v2';
 process.env.FAZERCARDS_TIMEOUT_MS = '20000';
 process.env.FAZERCARDS_REAL_ORDERS_ENABLED = 'false';
+process.env.FAZERCARDS_WEBHOOK_ENABLED = 'false';
+process.env.FAZERCARDS_WEBHOOK_SECRET = '';
 
 jest.mock('axios');
 
@@ -20,10 +22,12 @@ const { WalletTransaction } = require('../modules/wallet/walletTransaction.model
 const { User } = require('../modules/users/user.model');
 const productService = require('../modules/products/product.service');
 const fazerCardsCatalogSvc = require('../modules/providers/fazercards/fazercardsCatalog.service');
+const fazerCardsWebhookSvc = require('../modules/providers/fazercards/fazercards.webhook.service');
 const fazerCardsContracts = require('../modules/providers/fazercards/fazercardsContracts');
 const { FazerCardsClient } = require('../modules/providers/fazercards/fazercards.client');
 const { ProviderDeliveredCode } = require('../modules/providers/fazercards/providerDeliveredCode.model');
 const { ProviderPilotOrder } = require('../modules/providers/fazercards/providerPilotOrder.model');
+const { FazerCardsWebhookEvent } = require('../modules/providers/fazercards/fazercardsWebhookEvent.model');
 const { decryptSecret, isEncryptedSecret } = require('../shared/utils/secretEncryption');
 const {
     FazerCardsAdapter,
@@ -318,6 +322,43 @@ const createFazerTopupOrder = async ({
     return { provider, providerProduct, product, order, customer };
 };
 
+const createFazerCodeDeliveryOrder = async ({
+    familyKey = 'GIFTCARDS',
+    walletDeducted = 50,
+    providerOrderId = 'fc_code_order',
+    status = ORDER_STATUS.PROCESSING,
+} = {}) => {
+    const { provider, providerProduct, product } = await createReadyCodeDeliveryProduct({ familyKey });
+    const { customer, group } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
+    const order = await Order.create({
+        userId: customer._id,
+        orderNumber: 885000 + Math.floor(Math.random() * 10000),
+        productId: product._id,
+        quantity: 1,
+        unitPrice: '3.25',
+        totalPrice: '3.25',
+        basePriceSnapshot: '3.25',
+        markupPercentageSnapshot: 0,
+        finalPriceCharged: '3.25',
+        groupIdSnapshot: group._id,
+        walletDeducted,
+        creditUsedAmount: '0',
+        status,
+        executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        providerCode: 'fazer-cards',
+        providerOrderId,
+        providerStatus: 'Pending',
+        providerIdempotencyKey: `fazercards:code-delivery:${providerOrderId}`,
+        familyKey,
+        fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+        customerInput: {
+            values: {},
+            fieldsSnapshot: [],
+        },
+    });
+    return { provider, providerProduct, product, order, customer };
+};
+
 const originalFazerConfig = { ...config.providers.fazerCards };
 
 beforeAll(async () => {
@@ -339,6 +380,8 @@ beforeEach(async () => {
     config.providers.fazerCards.maxOrderUsd = 1.00;
     config.providers.fazerCards.codeDeliveryEnabled = false;
     config.providers.fazerCards.codeDeliveryMaxOrderUsd = 3.00;
+    config.providers.fazerCards.webhookEnabled = false;
+    config.providers.fazerCards.webhookSecret = '';
     config.providers.fazerCards.blockedRegions = ['RU', 'RUSSIA', 'CIS'];
     axios.create.mockReset();
     await clearCollections();
@@ -454,13 +497,23 @@ describe('FazerCards client foundation', () => {
         });
     });
 
-    it('does not assume a top-up order status endpoint until configured', () => {
-        axios.create.mockReturnValue(makeClient());
+    it('uses the documented generic order status endpoint by default', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: {},
+            data: { ok: true, order: { id: 'fc_order_1', status: 'processing' } },
+        });
 
         const fazer = new FazerCardsClient({ enabled: true, apiKey: 'test-fazer-key' });
 
-        expect(() => fazer.getTopupOrderStatus({ providerOrderId: 'fc_order_1' }))
-            .toThrow(/status endpoint is not confirmed/);
+        await expect(fazer.getTopupOrderStatus({ providerOrderId: 'fc_order_1' }))
+            .resolves.toMatchObject({ data: { order: { id: 'fc_order_1' } } });
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'get',
+            url: '/orders/fc_order_1',
+        }));
     });
 });
 
@@ -2700,7 +2753,6 @@ describe('FazerCards launch readiness gate', () => {
         });
         expect(result.warnings).toContain('Global real order gate is disabled.');
         expect(result.warnings).toContain('Product is hidden from customers.');
-        expect(result.warnings).toContain('FazerCards top-up order status endpoint is not confirmed/configured.');
         expect(result.nextActions).toContain('Use a real valid account ID.');
         expect(await Order.countDocuments({})).toBe(0);
         expect(await WalletTransaction.countDocuments({})).toBe(0);
@@ -2977,6 +3029,210 @@ describe('FazerCards order monitoring and reconcile tools', () => {
         expect(serialized).not.toContain('test-fazer-key');
         expect(debug.lastProviderRawResponse.apiKey).toBe('[REDACTED]');
         expect(product.providerExecutionEnabled).toBe(false);
+    });
+});
+
+describe('FazerCards signed webhooks', () => {
+    const enableWebhook = () => {
+        config.providers.fazerCards.webhookEnabled = true;
+        config.providers.fazerCards.webhookSecret = 'test-webhook-secret';
+    };
+
+    const signedWebhook = (payload, headerName = 'x-webhook-signature') => {
+        const rawBody = Buffer.from(JSON.stringify(payload));
+        return {
+            rawBody,
+            payload,
+            headers: {
+                [headerName]: fazerCardsWebhookSvc.hmacRawBody(rawBody, config.providers.fazerCards.webhookSecret),
+            },
+        };
+    };
+
+    const markSent = (order, providerOrderId = 'fc_webhook_1') => Order.findByIdAndUpdate(order._id, {
+        $set: {
+            providerOrderId,
+            providerStatus: 'Pending',
+            providerRawResponse: { ok: true, order: { id: providerOrderId, status: 'processing' } },
+            providerIdempotencyKey: `fazercards:topup:${order._id.toString()}`,
+        },
+    }, { new: true });
+
+    it('accepts valid signatures and logs unmatched events safely', async () => {
+        enableWebhook();
+        const payload = {
+            event: 'order.status_changed',
+            event_id: 'evt_unmatched',
+            data: { order_id: 'fc_missing', status: 'processing' },
+        };
+
+        const result = await fazerCardsWebhookSvc.processWebhook(signedWebhook(payload));
+        const event = await FazerCardsWebhookEvent.findOne({ eventId: 'evt_unmatched' }).lean();
+
+        expect(result).toMatchObject({ success: true, unmatched: true, processed: false });
+        expect(event).toMatchObject({
+            event: 'order.status_changed',
+            providerOrderId: 'fc_missing',
+            matched: false,
+            processingStatus: 'unmatched',
+        });
+        expect(JSON.stringify(event)).not.toContain('test-webhook-secret');
+        expect(JSON.stringify(event)).not.toContain('test-fazer-key');
+    });
+
+    it('rejects invalid signatures and supports both documented signature headers', async () => {
+        enableWebhook();
+        const payload = { event: 'order.status_changed', event_id: 'evt_bad_sig', data: { order_id: 'fc_1', status: 'processing' } };
+        const rawBody = Buffer.from(JSON.stringify(payload));
+
+        await expect(fazerCardsWebhookSvc.processWebhook({
+            rawBody,
+            payload,
+            headers: { 'x-webhook-signature': 'sha256=bad' },
+        })).rejects.toMatchObject({ code: 'FAZERCARDS_WEBHOOK_SIGNATURE_INVALID' });
+
+        const viaFazerHeader = await fazerCardsWebhookSvc.processWebhook(
+            signedWebhook({ ...payload, event_id: 'evt_alt_header' }, 'x-fazercards-signature')
+        );
+
+        expect(viaFazerHeader).toMatchObject({ success: true, unmatched: true });
+        expect(await FazerCardsWebhookEvent.countDocuments({})).toBe(1);
+    });
+
+    it('deduplicates event_id and does not process the same event twice', async () => {
+        enableWebhook();
+        const { order } = await createFazerTopupOrder();
+        await markSent(order, 'fc_duplicate');
+        const payload = {
+            event: 'order.completed',
+            event_id: 'evt_duplicate',
+            data: { order_id: 'fc_duplicate', status: 'completed' },
+        };
+
+        const first = await fazerCardsWebhookSvc.processWebhook(signedWebhook(payload));
+        const second = await fazerCardsWebhookSvc.processWebhook(signedWebhook(payload));
+        const updated = await Order.findById(order._id).lean();
+
+        expect(first).toMatchObject({ processed: true, action: 'completed' });
+        expect(second).toMatchObject({ success: true, duplicate: true, processed: false });
+        expect(updated.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(await FazerCardsWebhookEvent.countDocuments({ eventId: 'evt_duplicate' })).toBe(1);
+    });
+
+    it('completed webhook updates matched non-code FazerCards orders', async () => {
+        enableWebhook();
+        const { order } = await createFazerTopupOrder();
+        await markSent(order, 'fc_completed');
+
+        const result = await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+            event: 'order.completed',
+            event_id: 'evt_completed',
+            data: { order_id: 'fc_completed', status: 'fulfilled' },
+        }));
+        const updated = await Order.findById(order._id).lean();
+
+        expect(result).toMatchObject({ processed: true, action: 'completed' });
+        expect(updated.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(updated.providerStatus).toBe('Completed');
+    });
+
+    it('completed code-delivery webhook stores encrypted code and never returns plaintext', async () => {
+        enableWebhook();
+        const { order } = await createFazerCodeDeliveryOrder({ familyKey: 'GIFTCARDS', providerOrderId: 'fc_code_done' });
+        const payload = {
+            event: 'order.completed',
+            event_id: 'evt_code_done',
+            data: {
+                order_id: 'fc_code_done',
+                status: 'completed',
+                cards: [{ code: 'ACASH-SECRET-CODE', pin: '1234', serial: 'SER-1' }],
+            },
+        };
+
+        const result = await fazerCardsWebhookSvc.processWebhook(signedWebhook(payload));
+        const updated = await Order.findById(order._id).lean();
+        const stored = await ProviderDeliveredCode.findOne({ order: order._id })
+            .select('+codeEncrypted +pinEncrypted +serialEncrypted providerRawResponse')
+            .lean();
+        const event = await FazerCardsWebhookEvent.findOne({ eventId: 'evt_code_done' }).lean();
+        const serializedResult = JSON.stringify(result);
+        const serializedEvent = JSON.stringify(event);
+
+        expect(result).toMatchObject({ processed: true, action: 'completed' });
+        expect(updated.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(stored).toBeTruthy();
+        expect(isEncryptedSecret(stored.codeEncrypted)).toBe(true);
+        expect(decryptSecret(stored.codeEncrypted)).toBe('ACASH-SECRET-CODE');
+        expect(serializedResult).not.toContain('ACASH-SECRET-CODE');
+        expect(serializedResult).not.toContain('1234');
+        expect(serializedEvent).not.toContain('ACASH-SECRET-CODE');
+        expect(serializedEvent).not.toContain('1234');
+        expect(event.rawPayloadSanitized.data.cards[0].code).toBe('[REDACTED_CODE]');
+    });
+
+    it('completed code-delivery webhook without code does not falsely complete', async () => {
+        enableWebhook();
+        const { order } = await createFazerCodeDeliveryOrder({ familyKey: 'GAME_KEYS', providerOrderId: 'fc_key_missing' });
+
+        const result = await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+            event: 'order.completed',
+            event_id: 'evt_key_missing',
+            data: { order_id: 'fc_key_missing', status: 'completed' },
+        }));
+        const updated = await Order.findById(order._id).lean();
+
+        expect(result).toMatchObject({ processed: true, action: 'manualReview' });
+        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.providerErrorCode).toBe('FAZERCARDS_CODE_DELIVERY_CODE_MISSING');
+        expect(await ProviderDeliveredCode.countDocuments({ order: order._id })).toBe(0);
+    });
+
+    it('failed and refunded webhook events refund once only', async () => {
+        enableWebhook();
+        const { order, customer } = await createFazerTopupOrder({ walletDeducted: 50 });
+        await markSent(order, 'fc_failed_webhook');
+
+        await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+            event: 'order.failed',
+            event_id: 'evt_failed_once',
+            data: { order_id: 'fc_failed_webhook', status: 'failed' },
+        }));
+        await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+            event: 'order.refunded',
+            event_id: 'evt_refunded_once',
+            data: { order_id: 'fc_failed_webhook', status: 'refunded' },
+        }));
+
+        const updated = await Order.findById(order._id).lean();
+        const refunds = await WalletTransaction.find({ userId: customer._id, type: 'REFUND' });
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(refunds).toHaveLength(1);
+    });
+
+    it('processing and unknown webhook statuses do not refund blindly', async () => {
+        enableWebhook();
+        for (const scenario of [
+            { eventId: 'evt_processing', status: 'accepted', expectedStatus: ORDER_STATUS.PROCESSING },
+            { eventId: 'evt_unknown', status: 'mystery', expectedStatus: ORDER_STATUS.MANUAL_REVIEW },
+        ]) {
+            await clearCollections();
+            enableWebhook();
+            const { order, customer } = await createFazerTopupOrder({ walletDeducted: 50 });
+            await markSent(order, `fc_${scenario.eventId}`);
+            const before = (await User.findById(customer._id)).walletBalance;
+
+            await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+                event: 'order.status_changed',
+                event_id: scenario.eventId,
+                data: { order_id: `fc_${scenario.eventId}`, status: scenario.status },
+            }));
+
+            const updated = await Order.findById(order._id).lean();
+            expect(updated.status).toBe(scenario.expectedStatus);
+            expect(updated.refunded).toBe(false);
+            expect((await User.findById(customer._id)).walletBalance).toBe(before);
+        }
     });
 });
 

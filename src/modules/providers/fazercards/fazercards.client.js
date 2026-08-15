@@ -222,6 +222,24 @@ class FazerCardsClient {
         });
     }
 
+    getOrder(orderId) {
+        const id = String(orderId || '').trim();
+        if (!id) {
+            throw new BusinessRuleError('FazerCards order id is required.', 'FAZERCARDS_PROVIDER_ORDER_ID_REQUIRED');
+        }
+
+        return this.request('get', `/orders/${encodeURIComponent(id)}`, {
+            context: 'order_status',
+        });
+    }
+
+    listOrders(params = {}) {
+        return this.request('get', '/orders', {
+            params,
+            context: 'orders',
+        });
+    }
+
     getTopupOrderStatus({ providerOrderId } = {}) {
         const id = String(providerOrderId || '').trim();
         if (!id) {
@@ -229,12 +247,7 @@ class FazerCardsClient {
         }
 
         const configuredPath = String(this.topupOrderStatusPath || '').trim();
-        if (!configuredPath) {
-            throw new BusinessRuleError(
-                'FazerCards top-up order status endpoint is not confirmed/configured.',
-                FAZERCARDS_ERROR_CODES.STATUS_ENDPOINT_UNCONFIRMED
-            );
-        }
+        if (!configuredPath) return this.getOrder(id);
 
         const normalizedPath = configuredPath.startsWith('/') ? configuredPath : `/${configuredPath}`;
         const hasPlaceholder = normalizedPath.includes('{providerOrderId}');

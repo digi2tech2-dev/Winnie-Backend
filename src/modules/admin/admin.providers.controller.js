@@ -9,6 +9,7 @@ const xenaSvc = require('../providers/xena/xena.service');
 const xenaProductSvc = require('../providers/xena/xenaProduct.service');
 const xenaTargetSvc = require('../providers/xena/xenaTarget.service');
 const fazerCardsCatalogSvc = require('../providers/fazercards/fazercardsCatalog.service');
+const fazerCardsWebhookSvc = require('../providers/fazercards/fazercards.webhook.service');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
@@ -191,6 +192,11 @@ const getFazerCardsCatalogSummary = catchAsync(async (req, res) => {
 const getFazerCardsLaunchHealth = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.getLaunchHealth();
     sendSuccess(res, data, 'FazerCards launch health retrieved');
+});
+
+const listFazerCardsWebhookDeliveries = catchAsync(async (req, res) => {
+    const data = await fazerCardsWebhookSvc.listDeliveries(req.query);
+    sendPaginated(res, data.deliveries, data.pagination, 'FazerCards webhook deliveries retrieved');
 });
 
 const listFazerCardsContracts = catchAsync(async (req, res) => {
@@ -404,6 +410,7 @@ module.exports = {
     getFazerCardsCatalogSyncStatus,
     getFazerCardsCatalogSummary,
     getFazerCardsLaunchHealth,
+    listFazerCardsWebhookDeliveries,
     listFazerCardsContracts,
     getFazerCardsContractsSummary,
     getFazerCardsContract,

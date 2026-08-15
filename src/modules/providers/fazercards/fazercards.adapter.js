@@ -6,6 +6,10 @@ const { FULFILLMENT_MODES } = require('../providerProduct.model');
 const { PROVIDER_CODES } = require('../provider.constants');
 const { BusinessRuleError } = require('../../../shared/errors/AppError');
 const { FazerCardsClient, sanitizePayload } = require('./fazercards.client');
+const {
+    NORMALIZED_STATUSES,
+    parseFazerCardsOrderPayload,
+} = require('./fazercardsStatus.service');
 
 const asString = (value, fallback = null) => {
     if (value === null || value === undefined || value === '') return fallback;
@@ -793,30 +797,23 @@ class FazerCardsAdapter extends BaseProviderAdapter {
         }
 
         const data = response?.data || {};
-        const order = extractTopupOrderNode(data);
-        const providerOrderIdFromResponse = asString(extractTopupOrderId(data, order), normalizedProviderOrderId);
-        const rawStatus = firstValue(
-            order?.status,
-            data?.status,
-            order?.state,
-            data?.state,
-            order?.provider_status,
-            data?.provider_status
-        );
-        const mapped = normalizeTopupOrderStatus(rawStatus);
-        const providerRequestId = extractTopupProviderRequestId(data, response?.requestId);
+        const parsed = parseFazerCardsOrderPayload(data, {
+            fallbackProviderOrderId: normalizedProviderOrderId,
+            requestId: response?.requestId,
+        });
         const baseResult = {
-            providerOrderId: providerOrderIdFromResponse,
-            providerStatus: mapped.status,
-            providerRequestId,
-            providerMessage: firstValue(order?.message, data?.message, null),
-            providerErrorCode: firstValue(order?.errorCode, order?.error_code, data?.errorCode, data?.error_code, null),
-            providerErrorMessage: firstValue(order?.errorMessage, order?.error_message, data?.errorMessage, data?.error_message, null),
+            providerOrderId: parsed.providerOrderId || normalizedProviderOrderId,
+            providerStatus: parsed.providerStatus,
+            providerRequestId: parsed.providerRequestId,
+            providerMessage: parsed.providerMessage,
+            providerErrorCode: parsed.providerErrorCode,
+            providerErrorMessage: parsed.providerErrorMessage,
             rawResponse: data,
-            errorMessage: firstValue(order?.errorMessage, order?.error_message, data?.errorMessage, data?.error_message, null),
+            errorMessage: parsed.providerErrorMessage || parsed.errorMessage,
+            normalizedStatus: parsed.normalizedStatus,
         };
 
-        if (!mapped.known) {
+        if (!parsed.knownStatus || !parsed.providerOrderId) {
             return buildManualReviewResult({
                 ...baseResult,
                 providerErrorCode: baseResult.providerErrorCode || 'FAZERCARDS_STATUS_UNKNOWN',
@@ -824,11 +821,11 @@ class FazerCardsAdapter extends BaseProviderAdapter {
             });
         }
 
-        if (mapped.terminalFailure) {
+        if (parsed.normalizedStatus === NORMALIZED_STATUSES.FAILED || parsed.normalizedStatus === NORMALIZED_STATUSES.REFUNDED) {
             return {
                 ...baseResult,
                 success: false,
-                providerStatus: 'Cancelled',
+                providerStatus: parsed.providerStatus,
                 providerErrorCode: baseResult.providerErrorCode || 'FAZERCARDS_TOPUP_ORDER_FAILED',
                 providerErrorMessage: baseResult.providerErrorMessage || 'FazerCards top-up order failed.',
                 errorMessage: baseResult.errorMessage || 'FazerCards top-up order failed.',
@@ -841,8 +838,12 @@ class FazerCardsAdapter extends BaseProviderAdapter {
         };
     }
 
-    async checkOrder(providerOrderId) {
+    async getOrderStatus({ providerOrderId } = {}) {
         return this.getTopupOrderStatus({ providerOrderId });
+    }
+
+    async checkOrder(providerOrderId) {
+        return this.getOrderStatus({ providerOrderId });
     }
 
     async checkOrders(orderIds = []) {

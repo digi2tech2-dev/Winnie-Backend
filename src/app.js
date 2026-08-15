@@ -23,6 +23,7 @@ const auditRoutes = require('./modules/audit/audit.routes');
 const depositRoutes = require('./modules/deposits/deposit.routes');
 const paymentRoutes = require('./modules/payments/payment.routes');
 const paymentWebhookRoutes = require('./modules/payments/payment.webhook.routes');
+const fazerCardsWebhookRoutes = require('./modules/providers/fazercards/fazercards.webhook.routes');
 const referralRoutes = require('./modules/referrals/referral.routes');
 const groupRequestRoutes = require('./modules/groupRequests/groupRequest.routes');
 const notificationRoutes = require('./modules/notifications/notification.routes');
@@ -75,7 +76,8 @@ app.use(
 const captureRawBody = (req, _res, buf) => {
     if (
         req.originalUrl?.startsWith(`${API_PREFIX}/webhooks/payments/paymento`) ||
-        req.originalUrl?.startsWith(`${API_PREFIX}/webhooks/payments/ziina`)
+        req.originalUrl?.startsWith(`${API_PREFIX}/webhooks/payments/ziina`) ||
+        req.originalUrl?.startsWith(`${API_PREFIX}/webhooks/providers/fazercards`)
     ) {
         req.rawBody = Buffer.from(buf || Buffer.alloc(0));
     }
@@ -133,6 +135,7 @@ app.use(`${API_PREFIX}/audit`, auditRoutes);
 app.use(`${API_PREFIX}/deposits`, depositRoutes);
 app.use(`${API_PREFIX}/payments`, paymentRoutes);
 app.use(`${API_PREFIX}/webhooks/payments`, paymentWebhookRoutes);
+app.use(`${API_PREFIX}/webhooks/providers/fazercards`, fazerCardsWebhookRoutes);
 app.use(`${API_PREFIX}`, referralRoutes);
 app.use(`${API_PREFIX}`, groupRequestRoutes);
 app.use(`${API_PREFIX}/notifications`, notificationRoutes);

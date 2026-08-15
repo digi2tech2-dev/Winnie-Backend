@@ -17,12 +17,17 @@ const {
     normalizeTopupOrderStatus,
 } = require('./fazercards.adapter');
 const { sanitizePayload } = require('./fazercards.client');
+const {
+    NORMALIZED_STATUSES,
+    parseFazerCardsOrderPayload,
+} = require('./fazercardsStatus.service');
 const { getFazerCardsFamily, listFazerCardsFamilies } = require('./fazercardsFamilies');
 const fazerCardsContracts = require('./fazercardsContracts');
 const { ProviderDeliveredCode, DELIVERY_STATUSES } = require('./providerDeliveredCode.model');
 const { ProviderPilotOrder } = require('./providerPilotOrder.model');
 const {
     sanitizeProviderCodePayload,
+    storeDeliveredCodesForOrder,
     storeManualDeliveredCodeForOrder,
 } = require('./fazercardsDelivery.service');
 const { createAuditLog } = require('../../audit/audit.service');
@@ -2664,12 +2669,12 @@ const loadOrderForFazerCardsReconcile = async (orderId) => {
     const order = await Order.findById(orderId)
         .populate({
             path: 'productId',
-            select: 'name provider providerProduct providerCode providerExecutionEnabled fulfillmentMode',
+            select: 'name provider providerProduct providerCode providerExecutionEnabled providerExecutionMode familyKey fulfillmentMode',
             populate: [
                 { path: 'provider', select: 'name slug code providerCode isActive baseUrl authType token encryptedCredentials' },
                 {
                     path: 'providerProduct',
-                    select: 'provider providerCode externalProductId rawName costPrice rawPrice currency category offerId fulfillmentMode isSupported isBlocked requiredFields rawPayload',
+                    select: 'provider providerCode externalProductId rawName costPrice rawPrice currency category categoryName offerId offerName familyKey fulfillmentMode isSupported isBlocked requiredFields rawPayload',
                     populate: { path: 'provider', select: 'name slug code providerCode isActive baseUrl authType token encryptedCredentials' },
                 },
             ],
@@ -2714,7 +2719,7 @@ const buildProviderResultUpdate = (result = {}, fallbackProviderOrderId = null) 
     const update = {
         providerOrderId: result.providerOrderId ?? fallbackProviderOrderId,
         providerStatus: result.providerStatus,
-        providerRawResponse: sanitizePayload(result.rawResponse),
+        providerRawResponse: sanitizeProviderCodePayload(sanitizePayload(result.rawResponse)),
         lastCheckedAt: new Date(),
     };
 
@@ -2731,11 +2736,84 @@ const buildProviderResultUpdate = (result = {}, fallbackProviderOrderId = null) 
     return update;
 };
 
-const updateOrderFromFazerCardsStatus = async (order, result) => {
+const getOrderFamilyKey = (order) => String(
+    order?.familyKey
+    || getOrderProduct(order)?.familyKey
+    || getOrderProviderProduct(order)?.familyKey
+    || ''
+).trim().toUpperCase();
+
+const getOrderFulfillmentMode = (order) => String(
+    order?.fulfillmentMode
+    || getOrderProduct(order)?.fulfillmentMode
+    || getOrderProviderProduct(order)?.fulfillmentMode
+    || ''
+).trim().toUpperCase();
+
+const isCodeDeliveryFazerCardsOrder = (order) => (
+    getOrderFulfillmentMode(order) === FULFILLMENT_MODES.CODE_DELIVERY
+    || ['GIFTCARDS', 'GAME_KEYS'].includes(getOrderFamilyKey(order))
+);
+
+const appendFazerCardsStatusHistory = (status, note, metadata = null) => ({
+    status,
+    note,
+    metadata: sanitizeProviderCodePayload(sanitizePayload(metadata)),
+    at: new Date(),
+});
+
+const getExistingDeliveredCodeCount = (orderId) => ProviderDeliveredCode.countDocuments({ order: orderId });
+
+const storeDeliveredCodesFromProviderPayload = async (order, rawPayload) => {
+    if (!isCodeDeliveryFazerCardsOrder(order) || !rawPayload) {
+        return {
+            deliveredCodeCount: 0,
+            storedEncrypted: false,
+            hasPin: false,
+            hasSerial: false,
+        };
+    }
+
+    const product = getOrderProduct(order);
+    const providerProduct = getOrderProviderProduct(order);
+    const providerDoc = product?.provider || providerProduct?.provider || await findFazerCardsProvider();
+    return storeDeliveredCodesForOrder({
+        order,
+        providerDoc,
+        providerProduct,
+        product,
+        familyKey: getOrderFamilyKey(order),
+        rawResponse: rawPayload,
+    });
+};
+
+const updateOrderFromFazerCardsStatus = async (order, result, { source = 'fazercards_status_sync' } = {}) => {
     const now = new Date();
     const update = buildProviderResultUpdate(result, order.providerOrderId);
+    const normalizedStatus = result.normalizedStatus || (
+        result.manualReview === true
+            ? NORMALIZED_STATUSES.UNKNOWN
+            : result.success === false
+                ? NORMALIZED_STATUSES.FAILED
+                : result.providerStatus === 'Completed'
+                    ? NORMALIZED_STATUSES.COMPLETED
+                    : NORMALIZED_STATUSES.PROCESSING
+    );
 
-    if (result.manualReview === true) {
+    if ([ORDER_STATUS.FAILED, ORDER_STATUS.CANCELED].includes(order.status) && normalizedStatus === NORMALIZED_STATUSES.COMPLETED) {
+        const updated = await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                ...update,
+                lastCheckedAt: now,
+            },
+            $push: {
+                statusHistory: appendFazerCardsStatusHistory(order.status, 'Ignored provider completion for a locally terminal failed/refunded order.', { source }),
+            },
+        }, { new: true });
+        return { order: updated, action: 'ignoredTerminal', refunded: updated?.refunded === true };
+    }
+
+    if (normalizedStatus === NORMALIZED_STATUSES.UNKNOWN || result.manualReview === true) {
         const updated = await Order.findByIdAndUpdate(order._id, {
             $set: {
                 status: ORDER_STATUS.MANUAL_REVIEW,
@@ -2744,11 +2822,35 @@ const updateOrderFromFazerCardsStatus = async (order, result) => {
                     || result.providerErrorMessage
                     || 'FazerCards provider status is unknown and requires manual review.',
             },
+            $push: {
+                statusHistory: appendFazerCardsStatusHistory(ORDER_STATUS.MANUAL_REVIEW, 'FazerCards provider status is unknown and requires manual review.', {
+                    source,
+                    providerOrderId: update.providerOrderId,
+                    providerStatus: result.providerStatus,
+                }),
+            },
         }, { new: true });
         return { order: updated, action: 'manualReview', refunded: false };
     }
 
-    if (result.success === false) {
+    if (normalizedStatus === NORMALIZED_STATUSES.PROCESSING) {
+        const updated = await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                status: ORDER_STATUS.PROCESSING,
+                ...update,
+            },
+            $push: {
+                statusHistory: appendFazerCardsStatusHistory(ORDER_STATUS.PROCESSING, 'FazerCards provider order is still processing.', {
+                    source,
+                    providerOrderId: update.providerOrderId,
+                    providerStatus: result.providerStatus,
+                }),
+            },
+        }, { new: true });
+        return { order: updated, action: 'processing', refunded: updated?.refunded === true };
+    }
+
+    if (normalizedStatus === NORMALIZED_STATUSES.FAILED || normalizedStatus === NORMALIZED_STATUSES.REFUNDED || result.success === false) {
         await Order.findByIdAndUpdate(order._id, {
             $set: {
                 status: ORDER_STATUS.FAILED,
@@ -2758,29 +2860,65 @@ const updateOrderFromFazerCardsStatus = async (order, result) => {
                     || 'FazerCards provider reported the order failed.',
                 failedAt: order.failedAt || now,
             },
+            $push: {
+                statusHistory: appendFazerCardsStatusHistory(ORDER_STATUS.FAILED, 'FazerCards provider reported a terminal failed/refunded status.', {
+                    source,
+                    providerOrderId: update.providerOrderId,
+                    providerStatus: result.providerStatus,
+                    normalizedStatus,
+                }),
+            },
         });
         const failedOrder = await Order.findById(order._id);
         const refunded = await refundFailedOrder(failedOrder, {
-            source: 'fazercards_status_sync',
-            reason: 'PROVIDER_FAILED',
+            source,
+            reason: normalizedStatus === NORMALIZED_STATUSES.REFUNDED ? 'PROVIDER_REFUNDED' : 'PROVIDER_FAILED',
             providerRejected: true,
         });
         return { order: await Order.findById(order._id), action: 'failed', refunded };
     }
 
-    const nextStatus = result.providerStatus === 'Completed'
-        ? ORDER_STATUS.COMPLETED
-        : ORDER_STATUS.PROCESSING;
+    if (normalizedStatus === NORMALIZED_STATUSES.COMPLETED && isCodeDeliveryFazerCardsOrder(order)) {
+        const storedCodes = await storeDeliveredCodesFromProviderPayload(order, result.rawProviderPayload || result.rawResponse);
+        const deliveredCodeCount = await getExistingDeliveredCodeCount(order._id);
+        if (deliveredCodeCount <= 0) {
+            const updated = await Order.findByIdAndUpdate(order._id, {
+                $set: {
+                    status: ORDER_STATUS.MANUAL_REVIEW,
+                    ...update,
+                    providerErrorCode: result.providerErrorCode || 'FAZERCARDS_CODE_DELIVERY_CODE_MISSING',
+                    providerErrorMessage: result.providerErrorMessage || 'Provider completed but code payload was not recognized.',
+                    rejectionReason: result.errorMessage || result.providerErrorMessage || 'Provider completed but code payload was not recognized.',
+                },
+                $push: {
+                    statusHistory: appendFazerCardsStatusHistory(ORDER_STATUS.MANUAL_REVIEW, 'Provider completed but code payload was not recognized.', {
+                        source,
+                        providerOrderId: update.providerOrderId,
+                        storedEncrypted: storedCodes.storedEncrypted,
+                    }),
+                },
+            }, { new: true });
+            return { order: updated, action: 'manualReview', refunded: false, deliveredCodeCount: 0 };
+        }
+    }
+
     const updated = await Order.findByIdAndUpdate(order._id, {
         $set: {
-            status: nextStatus,
+            status: ORDER_STATUS.COMPLETED,
             ...update,
+        },
+        $push: {
+            statusHistory: appendFazerCardsStatusHistory(ORDER_STATUS.COMPLETED, 'FazerCards provider order completed.', {
+                source,
+                providerOrderId: update.providerOrderId,
+                providerStatus: result.providerStatus,
+            }),
         },
     }, { new: true });
 
     return {
         order: updated,
-        action: nextStatus === ORDER_STATUS.COMPLETED ? 'completed' : 'processing',
+        action: 'completed',
         refunded: updated?.refunded === true,
     };
 };
@@ -2803,8 +2941,8 @@ const syncOrderStatus = async (orderId, adapterOptions = {}) => {
     const providerProduct = getOrderProviderProduct(order);
     const providerDoc = product?.provider || providerProduct?.provider || await findFazerCardsProvider();
     const adapter = new FazerCardsAdapter(providerDoc, adapterOptions);
-    const result = await adapter.getTopupOrderStatus({ providerOrderId: order.providerOrderId });
-    const applied = await updateOrderFromFazerCardsStatus(order, result);
+    const result = await adapter.getOrderStatus({ providerOrderId: order.providerOrderId });
+    const applied = await updateOrderFromFazerCardsStatus(order, result, { source: 'fazercards_status_sync' });
 
     return {
         success: applied.action !== 'manualReview',
@@ -2826,6 +2964,42 @@ const syncOrderStatus = async (orderId, adapterOptions = {}) => {
     };
 };
 
+const applyProviderStatusPayloadToOrder = async (orderId, payload = {}, {
+    source = 'fazercards_webhook',
+    providerOrderId = null,
+    providerRequestId = null,
+    fallbackStatus = null,
+} = {}) => {
+    const order = await loadOrderForFazerCardsReconcile(orderId);
+    assertFazerCardsOrder(order);
+
+    const parsed = parseFazerCardsOrderPayload(payload, {
+        fallbackProviderOrderId: providerOrderId || order.providerOrderId,
+        requestId: providerRequestId,
+        providerIdempotencyKey: order.providerIdempotencyKey,
+        fallbackStatus,
+    });
+    const applied = await updateOrderFromFazerCardsStatus(order, parsed, { source });
+    return {
+        success: applied.action !== 'manualReview',
+        action: applied.action,
+        providerResult: {
+            providerOrderId: parsed.providerOrderId ?? order.providerOrderId,
+            providerStatus: parsed.providerStatus,
+            normalizedStatus: parsed.normalizedStatus,
+            providerRequestId: parsed.providerRequestId ?? null,
+            providerErrorCode: parsed.providerErrorCode ?? null,
+            providerErrorMessage: parsed.providerErrorMessage ?? null,
+            manualReview: parsed.manualReview === true,
+        },
+        refunded: applied.refunded === true,
+        order: summarizeOrder(applied.order),
+        warnings: applied.action === 'manualReview'
+            ? ['Provider status could not be safely completed. Order requires review without an automatic refund.']
+            : [],
+    };
+};
+
 const getOrderProviderDebug = async (orderId) => {
     const order = await loadOrderForFazerCardsReconcile(orderId);
     assertFazerCardsOrder(order);
@@ -2837,9 +3011,6 @@ const getOrderProviderDebug = async (orderId) => {
     const warnings = [];
 
     if (!order.providerOrderId) warnings.push('FazerCards order has not been sent to the provider.');
-    if (!config.providers.fazerCards.topupOrderStatusPath) {
-        warnings.push('FazerCards top-up order status endpoint is not confirmed/configured.');
-    }
     if (product?.providerExecutionEnabled !== true) {
         warnings.push('Product provider execution is currently disabled.');
     }
@@ -3151,8 +3322,6 @@ const isCodeDeliveryManualOrder = (order) => {
     const fulfillmentMode = String(order.fulfillmentMode || product?.fulfillmentMode || providerProduct?.fulfillmentMode || '').trim().toUpperCase();
     return fulfillmentMode === FULFILLMENT_MODES.CODE_DELIVERY && CODE_DELIVERY_IMPORT_FAMILIES.has(familyKey);
 };
-
-const getExistingDeliveredCodeCount = (orderId) => ProviderDeliveredCode.countDocuments({ order: orderId });
 
 const completeManualOrder = async (orderId, {
     adminNote = '',
@@ -3753,10 +3922,15 @@ const getLaunchHealth = async (adapterOptions = {}) => {
     if (config.providers.fazerCards.customerPurchaseEnabled === false) warnings.push('FazerCards customer purchase gate is disabled.');
     if (config.providers.fazerCards.realOrdersEnabled !== true) warnings.push('FazerCards real order gate is disabled.');
     if (config.providers.fazerCards.codeDeliveryEnabled !== true) warnings.push('FazerCards code delivery gate is disabled.');
+    if (config.providers.fazerCards.webhookEnabled === true && !config.providers.fazerCards.webhookSecret) {
+        warnings.push('FazerCards webhook processing is enabled but the webhook secret is missing.');
+    }
     if (visibleAutoProvider > 0 && config.providers.fazerCards.realOrdersEnabled !== true) {
         warnings.push('Visible AUTO_PROVIDER products exist while the global real order gate is disabled; orders will require manual review.');
     }
     warnings.push('Steam Gifts remain disabled because production catalog discovery returned HTTP 404.');
+
+    const appUrl = String(process.env.APP_URL || `http://localhost:${process.env.PORT || 5000}`).replace(/\/+$/, '');
 
     return {
         success: true,
@@ -3770,6 +3944,16 @@ const getLaunchHealth = async (adapterOptions = {}) => {
             customerPurchaseEnabled: config.providers.fazerCards.customerPurchaseEnabled !== false,
             realOrdersEnabled: config.providers.fazerCards.realOrdersEnabled === true,
             codeDeliveryEnabled: config.providers.fazerCards.codeDeliveryEnabled === true,
+        },
+        webhooks: {
+            endpointUrl: `${appUrl}/api/webhooks/providers/fazercards`,
+            enabled: config.providers.fazerCards.webhookEnabled === true,
+            secretConfigured: Boolean(config.providers.fazerCards.webhookSecret),
+            status: config.providers.fazerCards.webhookEnabled !== true
+                ? 'disabled'
+                : config.providers.fazerCards.webhookSecret
+                    ? 'enabled'
+                    : 'missing_secret',
         },
         catalog: {
             byFamily: catalog.byFamily,
@@ -3836,5 +4020,6 @@ module.exports = {
     publishEligibleLaunchControls,
     updateSingleProductLaunchControls,
     syncOrderStatus,
+    applyProviderStatusPayloadToOrder,
     getOrderProviderDebug,
 };
