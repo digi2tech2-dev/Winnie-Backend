@@ -3378,6 +3378,8 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
         || updates.visibleInStore === true
         || updates.status === PRODUCT_STATUSES.AVAILABLE
         || enablingCustomerPurchase;
+    const enablingAutoProvider = validatedMode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER
+        && updates.providerExecutionEnabled === true;
 
     if (!modeValidation.ok) {
         errors.push({ code: modeValidation.code, message: modeValidation.message, allowedModes: modeValidation.allowedModes });
@@ -3390,6 +3392,24 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
     }
     if (modeValidation.ok && modeValidation.mode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER && fazerCardsContracts.canAutoExecuteFamily(familyKey) !== true) {
         errors.push({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED', message: 'Auto provider execution is not allowed for this FazerCards family contract.' });
+    }
+    if (enablingAutoProvider && !launchingForCustomers) {
+        errors.push({
+            code: 'AUTO_PROVIDER_REQUIRES_CUSTOMER_VISIBLE_PRODUCT',
+            message: 'Auto provider execution can only be enabled for an active, visible, available customer product.',
+        });
+    }
+    if (enablingAutoProvider && familyKey === 'TOPUPS') {
+        const topupFieldDefinitions = fazerCardsContracts.normalizeCustomerFieldDefinitions(
+            simulatedProduct,
+            providerProduct
+        );
+        if (topupFieldDefinitions.length === 0) {
+            errors.push({
+                code: 'AUTO_PROVIDER_REQUIRES_CUSTOMER_FIELDS',
+                message: 'Top-up auto provider execution requires customer input fields.',
+            });
+        }
     }
     const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({
         product: simulatedProduct,
@@ -3427,6 +3447,7 @@ const buildBulkLaunchUpdateSet = (product, payload, validatedMode) => {
         'visibleInStore',
         'status',
         'providerExecutionMode',
+        'providerExecutionEnabled',
         'providerExecutionBlocked',
         'providerBlockReason',
     ];
@@ -3438,8 +3459,17 @@ const buildBulkLaunchUpdateSet = (product, payload, validatedMode) => {
     if (validatedMode !== fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
         update.providerExecutionEnabled = false;
         update.executionType = EXECUTION_TYPES.MANUAL;
-    } else if (product.providerExecutionEnabled === true) {
-        update.executionType = EXECUTION_TYPES.AUTOMATIC;
+    } else {
+        update.providerExecutionEnabled = payload.providerExecutionEnabled === undefined
+            ? product.providerExecutionEnabled === true
+            : payload.providerExecutionEnabled === true;
+        update.executionType = update.providerExecutionEnabled === true
+            ? EXECUTION_TYPES.AUTOMATIC
+            : EXECUTION_TYPES.MANUAL;
+        if (update.providerExecutionEnabled === true) {
+            if (payload.providerExecutionBlocked === undefined) update.providerExecutionBlocked = false;
+            if (payload.providerBlockReason === undefined) update.providerBlockReason = null;
+        }
     }
     if (validatedMode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.DISABLED) {
         update.customerPurchaseEnabled = false;

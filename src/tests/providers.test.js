@@ -3554,6 +3554,55 @@ describe('FazerCards Phase 9 launch operations', () => {
         })).rejects.toMatchObject({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED' });
     });
 
+    it.each(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS'])('single product launch can enable AUTO_PROVIDER for confirmed %s products', async (familyKey) => {
+        const { providerProduct } = familyKey === 'TOPUPS'
+            ? await createFazerTopupProviderProduct()
+            : await createFazerCodeDeliveryProviderProduct({ familyKey });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: familyKey === 'GAME_KEYS' ? 6.25 : 3.25,
+            name: `${familyKey} Auto Provider Candidate`,
+        });
+
+        const result = await fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerExecutionEnabled: true,
+        });
+        const updated = await Product.findById(product._id).lean();
+
+        expect(result.launchStatus).toEqual({ visibleToCustomer: true, reasons: [] });
+        expect(updated).toMatchObject({
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerExecutionEnabled: true,
+            providerExecutionBlocked: false,
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+        });
+    });
+
+    it('single product launch rejects enabling AUTO_PROVIDER before the product is customer visible', async () => {
+        const { providerProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GIFTCARDS' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 3.25,
+            name: 'GiftCard Hidden Auto Candidate',
+        });
+
+        await expect(fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: false,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerExecutionEnabled: true,
+        })).rejects.toMatchObject({ code: 'AUTO_PROVIDER_REQUIRES_CUSTOMER_VISIBLE_PRODUCT' });
+    });
+
     it('bulk launch returns per-product customer visibility reasons', async () => {
         const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
         const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
@@ -3649,8 +3698,8 @@ describe('FazerCards Phase 9 launch operations', () => {
         const customerOrder = await require('../modules/orders/order.service').getOrderById(order._id, customer._id);
         const serialized = JSON.stringify(customerOrder);
 
-        expect(customerOrder.customerStatusMessage).toBe('Your order is being processed manually.');
-        expect(customerOrder.fulfillmentNotice).toBe('Your order is being processed manually.');
+        expect(customerOrder.customerStatusMessage).toBe('طلبك قيد التنفيذ بواسطة الفريق');
+        expect(customerOrder.fulfillmentNotice).toBe('سيتم تنفيذ طلبك بواسطة فريقنا في أسرع وقت.');
         expect(serialized).not.toContain('providerRawResponse');
         expect(serialized).not.toContain('providerOrderId');
         expect(serialized).not.toContain('providerErrorCode');

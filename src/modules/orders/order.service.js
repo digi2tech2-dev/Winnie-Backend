@@ -275,7 +275,7 @@ const sanitizeOrderForCustomer = (order) => {
     } else if (plain.status === ORDER_STATUS.PROCESSING) {
         plain.customerStatusMessage = 'Your order is being processed.';
     } else if (plain.status === ORDER_STATUS.MANUAL_REVIEW) {
-        plain.customerStatusMessage = 'Your order is being processed manually.';
+        plain.customerStatusMessage = 'طلبك قيد التنفيذ بواسطة الفريق';
     } else if (plain.status === ORDER_STATUS.FAILED || plain.status === ORDER_STATUS.CANCELED) {
         plain.customerStatusMessage = plain.refunded
             ? 'Your order failed and the eligible refund has been processed.'
@@ -292,7 +292,7 @@ const sanitizeOrderForCustomer = (order) => {
             || plain.providerErrorCode === 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED'
         )
     ) {
-        plain.fulfillmentNotice = 'Your order is being processed manually.';
+        plain.fulfillmentNotice = 'سيتم تنفيذ طلبك بواسطة فريقنا في أسرع وقت.';
     }
 
     for (const field of [

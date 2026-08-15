@@ -111,7 +111,7 @@ const sanitizeCustomerOrder = (order = {}, deliveredCodeCount = 0) => {
             || order.providerErrorCode === 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED'
         )
     ) {
-        safe.fulfillmentNotice = 'Your order is being processed manually.';
+        safe.fulfillmentNotice = 'سيتم تنفيذ طلبك بواسطة فريقنا في أسرع وقت.';
     }
     for (const field of CUSTOMER_ORDER_PROVIDER_SENSITIVE_FIELDS) {
         delete safe[field];
@@ -149,15 +149,19 @@ const buildFazerCardsCustomerHints = (product = {}) => {
         hints.deliveryType = 'CODE_DELIVERY';
     } else if (executionMode === 'MANUAL_FULFILLMENT') {
         hints.deliveryType = 'MANUAL_FULFILLMENT';
-        hints.fulfillmentNotice = 'This order will be processed manually.';
     } else {
         hints.deliveryType = 'DIGITAL_SERVICE';
+    }
+    if (executionMode === 'AUTO_PROVIDER') {
+        hints.fulfillmentNotice = 'سيتم تنفيذ الطلب تلقائياً من المورد.';
+    } else if (executionMode === 'MANUAL_FULFILLMENT') {
+        hints.fulfillmentNotice = 'سيتم تنفيذ طلبك بواسطة فريقنا في أسرع وقت.';
     }
 
     const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({ product });
     if (!manualFieldValidation.ok) {
         hints.purchaseDisabled = true;
-        hints.purchaseUnavailableReason = 'This product is temporarily unavailable while setup is completed.';
+        hints.purchaseUnavailableReason = 'هذا المنتج غير متاح مؤقتاً حتى اكتمال الإعداد.';
     }
 
     if (product.providerRegion && !product.region) hints.region = product.providerRegion;

@@ -604,6 +604,7 @@ const fazerCardsBulkLaunchSchema = Joi.object({
     visibleInStore: Joi.boolean(),
     status: Joi.string().trim().lowercase().valid('available', 'unavailable'),
     providerExecutionMode: Joi.string().trim().uppercase().valid('AUTO_PROVIDER', 'MANUAL_FULFILLMENT', 'DISABLED'),
+    providerExecutionEnabled: Joi.boolean(),
     providerExecutionBlocked: Joi.boolean(),
     providerBlockReason: Joi.string().trim().max(200).allow('', null),
     dryRun: Joi.boolean().default(false),
@@ -615,6 +616,7 @@ const fazerCardsProductLaunchSchema = Joi.object({
     visibleInStore: Joi.boolean(),
     status: Joi.string().trim().lowercase().valid('available', 'unavailable'),
     providerExecutionMode: Joi.string().trim().uppercase().valid('AUTO_PROVIDER', 'MANUAL_FULFILLMENT', 'DISABLED'),
+    providerExecutionEnabled: Joi.boolean(),
     providerExecutionBlocked: Joi.boolean(),
     providerBlockReason: Joi.string().trim().max(200).allow('', null),
 }).min(1);
