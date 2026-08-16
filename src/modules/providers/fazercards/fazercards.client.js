@@ -263,6 +263,37 @@ class FazerCardsClient {
         });
     }
 
+    listSteamGiftGames(params = {}) {
+        return this.request('get', '/steam-gifts/games', {
+            params,
+            context: 'steam_gifts_games',
+        });
+    }
+
+    getSteamGiftGame(appid) {
+        const id = String(appid || '').trim();
+        if (!id) {
+            throw new BusinessRuleError('FazerCards Steam Gift appid is required.', 'FAZERCARDS_STEAM_GIFT_APPID_REQUIRED');
+        }
+
+        return this.request('get', `/steam-gifts/games/${encodeURIComponent(id)}`, {
+            context: 'steam_gifts_game',
+        });
+    }
+
+    buySteamGift({ invite_url, sub_id, app_id, region, idempotencyKey } = {}) {
+        return this.request('post', '/steam-gifts/order', {
+            data: {
+                invite_url,
+                sub_id,
+                app_id,
+                region,
+            },
+            headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+            context: 'steam_gift_order',
+        });
+    }
+
     createManualServiceOrder({ manual_service_id, product_id, fields, idempotencyKey } = {}) {
         return this.request('post', '/manual-services/order', {
             data: {

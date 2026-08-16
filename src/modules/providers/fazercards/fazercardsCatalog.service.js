@@ -44,7 +44,7 @@ const SYNC_ALL_DEFAULT_FAMILIES = Object.freeze([
     'STEAM_TOPUP',
     'MANUAL_SERVICES',
 ]);
-const DRAFT_IMPORT_FAMILIES = new Set(SYNC_ALL_DEFAULT_FAMILIES);
+const DRAFT_IMPORT_FAMILIES = new Set([...SYNC_ALL_DEFAULT_FAMILIES, 'STEAM_GIFTS']);
 const CODE_DELIVERY_IMPORT_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
 const AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']);
 const LAUNCH_PUBLISH_FAMILIES = Object.freeze([
@@ -60,7 +60,7 @@ const UNIMPLEMENTED_FAMILY_BLOCK_REASONS = Object.freeze({
     TELEGRAM: 'TELEGRAM_EXECUTION_NOT_IMPLEMENTED',
     STEAM_TOPUP: 'STEAM_TOPUP_EXECUTION_NOT_IMPLEMENTED',
     MANUAL_SERVICES: 'MANUAL_SERVICE_EXECUTION_NOT_IMPLEMENTED',
-    STEAM_GIFTS: 'STEAM_GIFTS_CATALOG_UNAVAILABLE',
+    STEAM_GIFTS: 'STEAM_GIFTS_CONTROLLED_ON_DEMAND',
 });
 const IMPORTED_PRODUCT_LAUNCH_SELECT = '_id name externalProductId providerProduct isActive visibleInStore status customerPurchaseEnabled providerExecutionMode providerExecutionEnabled providerExecutionBlocked providerBlockReason familyKey fulfillmentMode orderFields dynamicFields';
 let syncAllInProgress = false;
@@ -464,7 +464,7 @@ const normalizeGameKeyProduct = (game = {}, key = {}) => {
 const normalizeSteamGiftProducts = (game = {}, details = {}) => {
     const family = getFazerCardsFamily('STEAM_GIFTS');
     const appId = String(firstValue(details.appid, game.appid, game.app_id, game.id, 'unknown_app'));
-    const gameName = String(firstValue(game.name, details.name, appId));
+    const gameName = String(firstValue(game.name, details.name, `Steam App ${appId}`));
     const offers = Array.isArray(details.offers) ? details.offers : [];
     const products = [];
     for (const offer of offers) {
@@ -476,8 +476,8 @@ const normalizeSteamGiftProducts = (game = {}, details = {}) => {
             const costPrice = parseNumber(firstValue(regionOffer.price, regionOffer.price_usd, offer.price_usd), null);
             products.push(makeBlockedFamilyProduct(family, {
                 externalProductId: `FAZER_STEAM_GIFT:${appId}:${subId}:${region}`,
-                name: `${gameName} - ${offerName} (${region})`,
-                rawName: `${gameName} - ${offerName} (${region})`,
+                name: `${gameName} - ${offerName} - ${region}`,
+                rawName: `${gameName} - ${offerName} - ${region}`,
                 rawPrice: costPrice === null ? '0' : String(firstValue(regionOffer.price, regionOffer.price_usd, offer.price_usd)),
                 costPrice,
                 category: appId,
@@ -486,7 +486,22 @@ const normalizeSteamGiftProducts = (game = {}, details = {}) => {
                 offerName,
                 region,
                 platform: 'steam',
-                rawPayload: { family: family.familyKey, game, offer, region: regionOffer },
+                minQty: 1,
+                maxQty: 1,
+                requiredFields: [{ key: 'invite_url', label: 'رابط دعوة Steam', type: 'text', required: true }],
+                executionBlocked: false,
+                isSupported: costPrice !== null && costPrice > 0 && appId !== 'unknown_app' && subId !== 'unknown_sub' && Boolean(region),
+                isBlocked: costPrice === null || costPrice <= 0 || appId === 'unknown_app' || subId === 'unknown_sub' || !region,
+                blockReason: costPrice === null || costPrice <= 0
+                    ? 'INVALID_PRICE'
+                    : appId === 'unknown_app'
+                        ? 'STEAM_GIFT_APP_ID_MISSING'
+                        : subId === 'unknown_sub'
+                            ? 'STEAM_GIFT_SUB_ID_MISSING'
+                            : !region
+                                ? 'STEAM_GIFT_REGION_MISSING'
+                                : null,
+                rawPayload: { family: family.familyKey, game: { ...game, appid: appId, name: gameName }, offer, region: regionOffer },
             }));
         }
     }
@@ -610,7 +625,7 @@ const normalizeManualServiceProduct = (category = {}, offer = {}) => {
     });
 };
 
-const syncFamilyDtos = async (family, adapter, { limit, cursor } = {}) => {
+const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName } = {}) => {
     const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
     if (family.familyKey === 'GIFTCARDS') {
         const page = await adapter.fetchCatalogPath('/giftcards', { limit: normalizedLimit, cursor }, 'giftcards');
@@ -642,16 +657,23 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor } = {}) => {
     }
 
     if (family.familyKey === 'STEAM_GIFTS') {
-        const page = await adapter.fetchCatalogPath('/steam-gifts/games', { limit: normalizedLimit }, 'steam_gifts_games');
-        const games = Array.isArray(page.data?.games) ? page.data.games : [];
-        const products = [];
-        for (const game of games) {
-            const appId = String(firstValue(game.appid, game.app_id, game.id, '')).trim();
-            if (!appId) continue;
-            const details = await adapter.fetchCatalogPath(`/steam-gifts/games/${encodeURIComponent(appId)}`, {}, 'steam_gifts_game_details');
-            products.push(...normalizeSteamGiftProducts(game, details.data));
+        const appId = String(appid || '').trim();
+        if (!appId) {
+            throw new BusinessRuleError(
+                'Steam Gifts sync requires an explicit appid. Broad Steam Gifts catalog sync is intentionally disabled.',
+                'FAZERCARDS_STEAM_GIFTS_APPID_REQUIRED'
+            );
         }
-        return { products, categoriesFetched: games.length, offersFetched: products.length, meta: page.data?.meta || {}, requestId: page.requestId };
+        const details = await adapter.fetchCatalogPath(`/steam-gifts/games/${encodeURIComponent(appId)}`, {}, 'steam_gifts_game_details');
+        const game = { appid: appId, name: String(gameName || '').trim() || details.data?.name || `Steam App ${appId}` };
+        const products = normalizeSteamGiftProducts(game, details.data);
+        return {
+            products,
+            categoriesFetched: 1,
+            offersFetched: products.length,
+            meta: { appid: appId, strategy: 'appid_on_demand', broadSyncDisabled: true },
+            requestId: details.requestId,
+        };
     }
 
     if (family.familyKey === 'STEAM_TOPUP') {
@@ -689,7 +711,7 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor } = {}) => {
     throw new BusinessRuleError(`FazerCards family '${family.familyKey}' is not syncable yet.`, 'FAZERCARDS_FAMILY_DISCOVERY_UNCONFIRMED');
 };
 
-const syncCatalogFamily = async ({ family, limit = 20, cursor } = {}, adapterOptions = {}) => {
+const syncCatalogFamily = async ({ family, limit = 20, cursor, appid, gameName } = {}, adapterOptions = {}) => {
     const registryEntry = getFazerCardsFamily(family);
     if (!registryEntry || registryEntry.familyKey === 'UNKNOWN') {
         throw new BusinessRuleError('Unknown FazerCards catalog family.', 'FAZERCARDS_UNKNOWN_FAMILY');
@@ -704,7 +726,7 @@ const syncCatalogFamily = async ({ family, limit = 20, cursor } = {}, adapterOpt
     }
 
     const now = new Date();
-    const { products, categoriesFetched, offersFetched, meta, requestId } = await syncFamilyDtos(registryEntry, adapter, { limit, cursor });
+    const { products, categoriesFetched, offersFetched, meta, requestId } = await syncFamilyDtos(registryEntry, adapter, { limit, cursor, appid, gameName });
     let providerProductsCreated = 0;
     let providerProductsUpdated = 0;
     for (const dto of products) {
@@ -813,13 +835,23 @@ const syncAllCatalogFamilies = async (options = {}, adapterOptions = {}) => {
         for (const familyKey of familyKeys) {
             const registryEntry = getFazerCardsFamily(familyKey);
             if (familyKey === 'STEAM_GIFTS' || registryEntry?.catalogAvailable === false) {
+                const steamGiftSkip = familyKey === 'STEAM_GIFTS';
                 results[familyKey] = emptySyncFamilyResult(familyKey, {
                     success: false,
                     skipped: true,
-                    unavailable: true,
-                    errors: [registryEntry?.warning || 'FazerCards catalog family is unavailable.'],
+                    unavailable: registryEntry?.catalogAvailable === false,
+                    onDemandOnly: steamGiftSkip,
+                    errors: [
+                        steamGiftSkip
+                            ? 'Steam Gifts broad sync is intentionally disabled. Sync one explicit appid instead.'
+                            : registryEntry?.warning || 'FazerCards catalog family is unavailable.',
+                    ],
                 });
-                warnings.push({ familyKey, code: registryEntry?.blockReason || 'FAZERCARDS_FAMILY_UNAVAILABLE', message: results[familyKey].errors[0] });
+                warnings.push({
+                    familyKey,
+                    code: steamGiftSkip ? 'FAZERCARDS_STEAM_GIFTS_ON_DEMAND_SYNC_ONLY' : registryEntry?.blockReason || 'FAZERCARDS_FAMILY_UNAVAILABLE',
+                    message: results[familyKey].errors[0],
+                });
                 continue;
             }
 
@@ -1305,10 +1337,6 @@ const assertImportableProviderProduct = (providerProduct) => {
     if (!isTopup && !isDraftImportCandidate(providerProduct)) {
         throw new BusinessRuleError('Only recognized FazerCards catalog products can be imported as inactive drafts.', 'FAZERCARDS_IMPORT_UNSUPPORTED_FULFILLMENT_MODE');
     }
-    if (familyKey === 'STEAM_GIFTS') {
-        throw new BusinessRuleError('FazerCards Steam Gifts catalog is unavailable and cannot be imported.', 'FAZERCARDS_STEAM_GIFTS_CATALOG_UNAVAILABLE');
-    }
-
     if (isTopup) {
         if (providerProduct.isSupported !== true) {
             throw new BusinessRuleError('Unsupported FazerCards provider products cannot be imported.', 'FAZERCARDS_PROVIDER_PRODUCT_UNSUPPORTED');
@@ -2148,6 +2176,10 @@ const getUnsupportedFamilyReadiness = async (productId) => {
         hasTelegramKind: familyKey !== 'TELEGRAM' || Boolean(identifiers.kind),
         hasSteamCurrency: familyKey !== 'STEAM_TOPUP' || Boolean(identifiers.currency),
         hasSteamAmount: familyKey !== 'STEAM_TOPUP' || Boolean(identifiers.amount),
+        hasSteamGiftAppId: familyKey !== 'STEAM_GIFTS' || Boolean(identifiers.appId),
+        hasSteamGiftSubId: familyKey !== 'STEAM_GIFTS' || Boolean(identifiers.subId),
+        hasSteamGiftRegion: familyKey !== 'STEAM_GIFTS' || Boolean(identifiers.region),
+        hasSteamGiftInviteField: familyKey !== 'STEAM_GIFTS' || requiredFields.some((field) => /invite[_\s-]?url|steam[_\s-]?invite/i.test(`${field.key || ''} ${field.label || ''}`)),
         productHidden: product.visibleInStore !== true,
         productInactive: product.isActive !== true || product.status !== PRODUCT_STATUSES.AVAILABLE,
     };
@@ -2157,7 +2189,7 @@ const getUnsupportedFamilyReadiness = async (productId) => {
             ? `${family?.displayName || familyKey || 'FazerCards'} is a controlled-live candidate only and remains excluded from bulk auto.`
             : `${family?.displayName || familyKey || 'FazerCards'} live execution is not implemented yet.`,
     ];
-    if (familyKey === 'STEAM_GIFTS') warnings.push('Steam Gifts catalog endpoint returned HTTP 404 in production and is currently unavailable.');
+    if (familyKey === 'STEAM_GIFTS') warnings.push('Steam Gifts catalog access is read-only confirmed; use explicit appid/on-demand import and keep bulk auto disabled.');
     if (familyKey === 'STEAM_TOPUP') warnings.push('Steam top-up requires successful check-login immediately before any provider order.');
     if (familyKey === 'TELEGRAM') warnings.push('Telegram fulfillment is asynchronous; completed/failed statuses must be confirmed by response, status sync, or webhook.');
     if (!checks.globalRealOrdersEnabled) warnings.push('Global real order gate is disabled.');
@@ -3710,6 +3742,12 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
             message: 'This FazerCards family can only be enabled for AUTO_PROVIDER through an explicit single-product controlled action.',
         });
     }
+    if (familyKey === 'STEAM_GIFTS' && enablingVisibility && updates._explicitProductLevelAuto !== true) {
+        errors.push({
+            code: 'FAZERCARDS_STEAM_GIFTS_ON_DEMAND_ONLY',
+            message: 'Steam Gifts can only be published through an explicit single-product on-demand action.',
+        });
+    }
     if (contract.supportStage === fazerCardsContracts.SUPPORT_STAGES.DISABLED_UNAVAILABLE && enablingVisibility) {
         errors.push({ code: 'FAMILY_DISABLED_UNAVAILABLE', message: 'This FazerCards family is currently unavailable.' });
     }
@@ -4078,7 +4116,7 @@ const getLaunchHealth = async (adapterOptions = {}) => {
     if (visibleAutoProvider > 0 && config.providers.fazerCards.realOrdersEnabled !== true) {
         warnings.push('Visible AUTO_PROVIDER products exist while the global real order gate is disabled; orders will require manual review.');
     }
-    warnings.push('Steam Gifts remain disabled because production catalog discovery returned HTTP 404.');
+    warnings.push('Steam Gifts broad catalog sync remains disabled; use explicit appid/on-demand import for controlled products.');
 
     const appUrl = String(process.env.APP_URL || `http://localhost:${process.env.PORT || 5000}`).replace(/\/+$/, '');
 

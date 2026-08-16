@@ -46,11 +46,11 @@ const PROVIDER_EXECUTION_MODES = Object.freeze({
 });
 
 const BULK_AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']);
-const CONTROLLED_AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS', 'TELEGRAM', 'STEAM_TOPUP']);
+const CONTROLLED_AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS', 'TELEGRAM', 'STEAM_TOPUP', 'STEAM_GIFTS']);
 const MANUAL_FULFILLMENT_FAMILIES = new Set(['MANUAL_SERVICES']);
-const DISABLED_FAMILIES = new Set(['STEAM_GIFTS']);
+const DISABLED_FAMILIES = new Set([]);
 const CODE_DELIVERY_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
-const CUSTOMER_FIELD_REQUIRED_FAMILIES = new Set(['TOPUPS', 'TELEGRAM', 'STEAM_TOPUP', 'MANUAL_SERVICES']);
+const CUSTOMER_FIELD_REQUIRED_FAMILIES = new Set(['TOPUPS', 'TELEGRAM', 'STEAM_TOPUP', 'STEAM_GIFTS', 'MANUAL_SERVICES']);
 const LOGIN_LIKE_PRODUCT_PATTERN = /\b(via\s+login|login|username|account)\b/i;
 const CUSTOMER_LOGIN_FIELD_PATTERN = /(login|username|user[_\s-]?name|account|user[_\s-]?id|player[_\s-]?id|uid|profile|roblox)/i;
 
@@ -173,6 +173,7 @@ const validateManualCustomerFieldsForProduct = ({
 
     if (normalizedFamilyKey === 'TELEGRAM') suggestions.push('telegram_username');
     if (normalizedFamilyKey === 'STEAM_TOPUP') suggestions.push('steam_login', 'steam_profile', 'steam_username');
+    if (normalizedFamilyKey === 'STEAM_GIFTS') suggestions.push('invite_url', 'steam_invite_url');
     if (loginLikeProduct) suggestions.push('account_username', 'login');
     if (normalizedFamilyKey === 'MANUAL_SERVICES') suggestions.push('account_username');
     if (normalizedFamilyKey === 'TOPUPS') suggestions.push('user_id', 'account_id', 'player_id');
@@ -403,6 +404,35 @@ const extractSteamTopupIdentifiers = (providerProduct = {}) => {
     return { currency, amount };
 };
 
+const extractSteamGiftIdentifiers = (providerProduct = {}) => {
+    const raw = providerProduct.rawPayload || {};
+    const externalParts = extractExternalParts(providerProduct.externalProductId, 'FAZER_STEAM_GIFT:');
+    return {
+        appId: asString(firstValue(
+            providerProduct.category,
+            raw.game?.appid,
+            raw.game?.app_id,
+            raw.appid,
+            raw.app_id,
+            externalParts[0]
+        )),
+        subId: asString(firstValue(
+            providerProduct.offerId,
+            raw.offer?.sub_id,
+            raw.offer?.subId,
+            raw.sub_id,
+            raw.subId,
+            externalParts[1]
+        )),
+        region: asString(firstValue(
+            providerProduct.region,
+            raw.region?.region,
+            raw.region,
+            externalParts[2]
+        )),
+    };
+};
+
 const extractManualServiceIdentifiers = (providerProduct = {}) => {
     const raw = providerProduct.rawPayload || {};
     const externalParts = extractExternalParts(providerProduct.externalProductId, 'FAZER_MANUAL_SERVICE:');
@@ -602,6 +632,56 @@ const buildSteamTopupPayload = ({ providerProduct, fields = {} } = {}) => {
             amount: identifiers.amount,
         },
         requiredFields: [{ key: 'steamLogin', label: 'Steam Login', type: 'text', required: true }],
+    };
+};
+
+const isSteamInviteUrl = (value) => {
+    const normalized = asString(value);
+    if (!normalized) return false;
+    return /^https?:\/\/s\.team\/p\/\S+/i.test(normalized)
+        || /^s\.team\/p\/\S+/i.test(normalized);
+};
+
+const buildSteamGiftPayload = ({ providerProduct, fields = {} } = {}) => {
+    const inviteUrl = asString(getFieldValue(fields, [
+        'invite_url',
+        'steam_invite_url',
+        'steamInviteUrl',
+        'inviteUrl',
+    ]));
+    if (!inviteUrl) {
+        return buildContractError('Steam invite URL is required.', CONTRACT_CODES.CUSTOMER_INPUT_MISSING, {
+            missing: ['invite_url'],
+        });
+    }
+    if (!isSteamInviteUrl(inviteUrl)) {
+        return buildContractError('Steam invite URL must use a Steam invite link.', 'STEAM_GIFT_INVITE_URL_INVALID', {
+            missing: ['invite_url'],
+        });
+    }
+
+    const identifiers = extractSteamGiftIdentifiers(providerProduct);
+    const missing = [
+        !identifiers.appId ? 'app_id' : null,
+        !identifiers.subId ? 'sub_id' : null,
+        !identifiers.region ? 'region' : null,
+    ].filter(Boolean);
+    if (missing.length) {
+        return buildContractError('Steam gift app_id, sub_id, and region are required.', CONTRACT_CODES.PAYLOAD_IDENTIFIER_MISSING, {
+            missing,
+        });
+    }
+
+    return {
+        success: true,
+        wouldCall: 'POST /steam-gifts/order',
+        payload: {
+            invite_url: inviteUrl,
+            sub_id: identifiers.subId,
+            app_id: identifiers.appId,
+            region: identifiers.region,
+        },
+        requiredFields: [{ key: 'invite_url', label: 'رابط دعوة Steam', type: 'text', required: true }],
     };
 };
 
@@ -907,6 +987,7 @@ const parseUnconfirmedResponse = (data = {}, familyKey = 'UNKNOWN') => ({
 
 const parseTelegramResponse = (data = {}) => parseProviderOrderResponse(data);
 const parseSteamTopupResponse = (data = {}) => parseProviderOrderResponse(data);
+const parseSteamGiftResponse = (data = {}) => parseProviderOrderResponse(data);
 const parseManualServiceResponse = (data = {}) => parseProviderOrderResponse(data);
 
 const CONTRACTS = Object.freeze({
@@ -1202,43 +1283,50 @@ const CONTRACTS = Object.freeze({
     STEAM_GIFTS: Object.freeze({
         familyKey: 'STEAM_GIFTS',
         displayName: 'Steam Gifts',
-        mode: 'STEAM_GIFT_INVITE',
+        mode: 'STEAM_GIFT',
         fulfillmentMode: FULFILLMENT_MODES.STEAM_GIFT_INVITE,
-        supportStage: SUPPORT_STAGES.DISABLED_UNAVAILABLE,
-        executionStage: EXECUTION_STAGES.NONE,
+        supportStage: SUPPORT_STAGES.PILOT_READY,
+        executionStage: EXECUTION_STAGES.CONTROLLED_LIVE_CANDIDATE,
         riskLevel: RISK_LEVELS.HIGH,
-        catalogStatus: 'DOCS_PRESENT_ACCESS_UNCONFIRMED',
+        catalogStatus: 'ACCESS_CONFIRMED_READ_ONLY',
+        accessStage: 'ACCESS_CONFIRMED_READ_ONLY',
         providerEndpoints: {
             catalog: ['GET /steam-gifts/games', 'GET /steam-gifts/games/{appid}'],
             order: 'POST /steam-gifts/order',
             status: 'GET /orders/{orderId}',
             webhooks: ['order.status_changed', 'order.completed', 'order.failed', 'order.refunded'],
         },
-        requiredProviderIdentifiers: ['invite_url', 'sub_id', 'app_id', 'region'],
+        requiredProviderIdentifiers: ['app_id', 'sub_id', 'region'],
         requiredCustomerFields: ['invite_url'],
         codeDelivery: false,
         async: true,
-        statusWebhookBehavior: 'Blocked before payload/execution because catalog access is unavailable for the current account.',
-        autoProviderAllowed: false,
+        statusWebhookBehavior: 'Generic FazerCards status sync/webhooks update local order; completed finishes, failed/refunded refund once, unknown requires review with no blind refund.',
+        autoProviderAllowed: true,
         bulkAutoProviderAllowed: false,
-        readinessReason: 'Official docs list Steam Gifts, but production catalog returned 404; keep disabled until account access is confirmed.',
-        canImportDraft: false,
-        canDryRun: false,
-        canLivePilot: false,
-        canCustomerPurchase: false,
-        customerInputSchema: { fields: [] },
+        readinessReason: 'Read-only catalog access is confirmed; controlled product-level execution only; no bulk auto until live validation.',
+        canImportDraft: true,
+        canDryRun: true,
+        canLivePilot: true,
+        canCustomerPurchase: true,
+        customerInputSchema: {
+            fields: [{ key: 'invite_url', label: 'رابط دعوة Steam', type: 'text', required: true }],
+        },
         providerPayloadSchema: {
             confirmed: true,
-            access: 'DOCS_PRESENT_ACCESS_UNCONFIRMED',
+            access: 'ACCESS_CONFIRMED_READ_ONLY',
             endpoint: 'POST /steam-gifts/order',
             body: { invite_url: 'string', sub_id: 'string', app_id: 'string', region: 'string' },
         },
-        expectedResponseSchema: { confirmed: false },
-        storageStrategy: 'NONE',
-        customerDeliveryStrategy: 'NONE',
-        requiredCapabilities: ['Working Steam Gifts catalog endpoint', 'Account access for Steam Gifts'],
-        blockers: ['Production catalog endpoint returned HTTP 404.', 'NOT_AVAILABLE_FOR_ACCOUNT until catalog access succeeds.'],
-        warnings: ['Family is disabled until discovery is reconfirmed.'],
+        expectedResponseSchema: {
+            confirmed: true,
+            providerOrderIdPaths: ['order.id', 'order.order_id', 'data.id', 'data.order_id', 'id', 'order_id'],
+            statusPaths: ['order.status', 'data.status', 'status', 'state'],
+        },
+        storageStrategy: 'ORDER_PROVIDER_METADATA',
+        customerDeliveryStrategy: 'NO_CODE_DELIVERY_STATUS_ONLY',
+        requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'providerExecutionEnabled', 'invite_url customer field', 'appid/sub_id/region metadata'],
+        blockers: ['Excluded from bulk AUTO_PROVIDER. Use explicit appid/on-demand import and one product-level controlled test only.'],
+        warnings: ['Steam Gifts catalog is huge; sync only an explicit appid and selected offer/region.', 'No live Steam Gift order validation has been completed yet.'],
     }),
 });
 
@@ -1320,6 +1408,7 @@ const getAutoProviderIdentifiers = (familyKey, providerProduct = {}) => {
     if (normalized === 'GAME_KEYS') return extractGameKeyIdentifiers(providerProduct);
     if (normalized === 'TELEGRAM') return extractTelegramIdentifiers(providerProduct);
     if (normalized === 'STEAM_TOPUP') return extractSteamTopupIdentifiers(providerProduct);
+    if (normalized === 'STEAM_GIFTS') return extractSteamGiftIdentifiers(providerProduct);
     return {};
 };
 
@@ -1419,6 +1508,19 @@ const validateAutoProviderReadinessForProduct = ({
                 message: 'Steam top-up auto provider execution requires a steamLogin customer field.',
             });
         }
+    } else if (normalizedFamilyKey === 'STEAM_GIFTS') {
+        const requiredFields = normalizeCustomerFieldDefinitions(product, providerProduct)
+            .filter((field) => field.isActive !== false && field.required !== false);
+        const hasInviteUrl = requiredFields.some((field) => fieldMatches(field, /invite[_\s-]?url|steam[_\s-]?invite/i));
+        if (!identifiers.appId) errors.push({ code: 'AUTO_PROVIDER_STEAM_GIFT_APP_ID_MISSING', message: 'Steam Gift auto provider execution requires app_id.' });
+        if (!identifiers.subId) errors.push({ code: 'AUTO_PROVIDER_STEAM_GIFT_SUB_ID_MISSING', message: 'Steam Gift auto provider execution requires sub_id.' });
+        if (!identifiers.region) errors.push({ code: 'AUTO_PROVIDER_STEAM_GIFT_REGION_MISSING', message: 'Steam Gift auto provider execution requires region.' });
+        if (!hasInviteUrl) {
+            errors.push({
+                code: 'AUTO_PROVIDER_STEAM_GIFT_INVITE_FIELD_MISSING',
+                message: 'Steam Gift auto provider execution requires an invite_url customer field.',
+            });
+        }
     }
 
     return {
@@ -1468,6 +1570,7 @@ const buildPayloadFromContract = ({ familyKey, providerProduct, fields = {}, qua
     if (contract.familyKey === 'GAME_KEYS') return buildGameKeyPayload({ providerProduct, quantity });
     if (contract.familyKey === 'TELEGRAM') return buildTelegramPayload({ providerProduct, fields, quantity });
     if (contract.familyKey === 'STEAM_TOPUP') return buildSteamTopupPayload({ providerProduct, fields });
+    if (contract.familyKey === 'STEAM_GIFTS') return buildSteamGiftPayload({ providerProduct, fields });
     if (contract.familyKey === 'MANUAL_SERVICES') return buildManualServicePayload({ providerProduct, fields });
     return buildUnconfirmedPayload({ contract });
 };
@@ -1479,6 +1582,7 @@ const parseResponseForFamily = (familyKey, data = {}) => {
     if (normalized === 'GAME_KEYS') return parseGameKeyResponse(data);
     if (normalized === 'TELEGRAM') return parseTelegramResponse(data);
     if (normalized === 'STEAM_TOPUP') return parseSteamTopupResponse(data);
+    if (normalized === 'STEAM_GIFTS') return parseSteamGiftResponse(data);
     if (normalized === 'MANUAL_SERVICES') return parseManualServiceResponse(data);
     return parseUnconfirmedResponse(data, normalized || 'UNKNOWN');
 };
@@ -1492,6 +1596,12 @@ const getMissingCapabilities = (contract = {}, checks = {}) => {
     if (contract.familyKey === 'TOPUPS' && checks.hasRequiredFields === false) missing.push('requiredFields');
     if (contract.familyKey === 'GIFTCARDS' || contract.familyKey === 'GAME_KEYS') {
         if (checks.codeDeliveryStorageReady === false) missing.push('ProviderDeliveredCode encryption');
+    }
+    if (contract.familyKey === 'STEAM_GIFTS') {
+        if (checks.hasSteamGiftAppId === false) missing.push('app_id');
+        if (checks.hasSteamGiftSubId === false) missing.push('sub_id');
+        if (checks.hasSteamGiftRegion === false) missing.push('region');
+        if (checks.hasSteamGiftInviteField === false) missing.push('invite_url customer field');
     }
     return [...new Set(missing)];
 };
@@ -1521,9 +1631,11 @@ module.exports = {
     parseGameKeyResponse,
     parseTelegramResponse,
     parseSteamTopupResponse,
+    parseSteamGiftResponse,
     parseManualServiceResponse,
     extractTelegramIdentifiers,
     extractSteamTopupIdentifiers,
+    extractSteamGiftIdentifiers,
     extractManualServiceIdentifiers,
     getMissingCapabilities,
     normalizeCustomerFieldDefinitions,

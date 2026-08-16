@@ -466,6 +466,11 @@ const fazerCardsCatalogSyncFamilySchema = Joi.object({
     ).required(),
     limit: Joi.number().integer().min(1).max(100).default(20),
     cursor: Joi.string().trim().max(2048).allow('', null),
+    appid: Joi.alternatives().try(
+        Joi.string().trim().max(64),
+        Joi.number().integer().positive()
+    ).allow('', null),
+    gameName: Joi.string().trim().max(200).allow('', null),
 });
 
 const fazerCardsCatalogSyncAllSchema = Joi.object({

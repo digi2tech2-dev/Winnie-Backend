@@ -199,6 +199,31 @@ const createFazerCatalogOnlyProviderProduct = async ({ familyKey = 'TELEGRAM', o
             requiredFields: [{ key: 'steamLogin', label: 'Steam Login', type: 'text', required: true }],
             rawPayload: { family: 'STEAM_TOPUP', rateCurrency: 'USD', rate: 1 },
         },
+        STEAM_GIFTS: {
+            externalProductId: 'FAZER_STEAM_GIFT:730:54029:CIS',
+            rawName: 'Counter-Strike 2 - Prime Status Upgrade - CIS',
+            rawPrice: '14.7430',
+            costPrice: '0.75',
+            category: '730',
+            categoryName: 'Counter-Strike 2',
+            offerId: '54029',
+            offerName: 'Prime Status Upgrade',
+            region: 'CIS',
+            platform: 'steam',
+            familyKey: 'STEAM_GIFTS',
+            fulfillmentMode: FULFILLMENT_MODES.STEAM_GIFT_INVITE,
+            supportLevel: 'NEEDS_SPECIAL_FIELDS',
+            blockReason: 'STEAM_GIFTS_CONTROLLED_ON_DEMAND',
+            minQty: 1,
+            maxQty: 1,
+            requiredFields: [{ key: 'invite_url', label: 'Steam Invite URL', type: 'text', required: true }],
+            rawPayload: {
+                family: 'STEAM_GIFTS',
+                game: { appid: 730, name: 'Counter-Strike 2' },
+                offer: { sub_id: 54029, name: 'Prime Status Upgrade' },
+                region: { region: 'CIS', price: '14.7430' },
+            },
+        },
         MANUAL_SERVICES: {
             externalProductId: 'FAZER_MANUAL_SERVICE:social_boost:starter',
             rawName: 'Social Boost - Starter',
@@ -370,6 +395,7 @@ const createFazerCatalogFamilyOrder = async ({
     const uniqueProviderProductByFamily = {
         TELEGRAM: { externalProductId: `FAZER_TELEGRAM:STARS:${uniqueSuffix}` },
         STEAM_TOPUP: { externalProductId: `FAZER_STEAM_TOPUP:USD:${uniqueSuffix}` },
+        STEAM_GIFTS: { externalProductId: `FAZER_STEAM_GIFT:730:54029:${uniqueSuffix}`, region: uniqueSuffix },
         MANUAL_SERVICES: { externalProductId: `FAZER_MANUAL_SERVICE:social_boost:${uniqueSuffix}`, offerId: uniqueSuffix },
     };
     const { provider, providerProduct } = await createFazerCatalogOnlyProviderProduct({
@@ -430,7 +456,30 @@ const createFazerControlledAutoOrder = async ({
     const isTelegram = familyKey === 'TELEGRAM';
     const isPremium = isTelegram && telegramKind === 'premium';
     const isSteam = familyKey === 'STEAM_TOPUP';
-    const defaults = isSteam
+    const isSteamGift = familyKey === 'STEAM_GIFTS';
+    const defaults = isSteamGift
+        ? {
+            externalProductId: 'FAZER_STEAM_GIFT:730:54029:CIS',
+            rawName: 'Counter-Strike 2 - Prime Status Upgrade - CIS',
+            rawPrice: '0.75',
+            costPrice: '0.75',
+            category: '730',
+            categoryName: 'Counter-Strike 2',
+            offerId: '54029',
+            offerName: 'Prime Status Upgrade',
+            region: 'CIS',
+            fulfillmentMode: FULFILLMENT_MODES.STEAM_GIFT_INVITE,
+            minQty: 1,
+            maxQty: 1,
+            requiredFields: [{ key: 'invite_url', label: 'Steam Invite URL', type: 'text', required: true }],
+            rawPayload: {
+                family: 'STEAM_GIFTS',
+                game: { appid: 730, name: 'Counter-Strike 2' },
+                offer: { sub_id: 54029, name: 'Prime Status Upgrade' },
+                region: { region: 'CIS', price: '14.7430' },
+            },
+        }
+        : isSteam
         ? {
             rawPrice: '0.75',
             costPrice: '0.75',
@@ -484,10 +533,14 @@ const createFazerControlledAutoOrder = async ({
         },
     });
     const { customer, group } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
-    const orderFields = isSteam
+    const orderFields = isSteamGift
+        ? [{ id: 'invite_url', key: 'invite_url', label: 'Steam Invite URL', type: 'text', required: true, isActive: true }]
+        : isSteam
         ? [{ id: 'steam_login', key: 'steam_login', label: 'Steam Login', type: 'text', required: true, isActive: true }]
         : [{ id: 'telegram_username', key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true, isActive: true }];
-    const values = customerFields || (isSteam ? { steam_login: 'pilot_steam' } : { telegram_username: '@pilot_user' });
+    const values = customerFields || (isSteamGift
+        ? { invite_url: 'https://s.team/p/abc-def' }
+        : isSteam ? { steam_login: 'pilot_steam' } : { telegram_username: '@pilot_user' });
     const product = await Product.create({
         name: `${familyKey} Controlled Auto ${Date.now()} ${Math.random()}`,
         basePrice: isSteam ? '1.50' : '1.00',
@@ -726,11 +779,20 @@ describe('FazerCards client foundation', () => {
             amount: 10,
             idempotencyKey: 'fazercards:steam-topup:local_order_3',
         });
+        await fazer.listSteamGiftGames({ limit: 10 });
+        await fazer.getSteamGiftGame(730);
+        await fazer.buySteamGift({
+            invite_url: 'https://s.team/p/abc-def',
+            sub_id: '54029',
+            app_id: '730',
+            region: 'CIS',
+            idempotencyKey: 'fazercards:steam-gift:local_order_4',
+        });
         await fazer.createManualServiceOrder({
             manual_service_id: 'social_boost',
             product_id: 'starter',
             fields: { account_username: 'pilot_account' },
-            idempotencyKey: 'fazercards:manual-service:local_order_4',
+            idempotencyKey: 'fazercards:manual-service:local_order_5',
         });
         await fazer.getManualServiceChat('manual_provider_order_1');
         await fazer.sendManualServiceChat('manual_provider_order_1', { message: 'Please confirm details.' });
@@ -759,6 +821,26 @@ describe('FazerCards client foundation', () => {
             headers: { 'Idempotency-Key': 'fazercards:steam-topup:local_order_3' },
         }));
         expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'get',
+            url: '/steam-gifts/games',
+            params: { limit: 10 },
+        }));
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'get',
+            url: '/steam-gifts/games/730',
+        }));
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'post',
+            url: '/steam-gifts/order',
+            data: {
+                invite_url: 'https://s.team/p/abc-def',
+                sub_id: '54029',
+                app_id: '730',
+                region: 'CIS',
+            },
+            headers: { 'Idempotency-Key': 'fazercards:steam-gift:local_order_4' },
+        }));
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
             method: 'post',
             url: '/manual-services/order',
             data: {
@@ -766,7 +848,7 @@ describe('FazerCards client foundation', () => {
                 product_id: 'starter',
                 fields: { account_username: 'pilot_account' },
             },
-            headers: { 'Idempotency-Key': 'fazercards:manual-service:local_order_4' },
+            headers: { 'Idempotency-Key': 'fazercards:manual-service:local_order_5' },
         }));
         expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
             method: 'get',
@@ -806,7 +888,8 @@ describe('FazerCards family contracts', () => {
         const summary = fazerCardsContracts.getContractSummary();
         expect(summary.families.TOPUPS.supportStage).toBe('PILOT_READY');
         expect(summary.families.GIFTCARDS.executionStage).toBe('CUSTOMER_FLOW_READY_BUT_GATED');
-        expect(summary.families.STEAM_GIFTS.supportStage).toBe('DISABLED_UNAVAILABLE');
+        expect(summary.families.STEAM_GIFTS.supportStage).toBe('PILOT_READY');
+        expect(summary.families.STEAM_GIFTS.executionStage).toBe('CONTROLLED_LIVE_CANDIDATE');
         expect(summary.nextBestExecutionOrder).toEqual(expect.arrayContaining(['GIFTCARDS', 'GAME_KEYS', 'TOPUPS']));
     });
 
@@ -836,7 +919,7 @@ describe('FazerCards family contracts', () => {
             TELEGRAM: true,
             STEAM_TOPUP: true,
             MANUAL_SERVICES: false,
-            STEAM_GIFTS: false,
+            STEAM_GIFTS: true,
         });
         expect(Object.fromEntries(contracts.map((contract) => [contract.familyKey, contract.bulkAutoProviderAllowed]))).toMatchObject({
             TOPUPS: true,
@@ -1001,6 +1084,48 @@ describe('FazerCards family contracts', () => {
         })).toMatchObject({ success: false, code: 'PAYLOAD_IDENTIFIER_MISSING', missing: ['amount'] });
     });
 
+    it('builds documented Steam Gift payloads and rejects missing identifiers or invite URL', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({
+            familyKey: 'STEAM_GIFTS',
+            overrides: {
+                executionBlocked: false,
+                isSupported: true,
+                isBlocked: false,
+                blockReason: null,
+            },
+        });
+
+        expect(fazerCardsContracts.buildPayloadFromContract({
+            familyKey: 'STEAM_GIFTS',
+            providerProduct: providerProduct.toObject(),
+            fields: { invite_url: 'https://s.team/p/abc-def' },
+        })).toMatchObject({
+            success: true,
+            wouldCall: 'POST /steam-gifts/order',
+            payload: {
+                invite_url: 'https://s.team/p/abc-def',
+                sub_id: '54029',
+                app_id: '730',
+                region: 'CIS',
+            },
+        });
+        expect(fazerCardsContracts.buildPayloadFromContract({
+            familyKey: 'STEAM_GIFTS',
+            providerProduct: providerProduct.toObject(),
+            fields: {},
+        })).toMatchObject({ success: false, code: 'CUSTOMER_INPUT_MISSING' });
+        expect(fazerCardsContracts.buildPayloadFromContract({
+            familyKey: 'STEAM_GIFTS',
+            providerProduct: providerProduct.toObject(),
+            fields: { invite_url: 'https://example.com/not-steam' },
+        })).toMatchObject({ success: false, code: 'STEAM_GIFT_INVITE_URL_INVALID' });
+        expect(fazerCardsContracts.buildPayloadFromContract({
+            familyKey: 'STEAM_GIFTS',
+            providerProduct: { ...providerProduct.toObject(), offerId: null, externalProductId: 'FAZER_STEAM_GIFT:730', rawPayload: { family: 'STEAM_GIFTS', game: { appid: 730 }, region: { region: 'CIS' } } },
+            fields: { invite_url: 'https://s.team/p/abc-def' },
+        })).toMatchObject({ success: false, code: 'PAYLOAD_IDENTIFIER_MISSING', missing: ['sub_id'] });
+    });
+
     it('builds documented manual service payloads from provider-copied fields', async () => {
         const { providerProduct } = await createFazerCatalogOnlyProviderProduct({
             familyKey: 'MANUAL_SERVICES',
@@ -1057,10 +1182,10 @@ describe('FazerCards family contracts', () => {
             .toMatchObject({ status: 'FAILED', terminalFailure: true });
         expect(fazerCardsContracts.parseSteamTopupResponse({ order: { id: 'steam_1', status: 'succeeded' } }))
             .toMatchObject({ status: 'COMPLETED', providerOrderId: 'steam_1' });
+        expect(fazerCardsContracts.parseSteamGiftResponse({ order: { id: 'gift_1', status: 'success' } }))
+            .toMatchObject({ status: 'COMPLETED', providerOrderId: 'gift_1' });
         expect(fazerCardsContracts.parseManualServiceResponse({ order: { id: 'manual_1', status: 'mystery' } }))
             .toMatchObject({ status: 'MANUAL_REVIEW', knownStatus: false });
-        expect(fazerCardsContracts.parseResponseForFamily('STEAM_GIFTS', { order: { id: 'gift_1', status: 'success' } }))
-            .toMatchObject({ status: 'MANUAL_REVIEW', code: 'CONTRACT_UNCONFIRMED' });
     });
 
     it('detects realistic gift-card code payload variants without storing provider ids as codes', () => {
@@ -1739,6 +1864,7 @@ describe('FazerCards multi-family catalog discovery', () => {
         ]));
         const topups = result.families.find((family) => family.familyKey === 'TOPUPS');
         const giftcards = result.families.find((family) => family.familyKey === 'GIFTCARDS');
+        const steamGifts = result.families.find((family) => family.familyKey === 'STEAM_GIFTS');
         expect(topups).toMatchObject({
             status: 'implemented',
             catalogAvailable: true,
@@ -1753,6 +1879,14 @@ describe('FazerCards multi-family catalog discovery', () => {
             executionGloballyGated: true,
             fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
             supportLevel: 'CATALOG_ONLY',
+        });
+        expect(steamGifts).toMatchObject({
+            status: 'controlled_gated',
+            catalogAvailable: true,
+            executionAvailable: true,
+            executionGloballyGated: true,
+            fulfillmentMode: FULFILLMENT_MODES.STEAM_GIFT_INVITE,
+            supportLevel: 'NEEDS_SPECIAL_FIELDS',
         });
     });
 
@@ -1885,7 +2019,83 @@ describe('FazerCards multi-family catalog discovery', () => {
         expect(client.request.mock.calls.some(([call]) => String(call.url).includes('/order'))).toBe(false);
     });
 
-    it('sync-all runs only read-only catalog endpoints and records Steam Gifts as unavailable', async () => {
+    it('sync-family syncs one explicit Steam Gift appid into offer-region ProviderProducts without order calls', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: { 'x-request-id': 'req-steam-gift-730' },
+            data: {
+                ok: true,
+                appid: 730,
+                offers: [{
+                    sub_id: 54029,
+                    name: 'Prime Status Upgrade',
+                    regions: [
+                        { region: 'CIS', price: '14.7430' },
+                        { region: 'KZ', price: '15.4338' },
+                    ],
+                }],
+            },
+        });
+
+        const result = await fazerCardsCatalogSvc.syncCatalogFamily({
+            family: 'STEAM_GIFTS',
+            appid: 730,
+            gameName: 'Counter-Strike 2',
+        });
+        const stored = await ProviderProduct.findOne({ externalProductId: 'FAZER_STEAM_GIFT:730:54029:CIS' }).lean();
+
+        expect(result).toMatchObject({
+            familyKey: 'STEAM_GIFTS',
+            categoriesFetched: 1,
+            offersFetched: 2,
+            providerProductsCreated: 2,
+            blocked: 0,
+            unsupported: 0,
+            meta: {
+                appid: '730',
+                strategy: 'appid_on_demand',
+                broadSyncDisabled: true,
+            },
+            requestId: 'req-steam-gift-730',
+        });
+        expect(stored).toMatchObject({
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            familyKey: 'STEAM_GIFTS',
+            supportLevel: 'NEEDS_SPECIAL_FIELDS',
+            fulfillmentMode: FULFILLMENT_MODES.STEAM_GIFT_INVITE,
+            isSupported: true,
+            isBlocked: false,
+            executionBlocked: false,
+            blockReason: null,
+            rawName: 'Counter-Strike 2 - Prime Status Upgrade - CIS',
+            category: '730',
+            offerId: '54029',
+            region: 'CIS',
+            costPrice: '14.743',
+            requiredFields: [expect.objectContaining({ key: 'invite_url', required: true })],
+        });
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'get',
+            url: '/steam-gifts/games/730',
+        }));
+        expect(client.request.mock.calls.some(([call]) => String(call.url).includes('/order'))).toBe(false);
+        expect(await Product.countDocuments({})).toBe(0);
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
+    });
+
+    it('sync-family rejects Steam Gifts without appid so broad catalog sync cannot happen', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        await expect(fazerCardsCatalogSvc.syncCatalogFamily({ family: 'STEAM_GIFTS', limit: 10 }))
+            .rejects.toMatchObject({ code: 'FAZERCARDS_STEAM_GIFTS_APPID_REQUIRED' });
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('sync-all runs only read-only catalog endpoints and records Steam Gifts as on-demand only', async () => {
         const client = makeClient();
         axios.create.mockReturnValue(client);
         client.request
@@ -1940,12 +2150,12 @@ describe('FazerCards multi-family catalog discovery', () => {
         expect(result.familiesSkipped).toContain('STEAM_GIFTS');
         expect(result.results.STEAM_GIFTS).toMatchObject({
             skipped: true,
-            unavailable: true,
+            onDemandOnly: true,
             providerProductsCreated: 0,
         });
         expect(result.warnings[0]).toMatchObject({
             familyKey: 'STEAM_GIFTS',
-            code: 'STEAM_GIFTS_CATALOG_UNAVAILABLE',
+            code: 'FAZERCARDS_STEAM_GIFTS_ON_DEMAND_SYNC_ONLY',
         });
         expect(await ProviderProduct.countDocuments({ providerCode: PROVIDER_CODES.FAZER_CARDS })).toBe(2);
         expect(await Product.countDocuments({})).toBe(0);
@@ -2480,6 +2690,57 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
         expect(result.requiredCapabilities).toContain('steam-topup check-login preflight');
         expect(result.warnings).toContain('Steam Wallet Top-up is a controlled-live candidate only and remains excluded from bulk auto.');
         expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('unified dry-run and readiness show Steam Gifts as on-demand controlled candidate without provider calls', async () => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'STEAM_GIFTS' });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 16.25,
+            name: 'Counter-Strike 2 Prime Draft',
+        });
+
+        const dryRun = await fazerCardsCatalogSvc.buildUnifiedDryRun({
+            productId: product._id,
+            fields: { invite_url: 'https://s.team/p/abc-def' },
+        });
+        const readiness = await fazerCardsCatalogSvc.getProductReadiness(product._id);
+
+        expect(dryRun).toMatchObject({
+            success: true,
+            dryRun: true,
+            wouldCall: 'POST /steam-gifts/order',
+            executionAvailable: true,
+            controlledLiveCandidate: true,
+            payload: {
+                invite_url: 'https://s.team/p/abc-def',
+                sub_id: '54029',
+                app_id: '730',
+                region: 'CIS',
+            },
+        });
+        expect(readiness).toMatchObject({
+            success: true,
+            readyForLiveExecution: false,
+            familyKey: 'STEAM_GIFTS',
+            fulfillmentMode: FULFILLMENT_MODES.STEAM_GIFT_INVITE,
+            supportStage: 'PILOT_READY',
+            executionStage: 'CONTROLLED_LIVE_CANDIDATE',
+            checks: {
+                familyCatalogSupported: true,
+                executionImplemented: true,
+                controlledLiveCandidate: true,
+                autoProviderAllowedForExplicitProduct: true,
+                bulkAutoProviderAllowed: false,
+                hasSteamGiftAppId: true,
+                hasSteamGiftSubId: true,
+                hasSteamGiftRegion: true,
+                hasSteamGiftInviteField: true,
+            },
+        });
+        expect(readiness.warnings).toContain('Steam Gifts catalog access is read-only confirmed; use explicit appid/on-demand import and keep bulk auto disabled.');
+        expect(axios.create).not.toHaveBeenCalled();
+        expect(await Order.countDocuments({})).toBe(0);
+        expect(await WalletTransaction.countDocuments({})).toBe(0);
     });
 
     it('provider delivered code metadata/debug never returns plaintext codes', async () => {
@@ -3252,6 +3513,87 @@ describe('FazerCards Telegram and Steam controlled execution', () => {
         expect(updated.providerErrorCode).toBe('PAYLOAD_IDENTIFIER_MISSING');
         expect(client.request).not.toHaveBeenCalled();
     });
+
+    it('executes Steam Gift through the controlled AUTO_PROVIDER path with stable idempotency', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        config.providers.fazerCards.maxOrderUsd = 1.00;
+        const { order } = await createFazerControlledAutoOrder({ familyKey: 'STEAM_GIFTS' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: { ok: true, balance: '10.00', currency: 'USD' } })
+            .mockResolvedValueOnce({ status: 200, headers: { 'x-request-id': 'req-steam-gift' }, data: { ok: true, order: { id: 'steam_gift_1', status: 'processing' } } });
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(updated.providerOrderId).toBe('steam_gift_1');
+        expect(updated.providerStatus).toBe('Pending');
+        expect(updated.providerIdempotencyKey).toBe(`fazercards:steam-gift:${order._id.toString()}`);
+        expect(refunded).toBe(false);
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'post',
+            url: '/steam-gifts/order',
+            data: {
+                invite_url: 'https://s.team/p/abc-def',
+                sub_id: '54029',
+                app_id: '730',
+                region: 'CIS',
+            },
+            headers: { 'Idempotency-Key': `fazercards:steam-gift:${order._id.toString()}` },
+        }));
+    });
+
+    it('rejects Steam Gift missing invite URL before any provider request', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        const { order } = await createFazerControlledAutoOrder({
+            familyKey: 'STEAM_GIFTS',
+            customerFields: {},
+        });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: updated } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(updated.providerErrorCode).toBe('CUSTOMER_INPUT_MISSING');
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('maps Steam Gift completed, failed, and unknown responses safely', async () => {
+        const scenarios = [
+            { status: 'completed', expectedStatus: ORDER_STATUS.COMPLETED, refunded: false, providerOrderId: 'steam_gift_done' },
+            { status: 'failed', expectedStatus: ORDER_STATUS.FAILED, refunded: true, providerOrderId: 'steam_gift_failed' },
+            { status: 'mystery', expectedStatus: ORDER_STATUS.MANUAL_REVIEW, refunded: false, providerOrderId: 'steam_gift_unknown' },
+        ];
+
+        for (const scenario of scenarios) {
+            await clearCollections();
+            config.providers.fazerCards.enabled = true;
+            config.providers.fazerCards.apiKey = 'test-fazer-key';
+            config.providers.fazerCards.realOrdersEnabled = true;
+            config.providers.fazerCards.maxOrderUsd = 1.00;
+            const { order, customer } = await createFazerControlledAutoOrder({ familyKey: 'STEAM_GIFTS' });
+            const beforeWallet = (await User.findById(customer._id)).walletBalance;
+            const client = makeClient();
+            axios.create.mockReturnValue(client);
+            client.request
+                .mockResolvedValueOnce({ status: 200, headers: {}, data: { ok: true, balance: '10.00', currency: 'USD' } })
+                .mockResolvedValueOnce({ status: 200, headers: {}, data: { ok: true, order: { id: scenario.providerOrderId, status: scenario.status } } });
+
+            const { order: updated, refunded } = await executeOrder(order._id);
+            const refunds = await WalletTransaction.find({ userId: customer._id, type: 'REFUND' });
+
+            expect(updated.status).toBe(scenario.expectedStatus);
+            expect(updated.providerOrderId).toBe(scenario.providerOrderId);
+            expect(refunded).toBe(scenario.refunded);
+            expect(refunds).toHaveLength(scenario.refunded ? 1 : 0);
+            if (!scenario.refunded) {
+                expect((await User.findById(customer._id)).walletBalance).toBe(beforeWallet);
+            }
+        }
+    });
 });
 
 describe('FazerCards top-up dry-run payload preview', () => {
@@ -4001,6 +4343,43 @@ describe('FazerCards signed webhooks', () => {
         expect(failedRefunds).toHaveLength(1);
     });
 
+    it('completed and failed webhooks update Steam Gift orders through generic status handling', async () => {
+        enableWebhook();
+        const completedOrder = await createFazerCatalogFamilyOrder({
+            familyKey: 'STEAM_GIFTS',
+            providerOrderId: 'fc_steam_gift_done',
+            walletDeducted: 50,
+            customerFields: { invite_url: 'https://s.team/p/abc-def' },
+        });
+        const failedOrder = await createFazerCatalogFamilyOrder({
+            familyKey: 'STEAM_GIFTS',
+            providerOrderId: 'fc_steam_gift_failed',
+            walletDeducted: 50,
+            customerFields: { invite_url: 'https://s.team/p/abc-def' },
+        });
+
+        const completed = await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+            event: 'order.completed',
+            event_id: 'evt_steam_gift_done',
+            data: { order_id: 'fc_steam_gift_done', status: 'completed' },
+        }));
+        const failed = await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+            event: 'order.status_changed',
+            event_id: 'evt_steam_gift_failed',
+            data: { order_id: 'fc_steam_gift_failed', status: 'failed' },
+        }));
+
+        const updatedCompleted = await Order.findById(completedOrder.order._id).lean();
+        const updatedFailed = await Order.findById(failedOrder.order._id).lean();
+        const failedRefunds = await WalletTransaction.find({ userId: failedOrder.customer._id, type: 'REFUND' });
+
+        expect(completed).toMatchObject({ processed: true, action: 'completed' });
+        expect(updatedCompleted.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(failed).toMatchObject({ processed: true, action: 'failed', refunded: true });
+        expect(updatedFailed.status).toBe(ORDER_STATUS.FAILED);
+        expect(failedRefunds).toHaveLength(1);
+    });
+
     it('manual service chat webhooks create safe admin notes without changing order status', async () => {
         enableWebhook();
         const { order } = await createFazerCatalogFamilyOrder({
@@ -4401,7 +4780,7 @@ describe('FazerCards Phase 9 launch operations', () => {
         expect(after.customerPurchaseEnabled).toBe(false);
     });
 
-    it('bulk launch rejects Steam Gifts customer enablement', async () => {
+    it('bulk launch rejects Steam Gifts customer enablement because Steam Gifts are on-demand only', async () => {
         const { provider } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
         const providerProduct = await ProviderProduct.create({
             provider: provider._id,
@@ -4416,7 +4795,7 @@ describe('FazerCards Phase 9 launch operations', () => {
             isSupported: false,
             isBlocked: true,
             executionBlocked: true,
-            blockReason: 'STEAM_GIFTS_CATALOG_UNAVAILABLE',
+            blockReason: 'STEAM_GIFTS_CONTROLLED_ON_DEMAND',
         });
         const product = await Product.create({
             name: 'Steam Gift Disabled',
@@ -4446,7 +4825,7 @@ describe('FazerCards Phase 9 launch operations', () => {
         });
 
         expect(result.success).toBe(false);
-        expect(result.results[0].errors.map((error) => error.code)).toContain('FAMILY_DISABLED_UNAVAILABLE');
+        expect(result.results[0].errors.map((error) => error.code)).toContain('FAZERCARDS_STEAM_GIFTS_ON_DEMAND_ONLY');
     });
 
     it('bulk launch applies valid manual fulfillment controls for unconfirmed families', async () => {
@@ -4729,6 +5108,7 @@ describe('FazerCards Phase 9 launch operations', () => {
     it.each([
         ['TELEGRAM', { rawPayload: { family: 'TELEGRAM', kind: 'telegram_stars', response: { price_per_star: '0.001' } } }],
         ['STEAM_TOPUP', { rawPayload: { family: 'STEAM_TOPUP', currency: 'USD', amount: 10, rate: { currency: 'USD', amount: 10 } } }],
+        ['STEAM_GIFTS', {}],
     ])('single product launch can enable controlled AUTO_PROVIDER for %s only when readiness passes', async (familyKey, providerProductPatch) => {
         const { providerProduct } = await createFazerCatalogOnlyProviderProduct({
             familyKey,
@@ -4762,6 +5142,37 @@ describe('FazerCards Phase 9 launch operations', () => {
             providerExecutionBlocked: false,
             executionType: EXECUTION_TYPES.AUTOMATIC,
         });
+    });
+
+    it.each([
+        [{ category: null, externalProductId: 'FAZER_STEAM_GIFT_MISSING_APP', rawPayload: { family: 'STEAM_GIFTS', offer: { sub_id: 54029 }, region: { region: 'CIS' } } }, 'AUTO_PROVIDER_STEAM_GIFT_APP_ID_MISSING'],
+        [{ offerId: null, externalProductId: 'FAZER_STEAM_GIFT:730', rawPayload: { family: 'STEAM_GIFTS', game: { appid: 730 }, region: { region: 'CIS' } } }, 'AUTO_PROVIDER_STEAM_GIFT_SUB_ID_MISSING'],
+        [{ region: null, externalProductId: 'FAZER_STEAM_GIFT:730:54029', rawPayload: { family: 'STEAM_GIFTS', game: { appid: 730 }, offer: { sub_id: 54029 } } }, 'AUTO_PROVIDER_STEAM_GIFT_REGION_MISSING'],
+        [{ requiredFields: [] }, 'AUTO_PROVIDER_STEAM_GIFT_INVITE_FIELD_MISSING'],
+    ])('single product launch rejects Steam Gifts AUTO_PROVIDER when readiness is missing %s', async (providerProductPatch, expectedCode) => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({
+            familyKey: 'STEAM_GIFTS',
+            overrides: {
+                executionBlocked: false,
+                isSupported: true,
+                isBlocked: false,
+                blockReason: null,
+                ...providerProductPatch,
+            },
+        });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 16.25,
+            name: 'Steam Gift Missing Readiness Candidate',
+        });
+
+        await expect(fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerExecutionEnabled: true,
+        })).rejects.toMatchObject({ code: expectedCode });
     });
 
     it.each(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS'])('single product launch can enable AUTO_PROVIDER for confirmed %s products', async (familyKey) => {

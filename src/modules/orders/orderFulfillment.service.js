@@ -256,7 +256,7 @@ const isFazerCardsCodeDeliveryOrder = (product = {}, providerProduct = {}) => {
         && ['GIFTCARDS', 'GAME_KEYS'].includes(String(safeProviderProduct.familyKey || safeProduct.familyKey || '').trim().toUpperCase());
 };
 
-const FAZER_CARDS_CONTROLLED_AUTO_FAMILIES = new Set(['TELEGRAM', 'STEAM_TOPUP']);
+const FAZER_CARDS_CONTROLLED_AUTO_FAMILIES = new Set(['TELEGRAM', 'STEAM_TOPUP', 'STEAM_GIFTS']);
 
 const isFazerCardsControlledAutoOrder = (product = {}, providerProduct = {}) => {
     const safeProduct = product || {};
@@ -398,7 +398,9 @@ const placeFazerCardsControlledAutoOrder = async ({
         : null;
     const providerIdempotencyKey = familyKey === 'TELEGRAM'
         ? `fazercards:telegram-${telegramKind || 'unknown'}:${order._id.toString()}`
-        : `fazercards:steam-topup:${order._id.toString()}`;
+        : familyKey === 'STEAM_GIFTS'
+            ? `fazercards:steam-gift:${order._id.toString()}`
+            : `fazercards:steam-topup:${order._id.toString()}`;
 
     if (product.providerExecutionMode !== fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
         return buildFazerCardsManualReviewResult({
@@ -455,6 +457,13 @@ const placeFazerCardsControlledAutoOrder = async ({
             providerIdempotencyKey,
             providerErrorCode: 'FAZERCARDS_STEAM_TOPUP_QUANTITY_INVALID',
             providerErrorMessage: 'Steam top-up orders must use quantity 1.',
+        });
+    }
+    if (familyKey === 'STEAM_GIFTS' && Number(order.quantity || 1) !== 1) {
+        return buildFazerCardsRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_STEAM_GIFT_QUANTITY_INVALID',
+            providerErrorMessage: 'Steam Gift orders must use quantity 1.',
         });
     }
     if (config.providers.fazerCards.enabled !== true) {
@@ -565,6 +574,14 @@ const placeFazerCardsControlledAutoOrder = async ({
                 amount: payload.amount,
                 idempotencyKey: providerIdempotencyKey,
             });
+        } else if (familyKey === 'STEAM_GIFTS') {
+            response = await adapter.client.buySteamGift({
+                invite_url: payload.invite_url,
+                sub_id: payload.sub_id,
+                app_id: payload.app_id,
+                region: payload.region,
+                idempotencyKey: providerIdempotencyKey,
+            });
         } else {
             return buildFazerCardsRejectedResult({
                 providerIdempotencyKey,
@@ -604,10 +621,16 @@ const placeFazerCardsControlledAutoOrder = async ({
         familyKey,
         response,
         providerIdempotencyKey,
-        defaultErrorCode: familyKey === 'TELEGRAM' ? 'FAZERCARDS_TELEGRAM_ORDER_REVIEW' : 'FAZERCARDS_STEAM_TOPUP_ORDER_REVIEW',
+        defaultErrorCode: familyKey === 'TELEGRAM'
+            ? 'FAZERCARDS_TELEGRAM_ORDER_REVIEW'
+            : familyKey === 'STEAM_GIFTS'
+                ? 'FAZERCARDS_STEAM_GIFT_ORDER_REVIEW'
+                : 'FAZERCARDS_STEAM_TOPUP_ORDER_REVIEW',
         defaultErrorMessage: familyKey === 'TELEGRAM'
             ? 'FazerCards Telegram order requires manual review.'
-            : 'FazerCards Steam top-up order requires manual review.',
+            : familyKey === 'STEAM_GIFTS'
+                ? 'FazerCards Steam Gift order requires manual review.'
+                : 'FazerCards Steam top-up order requires manual review.',
     });
 };
 
