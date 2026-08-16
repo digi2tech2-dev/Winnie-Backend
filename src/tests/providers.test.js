@@ -682,6 +682,35 @@ describe('FazerCards family contracts', () => {
         expect(summary.nextBestExecutionOrder).toEqual(expect.arrayContaining(['GIFTCARDS', 'GAME_KEYS', 'TOPUPS']));
     });
 
+    it('keeps every FazerCards family contract explicit about readiness and auto-provider eligibility', () => {
+        const contracts = fazerCardsContracts.listContracts();
+        for (const contract of contracts) {
+            expect(contract).toEqual(expect.objectContaining({
+                familyKey: expect.any(String),
+                mode: expect.any(String),
+                fulfillmentMode: expect.any(String),
+                providerEndpoints: expect.any(Object),
+                requiredProviderIdentifiers: expect.anything(),
+                requiredCustomerFields: expect.anything(),
+                codeDelivery: expect.any(Boolean),
+                async: expect.any(Boolean),
+                statusWebhookBehavior: expect.any(String),
+                autoProviderAllowed: expect.any(Boolean),
+                readinessReason: expect.any(String),
+            }));
+        }
+
+        expect(Object.fromEntries(contracts.map((contract) => [contract.familyKey, contract.autoProviderAllowed]))).toMatchObject({
+            TOPUPS: true,
+            GIFTCARDS: true,
+            GAME_KEYS: true,
+            TELEGRAM: false,
+            STEAM_TOPUP: false,
+            MANUAL_SERVICES: false,
+            STEAM_GIFTS: false,
+        });
+    });
+
     it('service exposes contract list, one contract, and summary without provider calls', () => {
         const list = fazerCardsCatalogSvc.listContracts();
         const single = fazerCardsCatalogSvc.getContract('giftcards');
