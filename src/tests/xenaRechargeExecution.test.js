@@ -142,8 +142,13 @@ afterAll(async () => {
 
 beforeEach(async () => {
     process.env.PROVIDER_CREDENTIALS_KEY = TEST_KEY;
+    process.env.XENA_RECHARGE_ENABLED = 'true';
     axios.create.mockReset();
     await clearCollections();
+});
+
+afterEach(() => {
+    delete process.env.XENA_RECHARGE_ENABLED;
 });
 
 describe('Xena recharge normalization helpers', () => {
@@ -306,6 +311,153 @@ describe('Xena adapter recharge execution', () => {
 });
 
 describe('Xena fulfillment status mapping and refund behavior', () => {
+    it('XENA_RECHARGE_ENABLED=false moves fulfillment to manual review without Xena API calls or refund', async () => {
+        process.env.XENA_RECHARGE_ENABLED = 'false';
+        const { order, customer } = await createXenaOrder({ walletDeducted: 50 });
+        const before = (await User.findById(customer._id)).walletBalance;
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.providerErrorCode).toBe('XENA_RECHARGE_DISABLED');
+        expect(updated.providerIdempotencyKey).toBe(`provider:xena:${order._id.toString()}`);
+        expect(updated.refunded).toBe(false);
+        expect(refunded).toBe(false);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('missing Xena credentials blocks placement before any provider request', async () => {
+        const { provider, order, customer } = await createXenaOrder({ walletDeducted: 50 });
+        await provider.updateOne({ $set: { apiToken: null, apiKey: null } });
+        const before = (await User.findById(customer._id)).walletBalance;
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.providerErrorCode).toBe('XENA_PROVIDER_AUTH_FAILED');
+        expect(updated.refunded).toBe(false);
+        expect(refunded).toBe(false);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('inactive Xena provider moves to manual review without provider calls or refund', async () => {
+        const { provider, order, customer } = await createXenaOrder({ walletDeducted: 50 });
+        await provider.updateOne({ $set: { isActive: false } });
+        const before = (await User.findById(customer._id)).walletBalance;
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.providerErrorCode).toBe('XENA_PROVIDER_INACTIVE');
+        expect(updated.refunded).toBe(false);
+        expect(refunded).toBe(false);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('missing Xena provider product identifier moves to manual review without provider calls or refund', async () => {
+        const { order, product, customer } = await createXenaOrder({ walletDeducted: 50 });
+        await Product.findByIdAndUpdate(product._id, { $unset: { providerProduct: 1 } });
+        const before = (await User.findById(customer._id)).walletBalance;
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.providerErrorCode).toBe('XENA_PROVIDER_PRODUCT_MISSING');
+        expect(updated.providerIdempotencyKey).toBe(`provider:xena:${order._id.toString()}`);
+        expect(updated.refunded).toBe(false);
+        expect(refunded).toBe(false);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('missing Xena customer target field blocks placement before provider calls', async () => {
+        const { order, customer } = await createXenaOrder({ targetUid: '', walletDeducted: 50 });
+        const before = (await User.findById(customer._id)).walletBalance;
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: updated } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.providerErrorCode).toBe('XENA_TARGET_INVALID');
+        expect(updated.providerOrderId).toBeNull();
+        expect(updated.refunded).toBe(true);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before + 50);
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('concurrent Xena fulfillment attempts place only one external recharge request', async () => {
+        const { order } = await createXenaOrder();
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockImplementation(async (call) => {
+            if (call.method === 'get' && call.url.includes('/users/')) {
+                return {
+                    data: { uid: '001234', nickname: 'Safe nickname', country: 'EG' },
+                    status: 200,
+                    headers: { 'x-request-id': 'req-verify' },
+                };
+            }
+            if (call.method === 'post' && call.url === '/v1/recharges') {
+                await new Promise((resolve) => setTimeout(resolve, 50));
+                return {
+                    data: { id: 'rch_concurrent', status: 'processing' },
+                    status: 200,
+                    headers: {},
+                };
+            }
+            throw new Error(`Unexpected Xena request ${call.method} ${call.url}`);
+        });
+
+        await Promise.all([
+            executeOrder(order._id),
+            executeOrder(order._id),
+        ]);
+
+        const updated = await Order.findById(order._id);
+        const rechargeCalls = client.request.mock.calls
+            .map(([call]) => call)
+            .filter((call) => call.method === 'post' && call.url === '/v1/recharges');
+        expect(rechargeCalls).toHaveLength(1);
+        expect(rechargeCalls[0].headers['Idempotency-Key']).toBe(`provider:xena:${order._id.toString()}`);
+        expect(updated.providerOrderId).toBe('rch_concurrent');
+        expect(updated.providerIdempotencyKey).toBe(`provider:xena:${order._id.toString()}`);
+    });
+
+    it('recorded Xena idempotency key without providerOrderId prevents immediate duplicate placement', async () => {
+        const { order } = await createXenaOrder();
+        await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                providerIdempotencyKey: `provider:xena:${order._id.toString()}`,
+                providerRawResponse: {
+                    action: 'xena_place_order_started',
+                    idempotencyKey: `provider:xena:${order._id.toString()}`,
+                },
+            },
+        });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: returned, placed } = await executeOrder(order._id);
+
+        expect(returned.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(returned.providerOrderId).toBeNull();
+        expect(returned.providerIdempotencyKey).toBe(`provider:xena:${order._id.toString()}`);
+        expect(placed).toBe(false);
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
     it('order creation accepts canonical target_uid for a legacy account_id Xena product definition', async () => {
         const { product, customer } = await createXenaOrder({ fieldKey: 'account_id' });
         await Product.findByIdAndUpdate(product._id, { executionType: ORDER_EXECUTION_TYPES.MANUAL });

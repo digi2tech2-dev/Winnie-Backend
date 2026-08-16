@@ -59,6 +59,27 @@ const buildStatusPendingResult = ({
     manualReviewOnRetryLimit: true,
 });
 
+const buildRechargeAttemptMetadata = ({
+    orderId,
+    providerIdempotencyKey,
+    amount,
+    targetUid,
+    reason,
+    providerResponse = null,
+} = {}) => ({
+    action: 'placeOrder',
+    endpoint: 'POST /v1/recharges',
+    idempotencyKey: providerIdempotencyKey,
+    requestStartedAt: new Date().toISOString(),
+    unknownReason: reason || null,
+    requestSummary: {
+        orderId,
+        amount,
+        targetUidPresent: Boolean(targetUid),
+    },
+    providerResponse,
+});
+
 class XenaRechargeAdapter extends BaseProviderAdapter {
     async getProducts() {
         const dto = await xenaProductService.buildSyntheticProductDTO({ provider: this.provider });
@@ -76,6 +97,24 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
         }
 
         const providerIdempotencyKey = `provider:xena:${orderId}`;
+        const buildAttemptMetadata = ({ reason, targetUid = null, providerResponse = null } = {}) => buildRechargeAttemptMetadata({
+            orderId,
+            providerIdempotencyKey,
+            amount: params.amount,
+            targetUid,
+            reason,
+            providerResponse,
+        });
+
+        if (!xenaService.isXenaRechargeEnabled()) {
+            return buildManualReviewResult({
+                providerIdempotencyKey,
+                providerErrorCode: xenaService.XENA_DISABLED_ERROR_CODE,
+                providerErrorMessage: 'Xena Recharge is disabled by environment configuration.',
+                rawResponse: buildAttemptMetadata({ reason: xenaService.XENA_DISABLED_ERROR_CODE }),
+            });
+        }
+
         const nestedParams = params.params && typeof params.params === 'object' ? params.params : {};
         const rawTargetUid = firstPresent(
             nestedParams[XENA_TARGET_FIELD_KEY],
@@ -157,7 +196,11 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
                 providerIdempotencyKey,
                 providerErrorCode: err.code || 'XENA_RECHARGE_UNKNOWN',
                 providerErrorMessage: 'Xena recharge outcome is uncertain and requires manual review.',
-                rawResponse: safeErrorPayload(err, err.code || 'XENA_RECHARGE_UNKNOWN'),
+                rawResponse: buildAttemptMetadata({
+                    targetUid,
+                    reason: err.code || 'XENA_RECHARGE_UNKNOWN',
+                    providerResponse: safeErrorPayload(err, err.code || 'XENA_RECHARGE_UNKNOWN'),
+                }),
             });
         }
 
@@ -184,6 +227,11 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
                 ...baseResult,
                 providerErrorCode: 'XENA_RECHARGE_ID_MISSING',
                 providerErrorMessage: 'Xena recharge response did not include a trusted recharge id.',
+                rawResponse: buildAttemptMetadata({
+                    targetUid,
+                    reason: 'XENA_RECHARGE_ID_MISSING',
+                    providerResponse: recharge.rawResponse,
+                }),
             });
         }
 
@@ -210,6 +258,11 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
             ...baseResult,
             providerErrorCode: recharge.providerErrorCode || 'XENA_RECHARGE_UNKNOWN',
             providerErrorMessage: recharge.providerErrorMessage || 'Xena recharge returned an unknown status.',
+            rawResponse: buildAttemptMetadata({
+                targetUid,
+                reason: recharge.providerErrorCode || 'XENA_RECHARGE_UNKNOWN',
+                providerResponse: recharge.rawResponse,
+            }),
         });
     }
 
@@ -229,7 +282,13 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
                 rechargeId,
             });
         } catch (err) {
-            if (['XENA_RECHARGE_NOT_FOUND', 'XENA_PROVIDER_AUTH_FAILED', 'XENA_REAUTHENTICATION_REQUIRED', 'XENA_MALFORMED_RESPONSE'].includes(err.code)) {
+            if ([
+                xenaService.XENA_DISABLED_ERROR_CODE,
+                'XENA_RECHARGE_NOT_FOUND',
+                'XENA_PROVIDER_AUTH_FAILED',
+                'XENA_REAUTHENTICATION_REQUIRED',
+                'XENA_MALFORMED_RESPONSE',
+            ].includes(err.code)) {
                 return buildManualReviewResult({
                     providerOrderId: rechargeId,
                     providerStatus: 'Unknown',

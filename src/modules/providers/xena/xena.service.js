@@ -4,14 +4,53 @@ const { Provider } = require('../provider.model');
 const { XenaConnection, XENA_CONNECTION_STATUSES } = require('./xenaConnection.model');
 const { XenaClient, XENA_ERROR_CODES, safeMessageForCode } = require('./xena.client');
 const { NotFoundError, BusinessRuleError } = require('../../../shared/errors/AppError');
-const { getProviderCredential, redactSecretText } = require('../../../shared/utils/secretEncryption');
+const config = require('../../../config/config');
+const { getProviderCredential, hasSecretValue, redactSecretText } = require('../../../shared/utils/secretEncryption');
 
 const XENA_PROVIDER_CODE = 'xena-recharge';
+
+const XENA_DISABLED_ERROR_CODE = 'XENA_RECHARGE_DISABLED';
 
 const isXenaProvider = (provider) => {
     const slug = String(provider?.slug || '').toLowerCase().trim();
     const name = String(provider?.name || '').toLowerCase().trim();
     return slug === XENA_PROVIDER_CODE || name === 'xena recharge';
+};
+
+const isXenaRechargeEnabled = () => (
+    process.env.XENA_RECHARGE_ENABLED !== undefined
+        ? process.env.XENA_RECHARGE_ENABLED === 'true'
+        : config.providers?.xenaRecharge?.enabled === true
+);
+
+const getGlobalSafetyStatus = () => ({
+    enabled: isXenaRechargeEnabled(),
+    disabledByEnv: !isXenaRechargeEnabled(),
+    gate: 'XENA_RECHARGE_ENABLED',
+});
+
+const assertXenaRechargeEnabled = () => {
+    if (isXenaRechargeEnabled()) return;
+    throw new BusinessRuleError(
+        'Xena Recharge is disabled by environment configuration.',
+        XENA_DISABLED_ERROR_CODE
+    );
+};
+
+const getProviderReadinessBlockers = ({ provider, state } = {}) => {
+    const blockers = [];
+    if (!isXenaRechargeEnabled()) blockers.push(XENA_DISABLED_ERROR_CODE);
+    if (!provider?.isActive) blockers.push('XENA_PROVIDER_INACTIVE');
+    if (!hasSecretValue(provider?.apiToken) && !hasSecretValue(provider?.apiKey) && !getProviderCredential(provider?.effectiveToken || null)) {
+        blockers.push('XENA_PROVIDER_CREDENTIALS_MISSING');
+    }
+    if (!state?.encryptedConnectionId) blockers.push(XENA_ERROR_CODES.CONNECTION_REQUIRED);
+    if (state?.status && state.status !== XENA_CONNECTION_STATUSES.CONNECTED) {
+        blockers.push(state.status === XENA_CONNECTION_STATUSES.REAUTHENTICATION_REQUIRED
+            ? XENA_ERROR_CODES.REAUTHENTICATION_REQUIRED
+            : XENA_ERROR_CODES.CONNECTION_REQUIRED);
+    }
+    return [...new Set(blockers)];
 };
 
 const maskUsername = (username) => {
@@ -135,9 +174,13 @@ const extractCurrency = (payload) => (
 );
 
 const safeStatusResponse = ({ provider, state, statusOverride, needsReconnectOverride } = {}) => {
+    const safety = getGlobalSafetyStatus();
+    const readinessBlockers = getProviderReadinessBlockers({ provider, state });
     const status = provider?.isActive === false
         ? XENA_CONNECTION_STATUSES.DISABLED
-        : statusOverride || state?.status || XENA_CONNECTION_STATUSES.CONNECTION_REQUIRED;
+        : !safety.enabled
+            ? XENA_CONNECTION_STATUSES.DISABLED
+            : statusOverride || state?.status || XENA_CONNECTION_STATUSES.CONNECTION_REQUIRED;
 
     const hasConnection = Boolean(state?.encryptedConnectionId);
     const needsReconnect = needsReconnectOverride !== undefined
@@ -149,6 +192,7 @@ const safeStatusResponse = ({ provider, state, statusOverride, needsReconnectOve
         ].includes(status);
 
     return {
+        ...safety,
         status,
         displayName: state?.displayName || null,
         maskedUsername: state?.maskedUsername || null,
@@ -156,6 +200,7 @@ const safeStatusResponse = ({ provider, state, statusOverride, needsReconnectOve
         lastErrorCode: state?.lastErrorCode || null,
         lastErrorMessage: state?.lastErrorMessage || null,
         lastCheckedAt: toIso(state?.lastCheckedAt),
+        readinessBlockers,
         needsReconnect,
     };
 };
@@ -225,10 +270,12 @@ const assertVerificationConnectionUsable = (state) => {
 };
 
 const buildClient = (provider) => {
+    assertXenaRechargeEnabled();
     const apiToken = getProviderCredential(provider.apiToken || provider.apiKey || provider.effectiveToken || null);
     return new XenaClient({
-        baseUrl: provider.baseUrl,
+        baseUrl: provider.baseUrl || config.providers?.xenaRecharge?.apiBaseUrl,
         apiToken,
+        timeoutMs: config.providers?.xenaRecharge?.timeoutMs,
     });
 };
 
@@ -437,6 +484,7 @@ const assertRechargeId = (rechargeId) => {
 };
 
 const challengeConnection = async ({ provider: providerOrId, displayName, username, password }) => {
+    assertXenaRechargeEnabled();
     const provider = await loadProvider(providerOrId);
     const state = await getOrCreateState(provider);
     const oldConnectionId = state.encryptedConnectionId ? state.getConnectionId() : null;
@@ -484,6 +532,7 @@ const challengeConnection = async ({ provider: providerOrId, displayName, userna
 const reconnectConnection = (args) => challengeConnection(args);
 
 const verifyConnection = async ({ provider: providerOrId, code }) => {
+    assertXenaRechargeEnabled();
     const provider = await loadProvider(providerOrId);
     const state = await getOrCreateState(provider);
     const connectionId = getConnectionIdOrThrow(state);
@@ -516,6 +565,15 @@ const verifyConnection = async ({ provider: providerOrId, code }) => {
 const getConnectionStatus = async ({ provider: providerOrId }) => {
     const provider = await loadProvider(providerOrId);
     const state = await getOrCreateState(provider);
+
+    if (!isXenaRechargeEnabled()) {
+        state.status = XENA_CONNECTION_STATUSES.DISABLED;
+        state.lastErrorCode = XENA_DISABLED_ERROR_CODE;
+        state.lastErrorMessage = 'Xena Recharge is disabled by environment configuration.';
+        state.lastCheckedAt = new Date();
+        await state.save();
+        return safeStatusResponse({ provider, state, statusOverride: XENA_CONNECTION_STATUSES.DISABLED });
+    }
 
     if (!provider.isActive) {
         state.status = XENA_CONNECTION_STATUSES.DISABLED;
@@ -550,6 +608,7 @@ const getConnectionStatus = async ({ provider: providerOrId }) => {
 };
 
 const refreshBalance = async ({ provider: providerOrId }) => {
+    assertXenaRechargeEnabled();
     const provider = await loadProvider(providerOrId);
     const state = await getOrCreateState(provider);
     const connectionId = getConnectionIdOrThrow(state);
@@ -593,6 +652,7 @@ const refreshBalance = async ({ provider: providerOrId }) => {
 };
 
 const verifyTargetUser = async ({ provider: providerOrId, targetUid }) => {
+    assertXenaRechargeEnabled();
     const provider = await loadProvider(providerOrId);
     const state = await getOrCreateState(provider);
     assertVerificationConnectionUsable(state);
@@ -625,6 +685,7 @@ const createRecharge = async ({
     clientReference,
     idempotencyKey,
 }) => {
+    assertXenaRechargeEnabled();
     const provider = await loadProvider(providerOrId);
     const state = await getOrCreateState(provider);
     assertVerificationConnectionUsable(state);
@@ -672,6 +733,7 @@ const createRecharge = async ({
 };
 
 const getRecharge = async ({ provider: providerOrId, rechargeId }) => {
+    assertXenaRechargeEnabled();
     const provider = await loadProvider(providerOrId);
     const normalizedRechargeId = assertRechargeId(rechargeId);
 
@@ -688,7 +750,12 @@ const getRecharge = async ({ provider: providerOrId, rechargeId }) => {
 
 module.exports = {
     XENA_PROVIDER_CODE,
+    XENA_DISABLED_ERROR_CODE,
     XENA_ERROR_CODES,
+    assertXenaRechargeEnabled,
+    getGlobalSafetyStatus,
+    getProviderReadinessBlockers,
+    isXenaRechargeEnabled,
     isXenaProvider,
     maskUsername,
     normalizeBalance,

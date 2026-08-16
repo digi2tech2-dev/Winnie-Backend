@@ -100,8 +100,13 @@ afterAll(async () => {
 
 beforeEach(async () => {
     process.env.PROVIDER_CREDENTIALS_KEY = TEST_KEY;
+    process.env.XENA_RECHARGE_ENABLED = 'true';
     axios.create.mockReset();
     await clearCollections();
+});
+
+afterEach(() => {
+    delete process.env.XENA_RECHARGE_ENABLED;
 });
 
 describe('Xena polling providerOrderId and normalization', () => {
@@ -163,6 +168,24 @@ describe('Xena active polling behavior', () => {
         expect(stats.manualReview).toBe(1);
         expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
         expect(updated.providerErrorCode).toBe('XENA_RECHARGE_ID_MISSING');
+        expect(updated.refunded).toBe(false);
+        expect(client.request).not.toHaveBeenCalled();
+        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+    });
+
+    it('Xena disabled moves status polling to MANUAL_REVIEW without calling Xena', async () => {
+        process.env.XENA_RECHARGE_ENABLED = 'false';
+        const { order, customer } = await createXenaProcessingOrder({ providerOrderId: 'rch_disabled' });
+        const before = (await User.findById(customer._id)).walletBalance;
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const stats = await pollProcessingOrders();
+        const updated = await Order.findById(order._id);
+
+        expect(stats.manualReview).toBe(1);
+        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.providerErrorCode).toBe('XENA_RECHARGE_DISABLED');
         expect(updated.refunded).toBe(false);
         expect(client.request).not.toHaveBeenCalled();
         expect((await User.findById(customer._id)).walletBalance).toBe(before);

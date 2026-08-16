@@ -94,8 +94,13 @@ afterAll(async () => {
 
 beforeEach(async () => {
     process.env.PROVIDER_CREDENTIALS_KEY = TEST_KEY;
+    process.env.XENA_RECHARGE_ENABLED = 'true';
     axios.create.mockReset();
     await clearCollections();
+});
+
+afterEach(() => {
+    delete process.env.XENA_RECHARGE_ENABLED;
 });
 
 describe('Xena target UID local validation', () => {

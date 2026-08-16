@@ -51,8 +51,13 @@ afterAll(async () => {
 
 beforeEach(async () => {
     process.env.PROVIDER_CREDENTIALS_KEY = TEST_KEY;
+    process.env.XENA_RECHARGE_ENABLED = 'true';
     axios.create.mockReset();
     await clearCollections();
+});
+
+afterEach(() => {
+    delete process.env.XENA_RECHARGE_ENABLED;
 });
 
 describe('Xena provider credentials and adapter registration', () => {
@@ -286,6 +291,33 @@ describe('Xena status and balance', () => {
         expect(responseJson(result)).not.toContain('con_status');
         expect(responseJson(result)).not.toContain('digiteech-client-key');
         expect(responseJson(result)).not.toContain('enc:v1:');
+    });
+
+    it('status response reports the global env gate and does not call Xena when disabled', async () => {
+        process.env.XENA_RECHARGE_ENABLED = 'false';
+        const provider = await createXenaProvider();
+        const state = await XenaConnection.create({
+            provider: provider._id,
+            status: 'connected',
+            displayName: 'Main Agency',
+            maskedUsername: 'ag***@example.com',
+        });
+        state.setConnectionId('con_disabled');
+        await state.save();
+
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const result = await xenaService.getConnectionStatus({ provider: provider._id });
+
+        expect(result.enabled).toBe(false);
+        expect(result.disabledByEnv).toBe(true);
+        expect(result.gate).toBe('XENA_RECHARGE_ENABLED');
+        expect(result.status).toBe('disabled');
+        expect(result.readinessBlockers).toContain('XENA_RECHARGE_DISABLED');
+        expect(responseJson(result)).not.toContain('con_disabled');
+        expect(responseJson(result)).not.toContain('digiteech-client-key');
+        expect(client.request).not.toHaveBeenCalled();
     });
 
     it.each([

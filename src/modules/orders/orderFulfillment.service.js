@@ -248,6 +248,70 @@ const buildProviderParams = (order, product, providerProduct) => {
 
 const normalizeProviderCode = (value) => String(value || '').trim().toUpperCase();
 
+const normalizeProviderSlug = (value) => String(value || '').trim().toLowerCase();
+
+const isXenaFulfillmentOrder = (order = {}, providerDoc = null) => {
+    const candidates = [
+        order.providerCode,
+        order.productId?.providerCode,
+        providerDoc?.slug,
+        providerDoc?.name,
+        providerDoc?.providerCode,
+    ].map(normalizeProviderSlug);
+    return candidates.includes('xena-recharge') || candidates.includes('xena recharge') || candidates.includes('xenarecharge');
+};
+
+const buildXenaProviderIdempotencyKey = (orderId) => `provider:xena:${String(orderId)}`;
+
+const buildXenaPlacementStartedPayload = ({ order, providerProduct, mappedCustomerFields, idempotencyKey }) => ({
+    action: 'xena_place_order_started',
+    endpoint: 'POST /v1/recharges',
+    idempotencyKey,
+    requestStartedAt: new Date().toISOString(),
+    requestSummary: {
+        orderId: order._id.toString(),
+        orderNumber: order.orderNumber || null,
+        providerCode: order.providerCode || null,
+        productId: order.productId?._id?.toString?.() || null,
+        providerProductId: order.productId?.providerProduct?.toString?.() || null,
+        externalProductId: providerProduct?.externalProductId || null,
+        amount: order.quantity,
+        targetFieldKeys: Object.keys(mappedCustomerFields || {}).filter((key) => ['target_uid', 'account_id'].includes(key)),
+    },
+});
+
+const claimXenaFulfillmentAttempt = async ({ order, providerProduct, mappedCustomerFields }) => {
+    const idempotencyKey = buildXenaProviderIdempotencyKey(order._id);
+    const now = new Date();
+    const claimed = await Order.findOneAndUpdate(
+        {
+            _id: order._id,
+            status: ORDER_STATUS.PROCESSING,
+            providerOrderId: { $in: [null, ''] },
+            providerIdempotencyKey: { $in: [null, ''] },
+        },
+        {
+            $set: {
+                providerIdempotencyKey: idempotencyKey,
+                providerStatus: 'PlacementStarted',
+                providerRawResponse: buildXenaPlacementStartedPayload({
+                    order,
+                    providerProduct,
+                    mappedCustomerFields,
+                    idempotencyKey,
+                }),
+                lastCheckedAt: now,
+            },
+        },
+        { new: true }
+    );
+
+    if (claimed) return { claimed, idempotencyKey };
+
+    const current = await Order.findById(order._id);
+    return { claimed: null, current, idempotencyKey };
+};
+
 const isFazerCardsCodeDeliveryOrder = (product = {}, providerProduct = {}) => {
     const safeProduct = product || {};
     const safeProviderProduct = providerProduct || {};
@@ -1022,6 +1086,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
 
     // ── Self-resolve provider adapter if none was passed ──────────────────
     let resolvedProvider = provider;
+    let resolvedProviderDoc = null;
     if (!resolvedProvider) {
         try {
             const productProviderId = order.productId?.provider;
@@ -1033,8 +1098,27 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 throw new Error(`Provider ${productProviderId} not found in DB.`);
             }
             if (!providerDoc.isActive) {
+                if (isXenaFulfillmentOrder(order, providerDoc)) {
+                    const providerIdempotencyKey = buildXenaProviderIdempotencyKey(order._id);
+                    const reviewOrder = await moveOrderToManualReview(order, {
+                        providerOrderId: null,
+                        providerStatus: 'Unknown',
+                        providerIdempotencyKey,
+                        providerErrorCode: 'XENA_PROVIDER_INACTIVE',
+                        providerErrorMessage: `Provider '${providerDoc.name}' is inactive.`,
+                        rawResponse: {
+                            errorCode: 'XENA_PROVIDER_INACTIVE',
+                            providerId: providerDoc._id.toString(),
+                            idempotencyKey: providerIdempotencyKey,
+                        },
+                        errorMessage: `Provider '${providerDoc.name}' is inactive.`,
+                    }, { reason: 'XENA_PROVIDER_INACTIVE' });
+
+                    return { order: reviewOrder, placed: false, refunded: false };
+                }
                 throw new Error(`Provider '${providerDoc.name}' is inactive.`);
             }
+            resolvedProviderDoc = providerDoc;
             resolvedProvider = getProviderAdapter(providerDoc);
         } catch (resolveErr) {
             console.error(`[Fulfillment] Provider resolution failed for order ${orderId}:`, resolveErr.message);
@@ -1079,6 +1163,8 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
 
             return { order: await Order.findById(orderId), placed: false, refunded: refundIssued };
         }
+    } else if (resolvedProvider.provider) {
+        resolvedProviderDoc = resolvedProvider.provider;
     }
 
     // ── Resolve externalProductId via the 3-layer chain ─────────────────────
@@ -1102,6 +1188,42 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     // Falls back to identity mapping when no providerMapping is defined.
     const mappedCustomerFields = buildProviderParams(order, order.productId, providerProduct);
     const stableOrderUuid = order.idempotencyKey || order._id.toString();
+    const isXenaOrder = isXenaFulfillmentOrder(order, resolvedProviderDoc);
+
+    if (isXenaOrder && !externalProductId) {
+        const providerIdempotencyKey = buildXenaProviderIdempotencyKey(order._id);
+        const reviewOrder = await moveOrderToManualReview(order, {
+            providerOrderId: null,
+            providerStatus: 'Unknown',
+            providerIdempotencyKey,
+            providerErrorCode: 'XENA_PROVIDER_PRODUCT_MISSING',
+            providerErrorMessage: 'Xena provider product externalProductId is missing.',
+            rawResponse: {
+                errorCode: 'XENA_PROVIDER_PRODUCT_MISSING',
+                productId: order.productId?._id?.toString?.() ?? null,
+                providerProductId: order.productId?.providerProduct?.toString?.() ?? null,
+                idempotencyKey: providerIdempotencyKey,
+            },
+            errorMessage: 'Xena provider product externalProductId is missing.',
+        }, { reason: 'XENA_PROVIDER_PRODUCT_MISSING' });
+
+        return { order: reviewOrder, placed: false, refunded: false };
+    }
+
+    if (isXenaOrder) {
+        const claim = await claimXenaFulfillmentAttempt({
+            order,
+            providerProduct,
+            mappedCustomerFields,
+        });
+        if (!claim.claimed) {
+            return {
+                order: claim.current || await Order.findById(orderId),
+                placed: false,
+                refunded: claim.current?.refunded === true,
+            };
+        }
+    }
 
     // ── Call the provider ──────────────────────────────────────────────────────
     console.log(`[Fulfillment] Placing order ${orderId} with provider…`);

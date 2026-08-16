@@ -145,6 +145,11 @@ const config = {
                 .map((region) => region.trim().toUpperCase())
                 .filter(Boolean),
         },
+        xenaRecharge: {
+            enabled: process.env.XENA_RECHARGE_ENABLED === 'true',
+            apiBaseUrl: process.env.XENA_API_BASE_URL || 'https://api.digiteech.me',
+            timeoutMs: parseInt(process.env.XENA_TIMEOUT_MS || '20000', 10),
+        },
     },
 
     openwa: {
