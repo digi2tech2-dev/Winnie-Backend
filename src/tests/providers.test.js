@@ -418,6 +418,134 @@ const createFazerCatalogFamilyOrder = async ({
     return { provider, providerProduct, product, order, customer };
 };
 
+const createFazerControlledAutoOrder = async ({
+    familyKey = 'TELEGRAM',
+    telegramKind = 'stars',
+    customerFields = null,
+    quantity = null,
+    walletDeducted = 50,
+    providerProductOverrides = {},
+    productOverrides = {},
+} = {}) => {
+    const isTelegram = familyKey === 'TELEGRAM';
+    const isPremium = isTelegram && telegramKind === 'premium';
+    const isSteam = familyKey === 'STEAM_TOPUP';
+    const defaults = isSteam
+        ? {
+            rawPrice: '0.75',
+            costPrice: '0.75',
+            rawPayload: {
+                family: 'STEAM_TOPUP',
+                currency: 'USD',
+                amount: 10,
+                rate: { currency: 'USD', amount: 10, price_usd: '0.75' },
+            },
+        }
+        : isPremium
+            ? {
+                externalProductId: 'FAZER_TELEGRAM:PREMIUM:3',
+                offerId: 'premium_3',
+                offerName: '3 months',
+                fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_PREMIUM,
+                rawPrice: '0.75',
+                costPrice: '0.75',
+                minQty: 1,
+                maxQty: 1,
+                rawPayload: {
+                    family: 'TELEGRAM',
+                    kind: 'telegram_premium',
+                    plan: { months: 3, price_usd: '0.75' },
+                },
+            }
+            : {
+                externalProductId: 'FAZER_TELEGRAM:STARS',
+                offerId: 'stars',
+                offerName: 'Stars',
+                fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
+                rawPrice: '0.001',
+                costPrice: '0.001',
+                minQty: 50,
+                maxQty: 10000,
+                rawPayload: {
+                    family: 'TELEGRAM',
+                    kind: 'telegram_stars',
+                    response: { price_per_star: '0.001', min_amount: 50, max_amount: 10000 },
+                },
+            };
+    const { provider, providerProduct } = await createFazerCatalogOnlyProviderProduct({
+        familyKey,
+        overrides: {
+            ...defaults,
+            executionBlocked: false,
+            isSupported: true,
+            isBlocked: false,
+            blockReason: null,
+            ...providerProductOverrides,
+        },
+    });
+    const { customer, group } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
+    const orderFields = isSteam
+        ? [{ id: 'steam_login', key: 'steam_login', label: 'Steam Login', type: 'text', required: true, isActive: true }]
+        : [{ id: 'telegram_username', key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true, isActive: true }];
+    const values = customerFields || (isSteam ? { steam_login: 'pilot_steam' } : { telegram_username: '@pilot_user' });
+    const product = await Product.create({
+        name: `${familyKey} Controlled Auto ${Date.now()} ${Math.random()}`,
+        basePrice: isSteam ? '1.50' : '1.00',
+        providerPrice: String(providerProduct.costPrice ?? providerProduct.rawPrice),
+        finalPrice: isSteam ? '1.50' : '1.00',
+        minQty: providerProduct.minQty || 1,
+        maxQty: providerProduct.maxQty || 9999,
+        isActive: true,
+        visibleInStore: true,
+        status: PRODUCT_STATUSES.AVAILABLE,
+        customerPurchaseEnabled: true,
+        executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        provider,
+        providerProduct,
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        externalProductId: providerProduct.externalProductId,
+        familyKey,
+        fulfillmentMode: providerProduct.fulfillmentMode,
+        providerExecutionMode: 'AUTO_PROVIDER',
+        providerExecutionEnabled: true,
+        providerExecutionBlocked: false,
+        providerBlockReason: null,
+        orderFields,
+        providerMapping: {},
+        ...productOverrides,
+    });
+    const orderQuantity = quantity ?? (isTelegram && !isPremium ? 100 : 1);
+    const order = await Order.create({
+        userId: customer._id,
+        orderNumber: 889000 + Math.floor(Math.random() * 10000),
+        productId: product._id,
+        quantity: orderQuantity,
+        unitPrice: product.finalPrice,
+        totalPrice: product.finalPrice,
+        basePriceSnapshot: product.basePrice,
+        markupPercentageSnapshot: 0,
+        finalPriceCharged: product.finalPrice,
+        groupIdSnapshot: group._id,
+        walletDeducted,
+        creditUsedAmount: '0',
+        status: ORDER_STATUS.PROCESSING,
+        executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        providerCode: 'fazer-cards',
+        familyKey,
+        fulfillmentMode: providerProduct.fulfillmentMode,
+        customerInput: {
+            values,
+            fieldsSnapshot: orderFields.map((field) => ({
+                key: field.key,
+                label: field.label,
+                type: field.type,
+                required: field.required,
+            })),
+        },
+    });
+    return { provider, providerProduct, product, order, customer };
+};
+
 const originalFazerConfig = { ...config.providers.fazerCards };
 
 beforeAll(async () => {
@@ -696,11 +824,21 @@ describe('FazerCards family contracts', () => {
                 async: expect.any(Boolean),
                 statusWebhookBehavior: expect.any(String),
                 autoProviderAllowed: expect.any(Boolean),
+                bulkAutoProviderAllowed: expect.any(Boolean),
                 readinessReason: expect.any(String),
             }));
         }
 
         expect(Object.fromEntries(contracts.map((contract) => [contract.familyKey, contract.autoProviderAllowed]))).toMatchObject({
+            TOPUPS: true,
+            GIFTCARDS: true,
+            GAME_KEYS: true,
+            TELEGRAM: true,
+            STEAM_TOPUP: true,
+            MANUAL_SERVICES: false,
+            STEAM_GIFTS: false,
+        });
+        expect(Object.fromEntries(contracts.map((contract) => [contract.familyKey, contract.bulkAutoProviderAllowed]))).toMatchObject({
             TOPUPS: true,
             GIFTCARDS: true,
             GAME_KEYS: true,
@@ -722,7 +860,7 @@ describe('FazerCards family contracts', () => {
             fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
             supportStage: 'PILOT_READY',
         });
-        expect(summary.families.TELEGRAM.supportStage).toBe('DRY_RUN_READY');
+        expect(summary.families.TELEGRAM.executionStage).toBe('CONTROLLED_LIVE_CANDIDATE');
         expect(axios.create).not.toHaveBeenCalled();
     });
 
@@ -2271,11 +2409,12 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
             success: true,
             dryRun: true,
             wouldCall: 'POST /telegram/stars/buy',
-            executionAvailable: false,
+            executionAvailable: true,
+            controlledLiveCandidate: true,
             contract: {
                 familyKey: 'TELEGRAM',
                 supportStage: 'DRY_RUN_READY',
-                executionStage: 'CUSTOMER_FLOW_NOT_READY',
+                executionStage: 'CONTROLLED_LIVE_CANDIDATE',
                 providerPayloadSchema: { confirmed: true },
             },
             product: {
@@ -2289,14 +2428,14 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
                 quantity: 100,
             },
         });
-        expect(result.blockers).toContain('AUTO_PROVIDER remains disabled until controlled Telegram go-live is explicitly approved.');
+        expect(result.blockers).toContain('Excluded from bulk AUTO_PROVIDER. Use only one explicit product-level controlled test after real target validation.');
         expect(result.warnings).toContain('Dry run only. No FazerCards order was created.');
         expect(axios.create).not.toHaveBeenCalled();
         expect(await Order.countDocuments({})).toBe(0);
         expect(await WalletTransaction.countDocuments({})).toBe(0);
     });
 
-    it('unified readiness works for catalog-only families and remains not live-executable', async () => {
+    it('unified readiness shows Steam top-up as controlled candidate but not live-ready by default', async () => {
         const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'STEAM_TOPUP' });
         const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
             sellPrice: 2.25,
@@ -2312,9 +2451,9 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
             familyKey: 'STEAM_TOPUP',
             fulfillmentMode: FULFILLMENT_MODES.STEAM_TOPUP_WITH_LOGIN,
             supportStage: 'DRY_RUN_READY',
-            executionStage: 'CUSTOMER_FLOW_NOT_READY',
+            executionStage: 'CONTROLLED_LIVE_CANDIDATE',
             canCustomerPurchase: true,
-            canLivePilot: false,
+            canLivePilot: true,
             contract: {
                 familyKey: 'STEAM_TOPUP',
                 riskLevel: 'HIGH',
@@ -2322,7 +2461,10 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
             },
             checks: {
                 familyCatalogSupported: true,
-                executionImplemented: false,
+                executionImplemented: true,
+                controlledLiveCandidate: true,
+                autoProviderAllowedForExplicitProduct: true,
+                bulkAutoProviderAllowed: false,
                 productExecutionEnabled: false,
                 productExecutionBlocked: true,
                 productHidden: true,
@@ -2334,9 +2476,9 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
                 requiredFieldKeys: ['steamLogin'],
             },
         });
-        expect(result.blockers).toContain('AUTO_PROVIDER remains disabled until Steam check-login/order/status live verification is approved.');
+        expect(result.blockers).toContain('Excluded from bulk AUTO_PROVIDER. High-risk flow requires explicit product-level controlled test and check-login preflight.');
         expect(result.requiredCapabilities).toContain('steam-topup check-login preflight');
-        expect(result.warnings).toContain('Steam Wallet Top-up live execution is not implemented yet.');
+        expect(result.warnings).toContain('Steam Wallet Top-up is a controlled-live candidate only and remains excluded from bulk auto.');
         expect(axios.create).not.toHaveBeenCalled();
     });
 
@@ -2981,6 +3123,134 @@ describe('FazerCards controlled top-up order execution', () => {
             expect(refunded).toBe(false);
             expect((await User.findById(customer._id)).walletBalance).toBe(before);
         }
+    });
+});
+
+describe('FazerCards Telegram and Steam controlled execution', () => {
+    it('executes Telegram Stars through the controlled AUTO_PROVIDER path with stable idempotency', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        config.providers.fazerCards.maxOrderUsd = 1.00;
+        const { order } = await createFazerControlledAutoOrder({ familyKey: 'TELEGRAM', telegramKind: 'stars', quantity: 100 });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: { ok: true, balance: '10.00', currency: 'USD' } })
+            .mockResolvedValueOnce({ status: 200, headers: { 'x-request-id': 'req-tg-stars' }, data: { ok: true, order: { id: 'tg_order_1' } } });
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(updated.providerOrderId).toBe('tg_order_1');
+        expect(updated.providerStatus).toBe('Pending');
+        expect(updated.providerIdempotencyKey).toBe(`fazercards:telegram-stars:${order._id.toString()}`);
+        expect(refunded).toBe(false);
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'post',
+            url: '/telegram/stars/buy',
+            data: { telegram_username: '@pilot_user', quantity: 100 },
+            headers: { 'Idempotency-Key': `fazercards:telegram-stars:${order._id.toString()}` },
+        }));
+    });
+
+    it('maps Telegram failed response to failed and refunds once', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        config.providers.fazerCards.maxOrderUsd = 1.00;
+        const { order, customer } = await createFazerControlledAutoOrder({ familyKey: 'TELEGRAM', telegramKind: 'premium' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: { ok: true, balance: '10.00', currency: 'USD' } })
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: { ok: false, order: { id: 'tg_failed', status: 'failed' } } });
+
+        await executeOrder(order._id);
+        await executeOrder(order._id);
+
+        const updated = await Order.findById(order._id).lean();
+        const refunds = await WalletTransaction.find({ userId: customer._id, type: 'REFUND' });
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(updated.providerOrderId).toBe('tg_failed');
+        expect(refunds).toHaveLength(1);
+    });
+
+    it('rejects Telegram Stars invalid quantity before any provider request', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        const { order } = await createFazerControlledAutoOrder({ familyKey: 'TELEGRAM', telegramKind: 'stars', quantity: 49 });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: updated } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(updated.providerErrorCode).toBe('TELEGRAM_STARS_QUANTITY_INVALID');
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('runs Steam check-login before order and never calls order when login check fails', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        config.providers.fazerCards.maxOrderUsd = 1.00;
+        const { order } = await createFazerControlledAutoOrder({ familyKey: 'STEAM_TOPUP' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: { ok: true, balance: '10.00', currency: 'USD' } })
+            .mockResolvedValueOnce({ status: 200, headers: { 'x-request-id': 'req-steam-check' }, data: { ok: true, can_refill: false } });
+
+        const { order: updated } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(updated.providerErrorCode).toBe('FAZERCARDS_STEAM_LOGIN_CHECK_FAILED');
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'post',
+            url: '/steam-topup/check-login',
+            data: { steamLogin: 'pilot_steam' },
+        }));
+        expect(client.request.mock.calls.some(([call]) => call.url === '/steam-topup/order')).toBe(false);
+    });
+
+    it('executes Steam top-up after check-login succeeds with stable idempotency', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        config.providers.fazerCards.maxOrderUsd = 1.00;
+        const { order } = await createFazerControlledAutoOrder({ familyKey: 'STEAM_TOPUP' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: { ok: true, balance: '10.00', currency: 'USD' } })
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: { ok: true, can_refill: true } })
+            .mockResolvedValueOnce({ status: 200, headers: { 'x-request-id': 'req-steam-order' }, data: { ok: true, order: { id: 'steam_order_1', status: 'processing' } } });
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(updated.providerOrderId).toBe('steam_order_1');
+        expect(updated.providerStatus).toBe('Pending');
+        expect(updated.providerIdempotencyKey).toBe(`fazercards:steam-topup:${order._id.toString()}`);
+        expect(refunded).toBe(false);
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'post',
+            url: '/steam-topup/order',
+            data: { steamLogin: 'pilot_steam', currency: 'USD', amount: 10 },
+            headers: { 'Idempotency-Key': `fazercards:steam-topup:${order._id.toString()}` },
+        }));
+    });
+
+    it('rejects Steam missing amount metadata before provider requests', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        const { order } = await createFazerControlledAutoOrder({
+            familyKey: 'STEAM_TOPUP',
+            providerProductOverrides: { rawPayload: { family: 'STEAM_TOPUP', currency: 'USD' } },
+        });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: updated } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(updated.providerErrorCode).toBe('PAYLOAD_IDENTIFIER_MISSING');
+        expect(client.request).not.toHaveBeenCalled();
     });
 });
 
@@ -3681,6 +3951,43 @@ describe('FazerCards signed webhooks', () => {
             event: 'order.failed',
             event_id: 'evt_telegram_failed',
             data: { order_id: 'fc_telegram_failed', status: 'failed' },
+        }));
+
+        const updatedCompleted = await Order.findById(completedOrder.order._id).lean();
+        const updatedFailed = await Order.findById(failedOrder.order._id).lean();
+        const failedRefunds = await WalletTransaction.find({ userId: failedOrder.customer._id, type: 'REFUND' });
+
+        expect(completed).toMatchObject({ processed: true, action: 'completed' });
+        expect(updatedCompleted.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(failed).toMatchObject({ processed: true, action: 'failed', refunded: true });
+        expect(updatedFailed.status).toBe(ORDER_STATUS.FAILED);
+        expect(failedRefunds).toHaveLength(1);
+    });
+
+    it('completed and failed webhooks update Steam top-up orders through generic status handling', async () => {
+        enableWebhook();
+        const completedOrder = await createFazerCatalogFamilyOrder({
+            familyKey: 'STEAM_TOPUP',
+            providerOrderId: 'fc_steam_done',
+            walletDeducted: 50,
+            customerFields: { steamLogin: 'pilot_steam' },
+        });
+        const failedOrder = await createFazerCatalogFamilyOrder({
+            familyKey: 'STEAM_TOPUP',
+            providerOrderId: 'fc_steam_failed',
+            walletDeducted: 50,
+            customerFields: { steamLogin: 'pilot_steam' },
+        });
+
+        const completed = await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+            event: 'order.completed',
+            event_id: 'evt_steam_done',
+            data: { order_id: 'fc_steam_done', status: 'completed' },
+        }));
+        const failed = await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+            event: 'order.status_changed',
+            event_id: 'evt_steam_failed',
+            data: { order_id: 'fc_steam_failed', status: 'failed' },
         }));
 
         const updatedCompleted = await Order.findById(completedOrder.order._id).lean();
@@ -4402,11 +4709,11 @@ describe('FazerCards Phase 9 launch operations', () => {
         expect(updated.status).toBe(PRODUCT_STATUSES.AVAILABLE);
     });
 
-    it('single product launch rejects invalid auto execution by family contract', async () => {
+    it('single product launch rejects controlled AUTO_PROVIDER when Telegram ProviderProduct is still blocked', async () => {
         const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
         const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
             sellPrice: 1.75,
-            name: 'Telegram Invalid Auto Candidate',
+            name: 'Telegram Blocked Auto Candidate',
         });
 
         await expect(fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
@@ -4415,7 +4722,46 @@ describe('FazerCards Phase 9 launch operations', () => {
             visibleInStore: true,
             status: PRODUCT_STATUSES.AVAILABLE,
             providerExecutionMode: 'AUTO_PROVIDER',
-        })).rejects.toMatchObject({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED' });
+            providerExecutionEnabled: true,
+        })).rejects.toMatchObject({ code: 'AUTO_PROVIDER_REQUIRES_SUPPORTED_PROVIDER_PRODUCT' });
+    });
+
+    it.each([
+        ['TELEGRAM', { rawPayload: { family: 'TELEGRAM', kind: 'telegram_stars', response: { price_per_star: '0.001' } } }],
+        ['STEAM_TOPUP', { rawPayload: { family: 'STEAM_TOPUP', currency: 'USD', amount: 10, rate: { currency: 'USD', amount: 10 } } }],
+    ])('single product launch can enable controlled AUTO_PROVIDER for %s only when readiness passes', async (familyKey, providerProductPatch) => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({
+            familyKey,
+            overrides: {
+                ...providerProductPatch,
+                executionBlocked: false,
+                isSupported: true,
+                isBlocked: false,
+                blockReason: null,
+            },
+        });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.75,
+            name: `${familyKey} Controlled Auto Candidate`,
+        });
+
+        const result = await fazerCardsCatalogSvc.updateSingleProductLaunchControls(product._id, {
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerExecutionEnabled: true,
+        });
+        const updated = await Product.findById(product._id).lean();
+
+        expect(result.launchStatus).toEqual({ visibleToCustomer: true, reasons: [] });
+        expect(updated).toMatchObject({
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerExecutionEnabled: true,
+            providerExecutionBlocked: false,
+            executionType: EXECUTION_TYPES.AUTOMATIC,
+        });
     });
 
     it.each(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS'])('single product launch can enable AUTO_PROVIDER for confirmed %s products', async (familyKey) => {
@@ -4612,6 +4958,13 @@ describe('FazerCards Phase 9 launch operations', () => {
             providerExecutionMode: 'MANUAL_FULFILLMENT',
             providerExecutionEnabled: false,
         });
+    });
+
+    it.each(['TELEGRAM', 'STEAM_TOPUP', 'MANUAL_SERVICES', 'STEAM_GIFTS'])('bulk AUTO_PROVIDER publish excludes %s', async (familyKey) => {
+        await expect(fazerCardsCatalogSvc.publishEligibleLaunchControls({
+            familyKey,
+            providerExecutionMode: 'AUTO_PROVIDER',
+        })).rejects.toMatchObject({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED' });
     });
 
     it('bulk launch returns per-product customer visibility reasons', async () => {

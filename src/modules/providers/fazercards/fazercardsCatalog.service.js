@@ -508,6 +508,10 @@ const normalizeSteamTopupProducts = (ratesData = {}) => {
         offerName: String(currency).toUpperCase(),
         currency: 'USD',
         requiredFields: [{ key: 'steamLogin', label: 'Steam Login', type: 'text', required: true }],
+        executionBlocked: false,
+        isSupported: true,
+        isBlocked: false,
+        blockReason: null,
         rawPayload: { family: family.familyKey, rateCurrency: currency, rate, response: ratesData },
     }));
 };
@@ -531,6 +535,10 @@ const normalizeTelegramProducts = (starsData = {}, premiumData = {}) => {
             minQty: parseNumber(firstValue(starsData.min_amount, starsData.minAmount), 50) || 50,
             maxQty: parseNumber(firstValue(starsData.max_amount, starsData.maxAmount), 10000) || 10000,
             requiredFields: [{ key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true }],
+            executionBlocked: false,
+            isSupported: parseNumber(price, null) !== null && parseNumber(price, null) > 0,
+            isBlocked: !(parseNumber(price, null) !== null && parseNumber(price, null) > 0),
+            blockReason: parseNumber(price, null) !== null && parseNumber(price, null) > 0 ? null : 'TELEGRAM_PRICE_INVALID',
             rawPayload: { family: family.familyKey, kind: 'telegram_stars', response: starsData },
         }));
     }
@@ -549,6 +557,10 @@ const normalizeTelegramProducts = (starsData = {}, premiumData = {}) => {
             offerName: `${months} months`,
             fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_PREMIUM,
             requiredFields: [{ key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true }],
+            executionBlocked: false,
+            isSupported: parseNumber(price, null) !== null && parseNumber(price, null) > 0,
+            isBlocked: !(parseNumber(price, null) !== null && parseNumber(price, null) > 0),
+            blockReason: parseNumber(price, null) !== null && parseNumber(price, null) > 0 ? null : 'TELEGRAM_PRICE_INVALID',
             rawPayload: { family: family.familyKey, kind: 'telegram_premium', plan, response: premiumData },
         }));
     }
@@ -2013,7 +2025,8 @@ const buildUnifiedDryRun = async ({ productId, fields = {}, quantity = 1, orderI
             wouldCall: contractPayload.wouldCall,
             precheckWouldCall: contractPayload.precheckWouldCall || null,
             provider: 'FazerCards',
-            executionAvailable: false,
+            executionAvailable: contract.canLivePilot === true,
+            controlledLiveCandidate: contract.executionStage === fazerCardsContracts.EXECUTION_STAGES.CONTROLLED_LIVE_CANDIDATE,
             contract,
             product: {
                 id: product._id.toString(),
@@ -2042,7 +2055,9 @@ const buildUnifiedDryRun = async ({ productId, fields = {}, quantity = 1, orderI
             blockers: contract.blockers || [],
             warnings: [
                 'Dry run only. No FazerCards order was created.',
-                `${family?.displayName || familyKey} provider payload is documented, but live execution remains disabled in this phase.`,
+                contract.executionStage === fazerCardsContracts.EXECUTION_STAGES.CONTROLLED_LIVE_CANDIDATE
+                    ? `${family?.displayName || familyKey} is eligible only for explicit product-level controlled execution; bulk auto remains disabled.`
+                    : `${family?.displayName || familyKey} provider payload is documented, but live execution remains disabled in this phase.`,
                 `Product execution is currently ${executionState}.`,
                 ...contract.warnings,
             ],
@@ -2056,7 +2071,8 @@ const buildUnifiedDryRun = async ({ productId, fields = {}, quantity = 1, orderI
         message: contractPayload.message || `${family?.displayName || familyKey} provider payload contract is not confirmed.`,
         wouldCall: contractPayload.wouldCall || null,
         provider: 'FazerCards',
-        executionAvailable: false,
+        executionAvailable: contract.canLivePilot === true,
+        controlledLiveCandidate: contract.executionStage === fazerCardsContracts.EXECUTION_STAGES.CONTROLLED_LIVE_CANDIDATE,
         contract,
         product: {
             id: product._id.toString(),
@@ -2099,40 +2115,69 @@ const getUnsupportedFamilyReadiness = async (productId) => {
     const providerProduct = product.providerProduct || null;
     const familyKey = providerProduct ? getProviderProductFamilyKey(providerProduct) : product.familyKey || null;
     const family = getFazerCardsFamily(familyKey);
+    const contract = fazerCardsContracts.getContractOrUnknown(familyKey);
     const rawCost = providerProduct?.costPrice ?? providerProduct?.rawPrice;
     const cost = Number(rawCost);
     const requiredFields = Array.isArray(providerProduct?.requiredFields) ? providerProduct.requiredFields : [];
+    const identifiers = fazerCardsContracts.getAutoProviderIdentifiers(familyKey, providerProduct || {});
+    const controlledLiveCandidate = contract.executionStage === fazerCardsContracts.EXECUTION_STAGES.CONTROLLED_LIVE_CANDIDATE;
+    const autoReadiness = controlledLiveCandidate
+        ? fazerCardsContracts.validateAutoProviderReadinessForProduct({
+            product,
+            providerProduct: providerProduct || {},
+            familyKey,
+            requireCustomerVisible: true,
+        })
+        : null;
     const checks = {
         productExists: true,
         linkedToFazerCards: Boolean(providerProduct),
         familyCatalogSupported: DRAFT_IMPORT_FAMILIES.has(familyKey),
-        executionImplemented: false,
+        executionImplemented: controlledLiveCandidate,
+        controlledLiveCandidate,
+        autoProviderAllowedForExplicitProduct: contract.autoProviderAllowed === true,
+        bulkAutoProviderAllowed: contract.bulkAutoProviderAllowed === true,
         globalRealOrdersEnabled: config.providers.fazerCards.realOrdersEnabled === true,
         productExecutionEnabled: product.providerExecutionEnabled === true,
         productExecutionBlocked: product.providerExecutionBlocked === true,
         providerProductExecutionBlocked: providerProduct?.executionBlocked === true,
         providerProductBlocked: providerProduct?.isBlocked === true,
+        providerProductSupported: providerProduct?.isSupported === true,
         costValid: rawCost !== undefined && rawCost !== null && rawCost !== '' && Number.isFinite(cost) && cost > 0,
         hasRequiredFields: requiredFields.length > 0,
+        hasTelegramKind: familyKey !== 'TELEGRAM' || Boolean(identifiers.kind),
+        hasSteamCurrency: familyKey !== 'STEAM_TOPUP' || Boolean(identifiers.currency),
+        hasSteamAmount: familyKey !== 'STEAM_TOPUP' || Boolean(identifiers.amount),
         productHidden: product.visibleInStore !== true,
         productInactive: product.isActive !== true || product.status !== PRODUCT_STATUSES.AVAILABLE,
     };
 
     const warnings = [
-        `${family?.displayName || familyKey || 'FazerCards'} live execution is not implemented yet.`,
+        controlledLiveCandidate
+            ? `${family?.displayName || familyKey || 'FazerCards'} is a controlled-live candidate only and remains excluded from bulk auto.`
+            : `${family?.displayName || familyKey || 'FazerCards'} live execution is not implemented yet.`,
     ];
     if (familyKey === 'STEAM_GIFTS') warnings.push('Steam Gifts catalog endpoint returned HTTP 404 in production and is currently unavailable.');
+    if (familyKey === 'STEAM_TOPUP') warnings.push('Steam top-up requires successful check-login immediately before any provider order.');
+    if (familyKey === 'TELEGRAM') warnings.push('Telegram fulfillment is asynchronous; completed/failed statuses must be confirmed by response, status sync, or webhook.');
     if (!checks.globalRealOrdersEnabled) warnings.push('Global real order gate is disabled.');
-    if (!checks.productHidden) warnings.push('Product is visible; keep it hidden until this family is implemented.');
-    if (!checks.productInactive) warnings.push('Product is active; keep it inactive until this family is implemented.');
+    if (!controlledLiveCandidate && !checks.productHidden) warnings.push('Product is visible; keep it hidden until this family is implemented.');
+    if (!controlledLiveCandidate && !checks.productInactive) warnings.push('Product is active; keep it inactive until this family is implemented.');
     if (checks.productExecutionBlocked) warnings.push(product.providerBlockReason || getFamilyBlockReason(providerProduct));
+    for (const error of autoReadiness?.errors || []) warnings.push(error.message);
     const contractMeta = getContractMetadata(familyKey, checks);
 
     return {
         success: true,
         productId: product._id.toString(),
         productName: product.name,
-        readyForLiveExecution: false,
+        readyForLiveExecution: Boolean(
+            controlledLiveCandidate
+            && checks.globalRealOrdersEnabled
+            && product.providerExecutionEnabled === true
+            && product.providerExecutionMode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER
+            && autoReadiness?.ok
+        ),
         familyKey,
         fulfillmentMode: providerProduct?.fulfillmentMode || product.fulfillmentMode || null,
         ...contractMeta,
@@ -2152,9 +2197,13 @@ const getUnsupportedFamilyReadiness = async (productId) => {
         checks,
         warnings: [...new Set(warnings.filter(Boolean))],
         nextActions: [
-            'Keep the product hidden and inactive until this family has a tested execution flow.',
+            controlledLiveCandidate
+                ? 'Use explicit single-product AUTO_PROVIDER only for a controlled live test.'
+                : 'Keep the product hidden and inactive until this family has a tested execution flow.',
             'Use dry-run preview to inspect stored identifiers and required fields.',
-            'Do not enable live execution for this family until a controlled pilot is approved.',
+            controlledLiveCandidate
+                ? 'Keep this family excluded from bulk AUTO_PROVIDER until live validation is complete.'
+                : 'Do not enable live execution for this family until a controlled pilot is approved.',
         ],
     };
 };
@@ -3651,6 +3700,16 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
     if (!modeValidation.ok) {
         errors.push({ code: modeValidation.code, message: modeValidation.message, allowedModes: modeValidation.allowedModes });
     }
+    if (
+        validatedMode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER
+        && !fazerCardsContracts.canBulkAutoExecuteFamily(familyKey)
+        && updates._explicitProductLevelAuto !== true
+    ) {
+        errors.push({
+            code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED',
+            message: 'This FazerCards family can only be enabled for AUTO_PROVIDER through an explicit single-product controlled action.',
+        });
+    }
     if (contract.supportStage === fazerCardsContracts.SUPPORT_STAGES.DISABLED_UNAVAILABLE && enablingVisibility) {
         errors.push({ code: 'FAMILY_DISABLED_UNAVAILABLE', message: 'This FazerCards family is currently unavailable.' });
     }
@@ -3751,10 +3810,17 @@ const normalizePublishFamilyFilter = (familyKey) => {
 
 const getPublishFamilies = ({ familyKey = null, providerExecutionMode } = {}) => {
     const familyFilter = normalizePublishFamilyFilter(familyKey);
-    if (familyFilter) return [familyFilter];
     if (providerExecutionMode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
+        if (familyFilter && !AUTO_PROVIDER_FAMILIES.has(familyFilter)) {
+            throw new BusinessRuleError(
+                'Bulk AUTO_PROVIDER publishing is allowed only for confirmed FazerCards families.',
+                'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED'
+            );
+        }
+        if (familyFilter) return [familyFilter];
         return [...AUTO_PROVIDER_FAMILIES];
     }
+    if (familyFilter) return [familyFilter];
     return [...LAUNCH_PUBLISH_FAMILIES];
 };
 
@@ -3916,6 +3982,7 @@ const updateSingleProductLaunchControls = async (productId, payload = {}, adminI
     const result = await bulkUpdateLaunchControls({
         ...payload,
         productIds: [productId],
+        _explicitProductLevelAuto: true,
         dryRun: false,
     }, adminId, auditContext);
     const productResult = result.results[0];

@@ -256,8 +256,23 @@ const isFazerCardsCodeDeliveryOrder = (product = {}, providerProduct = {}) => {
         && ['GIFTCARDS', 'GAME_KEYS'].includes(String(safeProviderProduct.familyKey || safeProduct.familyKey || '').trim().toUpperCase());
 };
 
+const FAZER_CARDS_CONTROLLED_AUTO_FAMILIES = new Set(['TELEGRAM', 'STEAM_TOPUP']);
+
+const isFazerCardsControlledAutoOrder = (product = {}, providerProduct = {}) => {
+    const safeProduct = product || {};
+    const safeProviderProduct = providerProduct || {};
+    const familyKey = String(safeProviderProduct.familyKey || safeProduct.familyKey || '').trim().toUpperCase();
+    return normalizeProviderCode(safeProduct.providerCode || safeProviderProduct.providerCode) === PROVIDER_CODES.FAZER_CARDS
+        && FAZER_CARDS_CONTROLLED_AUTO_FAMILIES.has(familyKey);
+};
+
 const getCodeDeliveryMaxOrderUsd = () => {
     const max = Number(config.providers.fazerCards.codeDeliveryMaxOrderUsd);
+    return Number.isFinite(max) && max > 0 ? max : null;
+};
+
+const getFazerCardsMaxOrderUsd = () => {
+    const max = Number(config.providers.fazerCards.maxOrderUsd);
     return Number.isFinite(max) && max > 0 ? max : null;
 };
 
@@ -299,6 +314,9 @@ const buildCodeDeliveryRejectedResult = ({
     errorMessage: providerErrorMessage,
 });
 
+const buildFazerCardsManualReviewResult = buildCodeDeliveryManualReviewResult;
+const buildFazerCardsRejectedResult = buildCodeDeliveryRejectedResult;
+
 const getFazerCardsBalance = async (adapter) => {
     if (typeof adapter.getBalance === 'function') return adapter.getBalance();
     if (adapter.client && typeof adapter.client.getBalance === 'function') {
@@ -308,6 +326,289 @@ const getFazerCardsBalance = async (adapter) => {
         return { balance, currency: raw.currency || raw.data?.currency || 'USD', requestId: response?.requestId || null, raw };
     }
     throw new Error('FazerCards balance preflight is unavailable.');
+};
+
+const buildFazerCardsParsedOrderResult = ({
+    familyKey,
+    response,
+    providerIdempotencyKey,
+    defaultErrorCode,
+    defaultErrorMessage,
+} = {}) => {
+    const data = response?.data || {};
+    const parsed = fazerCardsContracts.parseResponseForFamily(familyKey, data);
+    const base = {
+        success: parsed.status !== fazerCardsContracts.PARSED_STATUSES.FAILED,
+        manualReview: parsed.status === fazerCardsContracts.PARSED_STATUSES.MANUAL_REVIEW,
+        providerOrderId: parsed.providerOrderId || null,
+        providerStatus: parsed.providerStatus,
+        providerRequestId: response?.requestId || null,
+        providerIdempotencyKey,
+        providerErrorCode: parsed.status === fazerCardsContracts.PARSED_STATUSES.MANUAL_REVIEW
+            ? (parsed.code || defaultErrorCode)
+            : null,
+        providerErrorMessage: parsed.warnings?.[0] || null,
+        rawResponse: sanitizeProviderCodePayload(data),
+        errorMessage: parsed.warnings?.[0] || null,
+    };
+
+    if (parsed.status === fazerCardsContracts.PARSED_STATUSES.PROCESSING) {
+        return { ...base, success: true, providerStatus: 'Pending' };
+    }
+    if (parsed.status === fazerCardsContracts.PARSED_STATUSES.COMPLETED) {
+        return { ...base, success: true, providerStatus: 'Completed' };
+    }
+    if (parsed.status === fazerCardsContracts.PARSED_STATUSES.FAILED) {
+        return {
+            ...base,
+            success: false,
+            manualReview: false,
+            providerStatus: 'Cancelled',
+            providerErrorCode: base.providerErrorCode || defaultErrorCode,
+            providerErrorMessage: base.providerErrorMessage || defaultErrorMessage,
+            errorMessage: base.errorMessage || defaultErrorMessage,
+        };
+    }
+    return {
+        ...base,
+        success: false,
+        manualReview: true,
+        providerErrorCode: base.providerErrorCode || defaultErrorCode,
+        providerErrorMessage: base.providerErrorMessage || defaultErrorMessage,
+        errorMessage: base.errorMessage || defaultErrorMessage,
+    };
+};
+
+const placeFazerCardsControlledAutoOrder = async ({
+    order,
+    product,
+    providerProduct,
+    adapter,
+    mappedCustomerFields = {},
+} = {}) => {
+    const familyKey = String(providerProduct.familyKey || product.familyKey || '').trim().toUpperCase();
+    const contractPayload = fazerCardsContracts.buildPayloadFromContract({
+        familyKey,
+        providerProduct,
+        fields: mappedCustomerFields,
+        quantity: order.quantity,
+    });
+    const telegramKind = familyKey === 'TELEGRAM'
+        ? fazerCardsContracts.extractTelegramIdentifiers(providerProduct).kind
+        : null;
+    const providerIdempotencyKey = familyKey === 'TELEGRAM'
+        ? `fazercards:telegram-${telegramKind || 'unknown'}:${order._id.toString()}`
+        : `fazercards:steam-topup:${order._id.toString()}`;
+
+    if (product.providerExecutionMode !== fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
+        return buildFazerCardsManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_MANUAL_FULFILLMENT_REQUIRED',
+            providerErrorMessage: 'Manual fulfillment required because provider execution mode is not AUTO_PROVIDER.',
+        });
+    }
+    if (product.providerExecutionEnabled !== true) {
+        return buildFazerCardsManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED',
+            providerErrorMessage: 'FazerCards provider execution is disabled for this product.',
+        });
+    }
+    if (product.providerExecutionBlocked === true || providerProduct.executionBlocked === true) {
+        return buildFazerCardsManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_PROVIDER_EXECUTION_BLOCKED',
+            providerErrorMessage: product.providerBlockReason || providerProduct.blockReason || 'FazerCards provider execution is blocked.',
+        });
+    }
+    if (providerProduct.isSupported !== true) {
+        return buildFazerCardsRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_PROVIDER_PRODUCT_UNSUPPORTED',
+            providerErrorMessage: 'FazerCards ProviderProduct is not marked as supported.',
+        });
+    }
+    if (providerProduct.isBlocked === true) {
+        return buildFazerCardsRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: providerProduct.blockReason || 'FAZERCARDS_PROVIDER_PRODUCT_BLOCKED',
+            providerErrorMessage: 'FazerCards ProviderProduct is blocked.',
+        });
+    }
+    if (contractPayload.success !== true) {
+        return buildFazerCardsRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: contractPayload.code || 'FAZERCARDS_PAYLOAD_INVALID',
+            providerErrorMessage: contractPayload.message || 'FazerCards provider payload is invalid.',
+            rawResponse: { contract: familyKey, missing: contractPayload.missing || [] },
+        });
+    }
+    if (familyKey === 'TELEGRAM' && telegramKind === 'premium' && Number(order.quantity || 1) !== 1) {
+        return buildFazerCardsRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_TELEGRAM_PREMIUM_QUANTITY_INVALID',
+            providerErrorMessage: 'Telegram Premium orders must use quantity 1.',
+        });
+    }
+    if (familyKey === 'STEAM_TOPUP' && Number(order.quantity || 1) !== 1) {
+        return buildFazerCardsRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_STEAM_TOPUP_QUANTITY_INVALID',
+            providerErrorMessage: 'Steam top-up orders must use quantity 1.',
+        });
+    }
+    if (config.providers.fazerCards.enabled !== true) {
+        return buildFazerCardsManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_DISABLED',
+            providerErrorMessage: 'FazerCards integration is disabled.',
+            rawResponse: { gate: 'FAZERCARDS_ENABLED' },
+        });
+    }
+    if (config.providers.fazerCards.realOrdersEnabled !== true) {
+        return buildFazerCardsManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_REAL_ORDERS_DISABLED',
+            providerErrorMessage: 'FazerCards real orders are disabled by global safety gate.',
+            rawResponse: { gate: 'FAZERCARDS_REAL_ORDERS_ENABLED' },
+        });
+    }
+
+    const rawCost = _firstPresent(providerProduct.costPrice, providerProduct.rawPrice);
+    const unitCost = Number(rawCost);
+    const quantityForCost = familyKey === 'TELEGRAM' && telegramKind === 'stars'
+        ? Number(order.quantity || 1)
+        : 1;
+    const totalProviderCost = Number.isFinite(unitCost) && unitCost > 0
+        ? Number((unitCost * quantityForCost).toFixed(6))
+        : null;
+    if (totalProviderCost === null) {
+        return buildFazerCardsRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_PROVIDER_PRODUCT_INVALID_COST',
+            providerErrorMessage: 'FazerCards ProviderProduct has an invalid cost price.',
+        });
+    }
+
+    const maxOrderUsd = getFazerCardsMaxOrderUsd();
+    if (maxOrderUsd !== null && totalProviderCost > maxOrderUsd) {
+        return buildFazerCardsManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_MAX_COST_GUARD',
+            providerErrorMessage: 'FazerCards order blocked by max cost guard.',
+            rawResponse: { gate: 'FAZERCARDS_MAX_ORDER_USD', totalProviderCost, maxOrderUsd },
+        });
+    }
+
+    let balanceResult;
+    try {
+        balanceResult = await getFazerCardsBalance(adapter);
+    } catch (err) {
+        return buildFazerCardsManualReviewResult({
+            providerIdempotencyKey,
+            providerRequestId: err.requestId || null,
+            providerErrorCode: 'FAZERCARDS_BALANCE_UNKNOWN',
+            providerErrorMessage: 'FazerCards balance could not be checked; provider execution requires manual review.',
+            rawResponse: err.providerBody || { errorCode: err.code || 'FAZERCARDS_BALANCE_UNKNOWN', message: err.safeUpstreamMessage || err.message },
+        });
+    }
+    const balance = Number(balanceResult?.balance);
+    if (!Number.isFinite(balance)) {
+        return buildFazerCardsManualReviewResult({
+            providerIdempotencyKey,
+            providerRequestId: balanceResult?.requestId || null,
+            providerErrorCode: 'FAZERCARDS_BALANCE_UNKNOWN',
+            providerErrorMessage: 'FazerCards balance response did not include a valid balance.',
+            rawResponse: balanceResult?.raw || { balance: balanceResult?.balance ?? null },
+        });
+    }
+    if (balance < totalProviderCost) {
+        return buildFazerCardsRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_INSUFFICIENT_PROVIDER_BALANCE',
+            providerErrorMessage: 'FazerCards balance is insufficient for this order.',
+            rawResponse: { gate: 'FAZERCARDS_BALANCE_PREFLIGHT', balance, totalProviderCost },
+        });
+    }
+
+    let response;
+    try {
+        const payload = contractPayload.payload;
+        if (familyKey === 'TELEGRAM' && telegramKind === 'stars') {
+            response = await adapter.client.buyTelegramStars({
+                telegram_username: payload.telegram_username,
+                quantity: payload.quantity,
+                idempotencyKey: providerIdempotencyKey,
+            });
+        } else if (familyKey === 'TELEGRAM' && telegramKind === 'premium') {
+            response = await adapter.client.buyTelegramPremium({
+                telegram_username: payload.telegram_username,
+                months: payload.months,
+                idempotencyKey: providerIdempotencyKey,
+            });
+        } else if (familyKey === 'STEAM_TOPUP') {
+            const check = await adapter.client.checkSteamTopupLogin({ steamLogin: payload.steamLogin });
+            const checkData = check?.data || {};
+            const canRefill = checkData.can_refill ?? checkData.canRefill ?? checkData.data?.can_refill ?? checkData.data?.canRefill;
+            if (checkData.ok === false || canRefill !== true) {
+                return buildFazerCardsRejectedResult({
+                    providerIdempotencyKey,
+                    providerRequestId: check?.requestId || null,
+                    providerErrorCode: 'FAZERCARDS_STEAM_LOGIN_CHECK_FAILED',
+                    providerErrorMessage: 'Steam login cannot receive a wallet top-up.',
+                    rawResponse: sanitizeProviderCodePayload(checkData),
+                });
+            }
+            response = await adapter.client.buySteamTopup({
+                steamLogin: payload.steamLogin,
+                currency: payload.currency,
+                amount: payload.amount,
+                idempotencyKey: providerIdempotencyKey,
+            });
+        } else {
+            return buildFazerCardsRejectedResult({
+                providerIdempotencyKey,
+                providerErrorCode: 'FAZERCARDS_UNSUPPORTED_CONTROLLED_FAMILY',
+                providerErrorMessage: 'This FazerCards family is not supported for controlled auto execution.',
+            });
+        }
+    } catch (err) {
+        const httpStatus = Number(err.httpStatus || err.statusCode || err.response?.status || 0);
+        const retryUnsafe = err.code === 'FAZERCARDS_TIMEOUT'
+            || err.code === 'FAZERCARDS_NETWORK_ERROR'
+            || err.code === 'ECONNABORTED'
+            || err.code === 'ETIMEDOUT'
+            || httpStatus === 0
+            || httpStatus === 429
+            || httpStatus >= 500;
+
+        if (retryUnsafe) {
+            return buildFazerCardsManualReviewResult({
+                providerIdempotencyKey,
+                providerRequestId: err.requestId || null,
+                providerErrorCode: err.code || 'FAZERCARDS_CONTROLLED_ORDER_UNKNOWN',
+                providerErrorMessage: 'FazerCards controlled order outcome is uncertain and requires manual review.',
+                rawResponse: err.providerBody || { errorCode: err.code || 'FAZERCARDS_CONTROLLED_ORDER_UNKNOWN', message: err.safeUpstreamMessage || err.message },
+            });
+        }
+
+        return buildFazerCardsRejectedResult({
+            providerIdempotencyKey,
+            providerErrorCode: err.code || 'FAZERCARDS_CONTROLLED_ORDER_REJECTED',
+            providerErrorMessage: err.safeUpstreamMessage || err.message || 'FazerCards controlled order was rejected.',
+            rawResponse: err.providerBody || { errorCode: err.code, message: err.safeUpstreamMessage || err.message },
+        });
+    }
+
+    return buildFazerCardsParsedOrderResult({
+        familyKey,
+        response,
+        providerIdempotencyKey,
+        defaultErrorCode: familyKey === 'TELEGRAM' ? 'FAZERCARDS_TELEGRAM_ORDER_REVIEW' : 'FAZERCARDS_STEAM_TOPUP_ORDER_REVIEW',
+        defaultErrorMessage: familyKey === 'TELEGRAM'
+            ? 'FazerCards Telegram order requires manual review.'
+            : 'FazerCards Steam top-up order requires manual review.',
+    });
 };
 
 const placeFazerCardsCodeDeliveryOrder = async ({
@@ -772,12 +1073,21 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     let result;
     try {
         const useFazerCardsCodeDelivery = isFazerCardsCodeDeliveryOrder(order.productId, providerProduct);
+        const useFazerCardsControlledAuto = isFazerCardsControlledAutoOrder(order.productId, providerProduct);
         if (useFazerCardsCodeDelivery) {
             result = await placeFazerCardsCodeDeliveryOrder({
                 order,
                 product: order.productId,
                 providerProduct,
                 adapter: resolvedProvider,
+            });
+        } else if (useFazerCardsControlledAuto) {
+            result = await placeFazerCardsControlledAutoOrder({
+                order,
+                product: order.productId,
+                providerProduct,
+                adapter: resolvedProvider,
+                mappedCustomerFields,
             });
         } else {
         if (!externalProductId) {
@@ -858,6 +1168,15 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             deliveredCodeCount: result?.rawResponse?.deliveredCodeCount || 0,
             storedEncrypted: result?.rawResponse?.storedEncrypted === true,
         }
+        : isFazerCardsControlledAutoOrder(order.productId, providerProduct)
+            ? {
+                success: result?.success,
+                manualReview: result?.manualReview,
+                providerStatus: result?.providerStatus,
+                providerOrderId: result?.providerOrderId || null,
+                providerRequestId: result?.providerRequestId || null,
+                providerErrorCode: result?.providerErrorCode || null,
+            }
         : result;
     console.log(`[Fulfillment] Provider response for order ${orderId}:`, JSON.stringify(logResult));
 

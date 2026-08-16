@@ -14,6 +14,7 @@ const SUPPORT_STAGES = Object.freeze({
 const EXECUTION_STAGES = Object.freeze({
     NONE: 'NONE',
     ADMIN_PILOT_ONLY: 'ADMIN_PILOT_ONLY',
+    CONTROLLED_LIVE_CANDIDATE: 'CONTROLLED_LIVE_CANDIDATE',
     CUSTOMER_FLOW_NOT_READY: 'CUSTOMER_FLOW_NOT_READY',
     CUSTOMER_FLOW_READY_BUT_GATED: 'CUSTOMER_FLOW_READY_BUT_GATED',
     LIVE_ENABLED: 'LIVE_ENABLED',
@@ -44,8 +45,9 @@ const PROVIDER_EXECUTION_MODES = Object.freeze({
     DISABLED: 'DISABLED',
 });
 
-const AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']);
-const MANUAL_FULFILLMENT_FAMILIES = new Set(['TELEGRAM', 'STEAM_TOPUP', 'MANUAL_SERVICES']);
+const BULK_AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']);
+const CONTROLLED_AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS', 'TELEGRAM', 'STEAM_TOPUP']);
+const MANUAL_FULFILLMENT_FAMILIES = new Set(['MANUAL_SERVICES']);
 const DISABLED_FAMILIES = new Set(['STEAM_GIFTS']);
 const CODE_DELIVERY_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
 const CUSTOMER_FIELD_REQUIRED_FAMILIES = new Set(['TOPUPS', 'TELEGRAM', 'STEAM_TOPUP', 'MANUAL_SERVICES']);
@@ -929,6 +931,7 @@ const CONTRACTS = Object.freeze({
         async: true,
         statusWebhookBehavior: 'Generic FazerCards status sync/webhooks update local order; unknown status moves to manual review with no blind refund.',
         autoProviderAllowed: true,
+        bulkAutoProviderAllowed: true,
         readinessReason: 'Payload, response parsing, status sync, webhooks, idempotency, balance preflight, and guards are implemented; still requires controlled real target validation.',
         canImportDraft: true,
         canDryRun: true,
@@ -976,6 +979,7 @@ const CONTRACTS = Object.freeze({
         async: true,
         statusWebhookBehavior: 'Completed only after encrypted code/card/pin/serial is recognized and stored; missing code payload requires manual review.',
         autoProviderAllowed: true,
+        bulkAutoProviderAllowed: true,
         readinessReason: 'Catalog, payload, encrypted delivery storage, reveal endpoint, status sync, webhooks, and no-plaintext safeguards are implemented.',
         canImportDraft: true,
         canDryRun: true,
@@ -1019,6 +1023,7 @@ const CONTRACTS = Object.freeze({
         async: true,
         statusWebhookBehavior: 'Completed only after encrypted key/code/license/serial is recognized and stored; missing key payload requires manual review.',
         autoProviderAllowed: true,
+        bulkAutoProviderAllowed: true,
         readinessReason: 'Catalog, payload, encrypted key storage, reveal endpoint, status sync, webhooks, and no-plaintext safeguards are implemented. Region endpoint remains optional/not wired.',
         canImportDraft: true,
         canDryRun: true,
@@ -1046,7 +1051,7 @@ const CONTRACTS = Object.freeze({
         mode: 'TELEGRAM_STARS_OR_PREMIUM',
         fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
         supportStage: SUPPORT_STAGES.DRY_RUN_READY,
-        executionStage: EXECUTION_STAGES.CUSTOMER_FLOW_NOT_READY,
+        executionStage: EXECUTION_STAGES.CONTROLLED_LIVE_CANDIDATE,
         riskLevel: RISK_LEVELS.MEDIUM,
         catalogStatus: 'implemented',
         providerEndpoints: {
@@ -1060,11 +1065,12 @@ const CONTRACTS = Object.freeze({
         codeDelivery: false,
         async: true,
         statusWebhookBehavior: 'Generic status sync/webhooks can update Telegram orders; no code delivery expected. Unknown status requires review and no blind refund.',
-        autoProviderAllowed: false,
-        readinessReason: 'Docs-based payload builder and parser exist, but AUTO_PROVIDER remains blocked until explicit Telegram live validation is approved.',
+        autoProviderAllowed: true,
+        bulkAutoProviderAllowed: false,
+        readinessReason: 'Controlled test only; TELEGRAM can be enabled only by explicit product-level AUTO_PROVIDER action and remains excluded from bulk auto.',
         canImportDraft: true,
         canDryRun: true,
-        canLivePilot: false,
+        canLivePilot: true,
         canCustomerPurchase: true,
         customerInputSchema: {
             fields: [
@@ -1090,7 +1096,7 @@ const CONTRACTS = Object.freeze({
         storageStrategy: 'ORDER_PROVIDER_METADATA',
         customerDeliveryStrategy: 'NO_CODE_DELIVERY_STATUS_ONLY',
         requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'webhook/status sync'],
-        blockers: ['AUTO_PROVIDER remains disabled until controlled Telegram go-live is explicitly approved.'],
+        blockers: ['Excluded from bulk AUTO_PROVIDER. Use only one explicit product-level controlled test after real target validation.'],
         warnings: ['Telegram provider fulfillment is asynchronous. Balance is debited by FazerCards immediately after a real buy request.'],
     }),
     STEAM_TOPUP: Object.freeze({
@@ -1099,7 +1105,7 @@ const CONTRACTS = Object.freeze({
         mode: 'STEAM_TOPUP_WITH_LOGIN',
         fulfillmentMode: FULFILLMENT_MODES.STEAM_TOPUP_WITH_LOGIN,
         supportStage: SUPPORT_STAGES.DRY_RUN_READY,
-        executionStage: EXECUTION_STAGES.CUSTOMER_FLOW_NOT_READY,
+        executionStage: EXECUTION_STAGES.CONTROLLED_LIVE_CANDIDATE,
         riskLevel: RISK_LEVELS.HIGH,
         catalogStatus: 'implemented',
         providerEndpoints: {
@@ -1114,11 +1120,12 @@ const CONTRACTS = Object.freeze({
         codeDelivery: false,
         async: true,
         statusWebhookBehavior: 'Generic status sync/webhooks can update Steam top-up orders; check-login must pass before any future real provider order.',
-        autoProviderAllowed: false,
-        readinessReason: 'Docs-based payload builder and parser exist, but AUTO_PROVIDER remains blocked because the flow is high risk and needs check-login/live validation.',
+        autoProviderAllowed: true,
+        bulkAutoProviderAllowed: false,
+        readinessReason: 'Controlled test only; STEAM_TOPUP can be enabled only by explicit product-level AUTO_PROVIDER action after check-login readiness and remains excluded from bulk auto.',
         canImportDraft: true,
         canDryRun: true,
-        canLivePilot: false,
+        canLivePilot: true,
         canCustomerPurchase: true,
         customerInputSchema: {
             fields: [{ key: 'steamLogin', type: 'text', required: true }],
@@ -1138,7 +1145,7 @@ const CONTRACTS = Object.freeze({
         storageStrategy: 'ORDER_PROVIDER_METADATA',
         customerDeliveryStrategy: 'NO_CODE_DELIVERY_STATUS_ONLY',
         requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'steam-topup check-login preflight', 'webhook/status sync'],
-        blockers: ['AUTO_PROVIDER remains disabled until Steam check-login/order/status live verification is approved.'],
+        blockers: ['Excluded from bulk AUTO_PROVIDER. High-risk flow requires explicit product-level controlled test and check-login preflight.'],
         warnings: ['High risk: wrong Steam login can deliver value to the wrong recipient. check-login must pass before any real provider order.'],
     }),
     MANUAL_SERVICES: Object.freeze({
@@ -1163,6 +1170,7 @@ const CONTRACTS = Object.freeze({
         async: true,
         statusWebhookBehavior: 'Generic status sync/webhooks update order status; manual-service chat webhooks append safe admin notes only.',
         autoProviderAllowed: false,
+        bulkAutoProviderAllowed: false,
         readinessReason: 'Docs-based payload and message-only chat client exist, but customer fulfillment stays team-managed until operations workflow is approved.',
         canImportDraft: true,
         canDryRun: true,
@@ -1212,6 +1220,7 @@ const CONTRACTS = Object.freeze({
         async: true,
         statusWebhookBehavior: 'Blocked before payload/execution because catalog access is unavailable for the current account.',
         autoProviderAllowed: false,
+        bulkAutoProviderAllowed: false,
         readinessReason: 'Official docs list Steam Gifts, but production catalog returned 404; keep disabled until account access is confirmed.',
         canImportDraft: false,
         canDryRun: false,
@@ -1281,7 +1290,7 @@ const normalizeFamilyKey = (familyKey) => asString(familyKey).toUpperCase();
 
 const getAllowedExecutionModes = (familyKey) => {
     const normalized = normalizeFamilyKey(familyKey);
-    if (AUTO_PROVIDER_FAMILIES.has(normalized)) {
+    if (CONTROLLED_AUTO_PROVIDER_FAMILIES.has(normalized)) {
         return [PROVIDER_EXECUTION_MODES.AUTO_PROVIDER, PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT];
     }
     if (MANUAL_FULFILLMENT_FAMILIES.has(normalized)) {
@@ -1295,18 +1304,22 @@ const getAllowedExecutionModes = (familyKey) => {
 
 const getDefaultExecutionMode = (familyKey) => {
     const normalized = normalizeFamilyKey(familyKey);
-    if (AUTO_PROVIDER_FAMILIES.has(normalized)) return PROVIDER_EXECUTION_MODES.AUTO_PROVIDER;
+    if (BULK_AUTO_PROVIDER_FAMILIES.has(normalized)) return PROVIDER_EXECUTION_MODES.AUTO_PROVIDER;
+    if (CONTROLLED_AUTO_PROVIDER_FAMILIES.has(normalized)) return PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT;
     if (MANUAL_FULFILLMENT_FAMILIES.has(normalized)) return PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT;
     return PROVIDER_EXECUTION_MODES.DISABLED;
 };
 
-const canAutoExecuteFamily = (familyKey) => AUTO_PROVIDER_FAMILIES.has(normalizeFamilyKey(familyKey));
+const canAutoExecuteFamily = (familyKey) => CONTROLLED_AUTO_PROVIDER_FAMILIES.has(normalizeFamilyKey(familyKey));
+const canBulkAutoExecuteFamily = (familyKey) => BULK_AUTO_PROVIDER_FAMILIES.has(normalizeFamilyKey(familyKey));
 
 const getAutoProviderIdentifiers = (familyKey, providerProduct = {}) => {
     const normalized = normalizeFamilyKey(familyKey || providerProduct?.familyKey);
     if (normalized === 'TOPUPS') return extractTopupIdentifiers(providerProduct);
     if (normalized === 'GIFTCARDS') return extractGiftCardIdentifiers(providerProduct);
     if (normalized === 'GAME_KEYS') return extractGameKeyIdentifiers(providerProduct);
+    if (normalized === 'TELEGRAM') return extractTelegramIdentifiers(providerProduct);
+    if (normalized === 'STEAM_TOPUP') return extractSteamTopupIdentifiers(providerProduct);
     return {};
 };
 
@@ -1380,6 +1393,32 @@ const validateAutoProviderReadinessForProduct = ({
         if (!identifiers.gameId) errors.push({ code: 'AUTO_PROVIDER_GAMEKEY_GAME_ID_MISSING', message: 'Game-key auto provider execution requires game_id.' });
         if (!identifiers.keyId) errors.push({ code: 'AUTO_PROVIDER_GAMEKEY_KEY_ID_MISSING', message: 'Game-key auto provider execution requires key_id.' });
         errors.push(...validateCodeDeliveryQuantityRules(product, providerProduct));
+    } else if (normalizedFamilyKey === 'TELEGRAM') {
+        const requiredFields = normalizeCustomerFieldDefinitions(product, providerProduct)
+            .filter((field) => field.isActive !== false && field.required !== false);
+        const hasTelegramUsername = requiredFields.some((field) => fieldMatches(field, /telegram[_\s-]?username|telegram|username/i));
+        if (!identifiers.kind) errors.push({ code: 'AUTO_PROVIDER_TELEGRAM_KIND_MISSING', message: 'Telegram auto provider execution requires a stars or premium product kind.' });
+        if (identifiers.kind === 'premium' && ![3, 6, 12].includes(identifiers.months)) {
+            errors.push({ code: 'AUTO_PROVIDER_TELEGRAM_PREMIUM_MONTHS_INVALID', message: 'Telegram Premium auto provider execution requires months to be one of 3, 6, or 12.' });
+        }
+        if (!hasTelegramUsername) {
+            errors.push({
+                code: 'AUTO_PROVIDER_TELEGRAM_USERNAME_FIELD_MISSING',
+                message: 'Telegram auto provider execution requires a telegram_username customer field.',
+            });
+        }
+    } else if (normalizedFamilyKey === 'STEAM_TOPUP') {
+        const requiredFields = normalizeCustomerFieldDefinitions(product, providerProduct)
+            .filter((field) => field.isActive !== false && field.required !== false);
+        const hasSteamLogin = requiredFields.some((field) => fieldMatches(field, /steam[_\s-]?login|steam[_\s-]?username|steam[_\s-]?profile/i));
+        if (!identifiers.currency) errors.push({ code: 'AUTO_PROVIDER_STEAM_TOPUP_CURRENCY_MISSING', message: 'Steam top-up auto provider execution requires currency metadata.' });
+        if (!identifiers.amount) errors.push({ code: 'AUTO_PROVIDER_STEAM_TOPUP_AMOUNT_MISSING', message: 'Steam top-up auto provider execution requires a positive amount metadata value.' });
+        if (!hasSteamLogin) {
+            errors.push({
+                code: 'AUTO_PROVIDER_STEAM_LOGIN_FIELD_MISSING',
+                message: 'Steam top-up auto provider execution requires a steamLogin customer field.',
+            });
+        }
     }
 
     return {
@@ -1471,6 +1510,7 @@ module.exports = {
     getAllowedExecutionModes,
     getDefaultExecutionMode,
     canAutoExecuteFamily,
+    canBulkAutoExecuteFamily,
     getAutoProviderIdentifiers,
     validateAutoProviderReadinessForProduct,
     validateExecutionModeForFamily,
