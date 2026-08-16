@@ -16,6 +16,7 @@ const depositService = require('../modules/deposits/deposit.service');
 const { AuditLog } = require('../modules/audit/audit.model');
 const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES } = require('../modules/audit/audit.constants');
 const { User } = require('../modules/users/user.model');
+const { Currency } = require('../modules/currency/currency.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { normalizeSubmittedCustomFields } = require('../modules/payments/paymentCustomFields');
 
@@ -686,6 +687,69 @@ describe('[9] Manual deposit customFields storage', () => {
             originalName: 'proof.png',
             mimeType: 'image/png',
             size: 321,
+        });
+    });
+});
+
+describe('[10] Deposit rate snapshots', () => {
+    it('uses saved deposit-rate snapshots for cross-currency approval even if live rates change', async () => {
+        await Currency.create([
+            {
+                code: 'EGP',
+                name: 'Egyptian Pound',
+                symbol: 'E£',
+                platformRate: 50,
+                depositRate: 50,
+                purchaseRate: 51,
+                isActive: true,
+            },
+            {
+                code: 'SAR',
+                name: 'Saudi Riyal',
+                symbol: 'SAR',
+                platformRate: 4,
+                depositRate: 4,
+                purchaseRate: 4.2,
+                isActive: true,
+            },
+        ]);
+        const customer = await makeCustomer({ currency: 'SAR', walletBalance: 0 });
+        const admin = await createAdmin();
+        const deposit = await createPendingDeposit(customer._id, {
+            paymentMethodId: 'bank-transfer-egp',
+            requestedAmount: 1000,
+            currency: 'EGP',
+            exchangeRate: 50,
+            amountUsd: 20,
+            depositRateSnapshot: 50,
+            walletCurrency: 'SAR',
+            walletDepositRateSnapshot: 4,
+            expectedWalletCreditAmount: 80,
+            usdEquivalent: 20,
+            receiptImage: 'uploads/deposits/egp.jpg',
+        });
+
+        await Currency.updateOne({ code: 'EGP' }, { $set: { depositRate: 60 } });
+        await Currency.updateOne({ code: 'SAR' }, { $set: { depositRate: 5 } });
+
+        await depositService.approveDeposit(deposit._id, admin._id);
+
+        const user = await User.findById(customer._id);
+        expect(user.walletBalance).toBe(80);
+
+        const tx = await WalletTransaction.findOne({ userId: customer._id, type: 'CREDIT' }).lean();
+        expect(tx.amount).toBe(80);
+        expect(tx.currency).toBe('SAR');
+        expect(tx.metadata).toMatchObject({
+            sourceAmount: 1000,
+            sourceCurrency: 'EGP',
+            walletAmount: 80,
+            walletCurrency: 'SAR',
+            usdEquivalent: 20,
+            rateType: 'deposit',
+            depositRateSnapshot: 50,
+            walletDepositRateSnapshot: 4,
+            legacyFallback: false,
         });
     });
 });

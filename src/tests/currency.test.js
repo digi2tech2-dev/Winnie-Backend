@@ -20,7 +20,7 @@ const {
     connectTestDB, disconnectTestDB, clearCollections,
     createCustomerWithGroup, createProduct,
 } = require('./testHelpers');
-const { convertUsdToUserCurrency, convertUserCurrencyToUsd } =
+const { convertUsdToUserCurrency, convertUserCurrencyToUsd, getDepositRate, getPurchaseRate, invalidateCurrencyCache } =
     require('../services/currencyConverter.service');
 const { syncRates } = require('../services/exchangeRateSync.service');
 const currencyService = require('../modules/currency/currency.service');
@@ -486,5 +486,32 @@ describe('[6] Order creation with currency conversion', () => {
                 quantity: 30,
             })
         ).rejects.toThrow('Insufficient funds');
+    });
+});
+
+describe('[7] Separate functional currency rates', () => {
+    beforeEach(async () => {
+        await makeCurrency({ code: 'SAR', platformRate: 4.10 });
+    });
+
+    it('returns separate deposit and purchase rates with platform fallback for legacy records', async () => {
+        await Currency.findOneAndUpdate(
+            { code: 'SAR' },
+            { depositRate: 4.00, purchaseRate: 4.25 },
+            { runValidators: true }
+        );
+        invalidateCurrencyCache('SAR');
+
+        expect(await getDepositRate('SAR')).toBe(4.00);
+        expect(await getPurchaseRate('SAR')).toBe(4.25);
+
+        await Currency.collection.updateOne(
+            { code: 'SAR' },
+            { $unset: { depositRate: '', purchaseRate: '' } }
+        );
+        invalidateCurrencyCache('SAR');
+
+        expect(await getDepositRate('SAR')).toBe(4.10);
+        expect(await getPurchaseRate('SAR')).toBe(4.10);
     });
 });

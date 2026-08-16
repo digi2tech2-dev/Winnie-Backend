@@ -28,7 +28,7 @@ const {
     ENTITY_TYPES,
     ACTOR_ROLES,
 } = require('../audit/audit.constants');
-const { convertUsdToUserCurrency } = require('../../services/currencyConverter.service');
+const { RATE_PURPOSES, convertUsdToUserCurrency } = require('../../services/currencyConverter.service');
 const { User } = require('../users/user.model');
 const { assertIdentityVerificationNotRequired } = require('../users/identityVerification.guard');
 const {
@@ -410,9 +410,12 @@ const calculateOrderPricing = async ({ userId, product, quantity, session = null
     if (!userDoc) throw new NotFoundError('User');
 
     const userCurrency = userDoc.currency ?? 'USD';
-    const conversion = await convertUsdToUserCurrency(Number(toDecimal(usdTotalPrice).toNumber()), userCurrency);
+    const conversion = await convertUsdToUserCurrency(Number(toDecimal(usdTotalPrice).toNumber()), userCurrency, {
+        purpose: RATE_PURPOSES.PURCHASE,
+    });
     const chargedAmount = toFiat(conversion.finalAmount);
     const rateSnapshot = conversion.rate;
+    const purchaseRateSnapshot = conversion.rate;
 
     if (!Number.isFinite(chargedAmount) || chargedAmount <= 0) {
         throw new BusinessRuleError(
@@ -433,6 +436,8 @@ const calculateOrderPricing = async ({ userId, product, quantity, session = null
         profitUsd,
         userCurrency,
         rateSnapshot,
+        purchaseRateSnapshot,
+        rateType: 'purchase',
         chargedAmount,
         walletBalance,
         hasEnoughBalance: walletBalance >= chargedAmount,
@@ -467,6 +472,9 @@ const quoteOrder = async ({ userId, productId, quantity }) => {
         unitPriceUsd: quote.pricing.customerUnitPriceUsd,
         totalUsd: quote.usdTotalPrice,
         rateSnapshot: quote.rateSnapshot,
+        purchaseRateSnapshot: quote.purchaseRateSnapshot,
+        exchangeRate: quote.purchaseRateSnapshot,
+        rateType: quote.rateType,
         payableAmount: quote.chargedAmount,
         chargedAmount: quote.chargedAmount,
         displayTotal: `${quote.userCurrency} ${quote.chargedAmount.toFixed(2)}`,
@@ -728,6 +736,7 @@ const _attemptCreateOrder = async (
         const profitUsd = orderPricing.profitUsd;
         const userCurrency = orderPricing.userCurrency;
         const rateSnapshot = orderPricing.rateSnapshot;
+        const purchaseRateSnapshot = orderPricing.purchaseRateSnapshot;
         // â”€â”€ FINAL ROUNDING â€” only place we round to 2dp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const chargedAmount = orderPricing.chargedAmount;
 
@@ -761,6 +770,8 @@ const _attemptCreateOrder = async (
                 quantity: qty,
                 usdAmount: usdTotalPrice,
                 rateSnapshot,
+                purchaseRateSnapshot,
+                rateType: 'purchase',
                 chargedAmount,
             },
             idempotencyKey: `order:${orderId.toString()}:debit`,
@@ -827,6 +838,8 @@ const _attemptCreateOrder = async (
             // â”€â”€ Currency snapshot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             currency: userCurrency,
             rateSnapshot,
+            purchaseRateSnapshot,
+            rateType: 'purchase',
             usdAmount: usdTotalPrice,
             chargedAmount,
         };
@@ -869,6 +882,8 @@ const _attemptCreateOrder = async (
                 usdAmount: usdTotalPrice,
                 currency: userCurrency,
                 rateSnapshot,
+                purchaseRateSnapshot,
+                rateType: 'purchase',
                 chargedAmount,
                 walletDeducted,
                 creditUsedAmount,
@@ -891,6 +906,8 @@ const _attemptCreateOrder = async (
                 usdAmount: usdTotalPrice,
                 currency: userCurrency,
                 rateSnapshot,
+                purchaseRateSnapshot,
+                rateType: 'purchase',
                 chargedAmount,
                 walletDeducted,
                 creditUsedAmount,

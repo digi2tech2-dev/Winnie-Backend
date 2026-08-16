@@ -1,47 +1,42 @@
 'use strict';
 
 /**
- * currencyConverter.service.js
+ * Stateless currency conversion utilities.
  *
- * Stateless conversion utilities.
- *
- * All conversions use Currency.platformRate — never marketRate.
- * The platformRate is the single source of truth for all financial math.
- *
- * USD is the internal pricing unit for all products/providers.
- * This service converts between USD and any user-facing currency.
- *
- * Design:
- *  - Functions throw clear errors if the currency is missing or inactive.
- *  - Return objects carry the full context (rate, currency code, amounts)
- *    so callers can snapshot them directly into order documents.
- *  - USD → USD is a no-op (rate = 1, no DB hit needed).
+ * Rates follow the convention: 1 USD = <rate> units of the target currency.
+ * marketRate is reference-only. platformRate is retained as a legacy fallback.
  */
 
 const { Currency } = require('../modules/currency/currency.model');
 const { NotFoundError, BusinessRuleError } = require('../shared/errors/AppError');
 
-// ─── Internal cache ───────────────────────────────────────────────────────────
-// Very lightweight in-process cache with 60 s TTL.
-// Prevents a DB hit on every single order line item without needing Redis.
-// Cache is keyed by uppercase currency code.
-const _cache = new Map();   // code → { doc, cachedAt }
+const RATE_PURPOSES = Object.freeze({
+    DEPOSIT: 'deposit',
+    PURCHASE: 'purchase',
+    LEGACY: 'legacy',
+    PLATFORM: 'platform',
+});
+
+const _cache = new Map();
 const CACHE_TTL_MS = 60_000;
 
-/**
- * Fetch a Currency document, with a simple 60-second in-process cache.
- * Returns null for USD without hitting the DB (rate is always 1).
- *
- * @param {string}   code     - ISO 4217 code (any case)
- * @param {boolean}  bypassCache - set true in tests
- * @returns {Promise<Object|null>}
- */
+const normalizePurpose = (purpose = RATE_PURPOSES.LEGACY) => {
+    const normalized = String(purpose || RATE_PURPOSES.LEGACY).trim().toLowerCase();
+    if ([
+        RATE_PURPOSES.DEPOSIT,
+        RATE_PURPOSES.PURCHASE,
+        RATE_PURPOSES.LEGACY,
+        RATE_PURPOSES.PLATFORM,
+    ].includes(normalized)) {
+        return normalized;
+    }
+    throw new BusinessRuleError(`Unsupported currency rate purpose '${purpose}'.`, 'INVALID_RATE_PURPOSE');
+};
+
 const _getCurrency = async (code, bypassCache = false) => {
     const upper = (code ?? '').toUpperCase().trim();
     if (!upper) throw new BusinessRuleError('Currency code is required.', 'MISSING_CURRENCY_CODE');
-
-    // USD shortcut — rate is always 1
-    if (upper === 'USD') return null;   // callers handle null → rate = 1
+    if (upper === 'USD') return null;
 
     if (!bypassCache) {
         const cached = _cache.get(upper);
@@ -63,131 +58,86 @@ const _getCurrency = async (code, bypassCache = false) => {
     return doc;
 };
 
-/**
- * Invalidate the in-process cache for a specific currency code.
- * Called by currency.service after an admin platformRate update.
- *
- * @param {string} code
- */
+const getRateFromCurrencyDoc = (currDoc, purpose = RATE_PURPOSES.LEGACY) => {
+    if (!currDoc) return 1;
+
+    const normalized = normalizePurpose(purpose);
+    const candidate = normalized === RATE_PURPOSES.DEPOSIT
+        ? currDoc.depositRate ?? currDoc.platformRate
+        : normalized === RATE_PURPOSES.PURCHASE
+            ? currDoc.purchaseRate ?? currDoc.platformRate
+            : currDoc.platformRate ?? currDoc.purchaseRate ?? currDoc.depositRate;
+
+    const rate = Number(candidate);
+    if (!Number.isFinite(rate) || rate <= 0) {
+        throw new BusinessRuleError(
+            `Currency '${currDoc.code}' does not have a valid ${normalized} rate.`,
+            'INVALID_CURRENCY_RATE'
+        );
+    }
+    return rate;
+};
+
 const invalidateCurrencyCache = (code) => {
     _cache.delete((code ?? '').toUpperCase().trim());
 };
 
-// =============================================================================
-// convertUsdToUserCurrency
-// =============================================================================
-
-/**
- * Convert a USD amount to the user's local currency.
- *
- * @param {number} usdAmount      - Must be > 0
- * @param {string} userCurrency   - ISO 4217 code (e.g. "SAR", "EGP", "USD")
- * @returns {Promise<{
- *   usdAmount:    number,
- *   currency:     string,
- *   rate:         number,
- *   finalAmount:  number,
- * }>}
- *
- * Example:
- *   convertUsdToUserCurrency(10, "SAR")
- *   → { usdAmount: 10, currency: "SAR", rate: 4.1, finalAmount: 41 }
- */
-const convertUsdToUserCurrency = async (usdAmount, userCurrency) => {
+const convertUsdToUserCurrency = async (usdAmount, userCurrency, options = {}) => {
     if (typeof usdAmount !== 'number' || usdAmount < 0) {
         throw new BusinessRuleError('usdAmount must be a non-negative number.', 'INVALID_AMOUNT');
     }
 
+    const rateType = normalizePurpose(options.purpose || RATE_PURPOSES.PURCHASE);
     const currDoc = await _getCurrency(userCurrency);
-
-    // USD → USD: pure passthrough
-    if (!currDoc) {
-        return {
-            usdAmount,
-            currency: 'USD',
-            rate: 1,
-            finalAmount: parseFloat(usdAmount.toFixed(6)),
-        };
-    }
-
-    const rate = currDoc.platformRate;
-    // Use 4dp to preserve sub-cent precision for micro-transactions
-    // (e.g. $0.0002 × 15 SAR/USD = 0.003 SAR). Final wallet rounding
-    // to 2dp is handled at the order.service.js chargedAmount step.
-    const finalAmount = parseFloat((usdAmount * rate).toFixed(4));
+    const rate = getRateFromCurrencyDoc(currDoc, rateType);
 
     return {
         usdAmount,
-        currency: currDoc.code,
+        currency: currDoc ? currDoc.code : 'USD',
         rate,
-        finalAmount,
+        rateType,
+        finalAmount: parseFloat((usdAmount * rate).toFixed(currDoc ? 4 : 6)),
     };
 };
 
-// =============================================================================
-// convertUserCurrencyToUsd
-// =============================================================================
-
-/**
- * Convert an amount in user currency back to USD.
- *
- * @param {number} amount        - Amount in user's currency
- * @param {string} userCurrency  - ISO 4217 code
- * @returns {Promise<{
- *   originalAmount: number,
- *   currency:       string,
- *   rate:           number,
- *   usdAmount:      number,
- * }>}
- */
-const convertUserCurrencyToUsd = async (amount, userCurrency) => {
+const convertUserCurrencyToUsd = async (amount, userCurrency, options = {}) => {
     if (typeof amount !== 'number' || amount < 0) {
         throw new BusinessRuleError('amount must be a non-negative number.', 'INVALID_AMOUNT');
     }
 
+    const rateType = normalizePurpose(options.purpose || RATE_PURPOSES.LEGACY);
     const currDoc = await _getCurrency(userCurrency);
-
-    if (!currDoc) {
-        return {
-            originalAmount: amount,
-            currency: 'USD',
-            rate: 1,
-            usdAmount: parseFloat(amount.toFixed(2)),
-        };
-    }
-
-    const rate = currDoc.platformRate;
-    const usdAmount = parseFloat((amount / rate).toFixed(6));  // 6dp for USD precision
+    const rate = getRateFromCurrencyDoc(currDoc, rateType);
 
     return {
         originalAmount: amount,
-        currency: currDoc.code,
+        currency: currDoc ? currDoc.code : 'USD',
         rate,
-        usdAmount,
+        rateType,
+        usdAmount: parseFloat((amount / rate).toFixed(currDoc ? 6 : 2)),
     };
 };
 
-// =============================================================================
-// getConversionRate  (lightweight helper for order.service.js)
-// =============================================================================
-
-/**
- * Return just the platformRate for a currency code.
- * Returns 1 for USD without a DB hit.
- *
- * @param {string} currencyCode
- * @returns {Promise<number>}
- */
-const getConversionRate = async (currencyCode) => {
+const getRateForPurpose = async (currencyCode, purpose = RATE_PURPOSES.LEGACY) => {
     const currDoc = await _getCurrency(currencyCode);
-    return currDoc ? currDoc.platformRate : 1;
+    return getRateFromCurrencyDoc(currDoc, purpose);
 };
 
+const getDepositRate = (currencyCode) => getRateForPurpose(currencyCode, RATE_PURPOSES.DEPOSIT);
+
+const getPurchaseRate = (currencyCode) => getRateForPurpose(currencyCode, RATE_PURPOSES.PURCHASE);
+
+const getConversionRate = (currencyCode, purpose = RATE_PURPOSES.LEGACY) => getRateForPurpose(currencyCode, purpose);
+
 module.exports = {
+    RATE_PURPOSES,
     convertUsdToUserCurrency,
     convertUserCurrencyToUsd,
+    getDepositRate,
+    getPurchaseRate,
+    getRateForPurpose,
     getConversionRate,
     invalidateCurrencyCache,
-    // Exported for tests only
     _getCurrency,
+    getRateFromCurrencyDoc,
 };

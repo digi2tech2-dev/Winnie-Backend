@@ -5,7 +5,7 @@ const xenaTargetService = require('../providers/xena/xenaTarget.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sanitizePricingForSupervisor } = require('../../shared/utils/priceVisibility');
-const { getConversionRate } = require('../../services/currencyConverter.service');
+const { getPurchaseRate } = require('../../services/currencyConverter.service');
 const { resolveUserPricingGroup } = require('../groups/group.service');
 const { calculateFinalPrice, getProductFinalUnitPrice } = require('../orders/pricing.service');
 const { buildCustomerPricingFields } = require('./customerPricingPresenter');
@@ -122,7 +122,7 @@ const applyCustomerGroupPricing = async (products, user) => {
     const list = Array.isArray(products) ? products : [products];
     const groupPricing = await resolveUserPricingGroup(user);
     const userCurrency = user?.currency || 'USD';
-    const rate = await getConversionRate(userCurrency);
+    const rate = await getPurchaseRate(userCurrency);
 
     const priced = list.map((product) => {
         const obj = typeof product.toObject === 'function' ? product.toObject() : { ...product };
@@ -147,6 +147,9 @@ const applyCustomerGroupPricing = async (products, user) => {
             groupName: groupPricing.groupName,
             groupPercentage: groupPricing.percentage,
             displayCurrency: userCurrency,
+            purchaseRateSnapshot: rate,
+            exchangeRate: rate,
+            rateType: 'purchase',
         };
     });
 

@@ -62,6 +62,18 @@ const currencySchema = new mongoose.Schema(
             min: [0.000001, 'Platform rate must be positive'],
         },
 
+        depositRate: {
+            type: Number,
+            default: undefined,
+            min: [0.000001, 'Deposit rate must be positive'],
+        },
+
+        purchaseRate: {
+            type: Number,
+            default: undefined,
+            min: [0.000001, 'Purchase rate must be positive'],
+        },
+
         /**
          * markupPercentage — optional admin-controlled markup layered ON TOP of
          * the raw market rate when computing a suggested platformRate.
@@ -96,6 +108,24 @@ const currencySchema = new mongoose.Schema(
 // code: unique index declared inline (unique: true)
 currencySchema.index({ isActive: 1 });
 
+currencySchema.pre('validate', function normalizeFunctionalRates(next) {
+    if (this.code === 'USD') {
+        this.marketRate = 1;
+        this.platformRate = 1;
+        this.depositRate = 1;
+        this.purchaseRate = 1;
+        return next();
+    }
+
+    if ((this.depositRate === undefined || this.depositRate === null) && this.platformRate !== undefined) {
+        this.depositRate = this.platformRate;
+    }
+    if ((this.purchaseRate === undefined || this.purchaseRate === null) && this.platformRate !== undefined) {
+        this.purchaseRate = this.platformRate;
+    }
+    next();
+});
+
 // ─── Virtuals ─────────────────────────────────────────────────────────────────
 
 /**
@@ -107,6 +137,14 @@ currencySchema.virtual('effectiveRate').get(function () {
     return parseFloat(
         (this.marketRate * (1 + this.markupPercentage / 100)).toFixed(6)
     );
+});
+
+currencySchema.virtual('effectiveDepositRate').get(function () {
+    return this.depositRate || this.platformRate;
+});
+
+currencySchema.virtual('effectivePurchaseRate').get(function () {
+    return this.purchaseRate || this.platformRate;
 });
 
 /**

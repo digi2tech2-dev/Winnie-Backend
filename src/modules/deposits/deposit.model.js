@@ -60,7 +60,8 @@ const depositRequestSchema = new mongoose.Schema(
         },
 
         /**
-         * The platformRate of the currency at the time of request.
+         * Legacy exchange-rate snapshot. New deposits store the depositRate here
+         * for backward-compatible API consumers.
          * Frozen at creation time so future rate changes don't affect
          * the value of this pending deposit.
          * Convention: 1 USD = exchangeRate units of this currency.
@@ -73,13 +74,55 @@ const depositRequestSchema = new mongoose.Schema(
 
         /**
          * USD equivalent: requestedAmount / exchangeRate.
-         * This is the amount that will be credited to the user's wallet on approval.
-         * Wallet balances are always denominated in USD.
+         * Wallet balances remain denominated in the user's account currency.
          */
         amountUsd: {
             type: Number,
             required: [true, 'amountUsd is required'],
             min: [0.01, 'amountUsd must be greater than 0'],
+        },
+
+        rateType: {
+            type: String,
+            enum: ['deposit', 'legacy'],
+            default: 'legacy',
+        },
+
+        depositRateSnapshot: {
+            type: Number,
+            default: null,
+            min: [0.000001, 'depositRateSnapshot must be positive'],
+        },
+
+        walletCurrency: {
+            type: String,
+            uppercase: true,
+            trim: true,
+            match: [/^[A-Z]{3}$/, 'walletCurrency must be a 3-letter ISO 4217 code'],
+            default: null,
+        },
+
+        walletDepositRateSnapshot: {
+            type: Number,
+            default: null,
+            min: [0.000001, 'walletDepositRateSnapshot must be positive'],
+        },
+
+        expectedWalletCreditAmount: {
+            type: Number,
+            default: null,
+            min: [0, 'expectedWalletCreditAmount cannot be negative'],
+        },
+
+        usdEquivalent: {
+            type: Number,
+            default: null,
+            min: [0, 'usdEquivalent cannot be negative'],
+        },
+
+        legacyFallback: {
+            type: Boolean,
+            default: false,
         },
 
         /**

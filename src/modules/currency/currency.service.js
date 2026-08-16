@@ -20,6 +20,19 @@ const { Currency } = require('./currency.model');
 const { invalidateCurrencyCache } = require('../../services/currencyConverter.service');
 const { NotFoundError, BusinessRuleError, ConflictError } = require('../../shared/errors/AppError');
 
+const roundRate = (value) => parseFloat(Number(value).toFixed(6));
+
+const parsePositiveRate = (value, fieldName, errorCode) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new BusinessRuleError(
+            `${fieldName} must be a positive number.`,
+            errorCode
+        );
+    }
+    return roundRate(parsed);
+};
+
 // =============================================================================
 // SEED: Ensure USD base currency
 // =============================================================================
@@ -39,11 +52,35 @@ const seedBaseCurrency = async () => {
             symbol: '$',
             marketRate: 1,
             platformRate: 1,
+            depositRate: 1,
+            purchaseRate: 1,
             markupPercentage: 0,
             isActive: true,
             lastUpdatedAt: new Date(),
         });
         console.log('[CurrencyService] USD base currency seeded.');
+    } else if (
+        exists.marketRate !== 1 ||
+        exists.platformRate !== 1 ||
+        exists.depositRate !== 1 ||
+        exists.purchaseRate !== 1 ||
+        exists.isActive !== true
+    ) {
+        await Currency.updateOne(
+            { code: 'USD' },
+            {
+                $set: {
+                    marketRate: 1,
+                    platformRate: 1,
+                    depositRate: 1,
+                    purchaseRate: 1,
+                    isActive: true,
+                    lastUpdatedAt: new Date(),
+                },
+            },
+            { runValidators: true }
+        );
+        invalidateCurrencyCache('USD');
     }
 };
 
@@ -107,28 +144,38 @@ const updateCurrencyRate = async (code, updates) => {
     const doc = await Currency.findOne({ code: upper });
     if (!doc) throw new NotFoundError(`Currency '${upper}'`);
 
-    const { marketRate, platformRate, markupPercentage, name, symbol, isActive, applyDebtAdjustment, adminId } = updates;
+    const { marketRate, platformRate, depositRate, purchaseRate, markupPercentage, name, symbol, isActive, applyDebtAdjustment, adminId } = updates;
     const updateSet = {};
 
     // Capture old rate BEFORE mutation (needed for percentage calc)
     const oldRate = doc.platformRate;
 
-    // Guard: USD rate is always 1
-    if (upper === 'USD' && platformRate !== undefined && platformRate !== 1) {
+    // Guard: USD rates are always 1
+    if (
+        upper === 'USD' &&
+        (
+            (platformRate !== undefined && Number(platformRate) !== 1) ||
+            (depositRate !== undefined && Number(depositRate) !== 1) ||
+            (purchaseRate !== undefined && Number(purchaseRate) !== 1) ||
+            (marketRate !== undefined && marketRate !== null && Number(marketRate) !== 1)
+        )
+    ) {
         throw new BusinessRuleError(
-            'The USD platform rate must always be exactly 1.',
+            'The USD platform rate must always be exactly 1, and all USD functional rates must also be 1.',
             'IMMUTABLE_USD_RATE'
         );
     }
 
     if (platformRate !== undefined) {
-        if (typeof platformRate !== 'number' || platformRate <= 0) {
-            throw new BusinessRuleError(
-                'platformRate must be a positive number.',
-                'INVALID_PLATFORM_RATE'
-            );
-        }
-        updateSet.platformRate = parseFloat(platformRate.toFixed(6));
+        updateSet.platformRate = parsePositiveRate(platformRate, 'platformRate', 'INVALID_PLATFORM_RATE');
+    }
+
+    if (depositRate !== undefined) {
+        updateSet.depositRate = parsePositiveRate(depositRate, 'depositRate', 'INVALID_DEPOSIT_RATE');
+    }
+
+    if (purchaseRate !== undefined) {
+        updateSet.purchaseRate = parsePositiveRate(purchaseRate, 'purchaseRate', 'INVALID_PURCHASE_RATE');
     }
 
     if (marketRate !== undefined) {
@@ -140,7 +187,28 @@ const updateCurrencyRate = async (code, updates) => {
                 'INVALID_MARKET_RATE'
             );
         } else {
-            updateSet.marketRate = parseFloat(marketRate.toFixed(6));
+            updateSet.marketRate = roundRate(marketRate);
+        }
+    }
+
+    if (upper === 'USD') {
+        updateSet.marketRate = 1;
+        updateSet.platformRate = 1;
+        updateSet.depositRate = 1;
+        updateSet.purchaseRate = 1;
+    } else {
+        const legacyPlatform = updateSet.platformRate ?? doc.platformRate;
+        if (
+            updateSet.depositRate === undefined &&
+            (doc.depositRate == null || (platformRate !== undefined && Number(doc.depositRate) === Number(doc.platformRate)))
+        ) {
+            updateSet.depositRate = legacyPlatform;
+        }
+        if (
+            updateSet.purchaseRate === undefined &&
+            (doc.purchaseRate == null || (platformRate !== undefined && Number(doc.purchaseRate) === Number(doc.platformRate)))
+        ) {
+            updateSet.purchaseRate = legacyPlatform;
         }
     }
 
@@ -283,6 +351,8 @@ const createCurrency = async ({
     name,
     symbol,
     platformRate,
+    depositRate,
+    purchaseRate,
     marketRate = null,
     markupPercentage = 0,
     isActive = true,
@@ -304,13 +374,13 @@ const createCurrency = async ({
         throw new BusinessRuleError('Currency symbol is required.', 'INVALID_CURRENCY_SYMBOL');
     }
 
-    const parsedPlatformRate = Number(platformRate);
-    if (!Number.isFinite(parsedPlatformRate) || parsedPlatformRate <= 0) {
-        throw new BusinessRuleError(
-            'platformRate must be a positive number.',
-            'INVALID_PLATFORM_RATE'
-        );
-    }
+    const parsedPlatformRate = parsePositiveRate(platformRate, 'platformRate', 'INVALID_PLATFORM_RATE');
+    const parsedDepositRate = depositRate === undefined || depositRate === null || depositRate === ''
+        ? parsedPlatformRate
+        : parsePositiveRate(depositRate, 'depositRate', 'INVALID_DEPOSIT_RATE');
+    const parsedPurchaseRate = purchaseRate === undefined || purchaseRate === null || purchaseRate === ''
+        ? parsedPlatformRate
+        : parsePositiveRate(purchaseRate, 'purchaseRate', 'INVALID_PURCHASE_RATE');
 
     const hasMarketRate = marketRate !== undefined && marketRate !== null && marketRate !== '';
     const parsedMarketRate = hasMarketRate ? Number(marketRate) : null;
@@ -338,8 +408,10 @@ const createCurrency = async ({
         code: upper,
         name: trimmedName,
         symbol: trimmedSymbol,
-        marketRate: parsedMarketRate == null ? null : parseFloat(parsedMarketRate.toFixed(6)),
-        platformRate: parseFloat(parsedPlatformRate.toFixed(6)),
+        marketRate: upper === 'USD' ? 1 : parsedMarketRate == null ? null : roundRate(parsedMarketRate),
+        platformRate: upper === 'USD' ? 1 : parsedPlatformRate,
+        depositRate: upper === 'USD' ? 1 : parsedDepositRate,
+        purchaseRate: upper === 'USD' ? 1 : parsedPurchaseRate,
         markupPercentage: parsedMarkupPercentage,
         isActive: Boolean(isActive),
         lastUpdatedAt: new Date(),

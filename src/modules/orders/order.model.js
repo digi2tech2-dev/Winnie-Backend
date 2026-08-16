@@ -173,6 +173,18 @@ const orderSchema = new mongoose.Schema(
             min: [0, 'rateSnapshot cannot be negative'],
         },
 
+        purchaseRateSnapshot: {
+            type: Number,
+            default: null,
+            min: [0, 'purchaseRateSnapshot cannot be negative'],
+        },
+
+        rateType: {
+            type: String,
+            enum: ['purchase', 'legacy'],
+            default: 'legacy',
+        },
+
         /**
          * The product price in USD (before currency conversion).
          * = basePriceSnapshot × (1 + markupPercentageSnapshot/100) × quantity.

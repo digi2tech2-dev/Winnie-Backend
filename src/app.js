@@ -163,7 +163,7 @@ app.get(`${API_PREFIX}/currencies/active`, async (req, res) => {
     try {
         const { Currency } = require('./modules/currency/currency.model');
         const currencies = await Currency.find({ isActive: true })
-            .select('code name symbol platformRate')
+            .select('code name symbol platformRate depositRate purchaseRate')
             .sort({ code: 1 });
         res.json({ success: true, message: 'Active currencies', data: { currencies } });
     } catch (err) {

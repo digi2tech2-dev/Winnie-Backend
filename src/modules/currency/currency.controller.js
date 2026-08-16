@@ -40,9 +40,9 @@ const listCurrenciesHandler = catchAsync(async (req, res) => {
  * Body: { code, name, symbol, platformRate, marketRate, markupPercentage?, isActive? }
  */
 const createCurrencyHandler = catchAsync(async (req, res) => {
-    const { code, name, symbol, platformRate, marketRate, markupPercentage, isActive } = req.body;
+    const { code, name, symbol, platformRate, depositRate, purchaseRate, marketRate, markupPercentage, isActive } = req.body;
     const currency = await currencyService.createCurrency({
-        code, name, symbol, platformRate, marketRate, markupPercentage, isActive,
+        code, name, symbol, platformRate, depositRate, purchaseRate, marketRate, markupPercentage, isActive,
     });
     sendCreated(res, currency, `Currency '${currency.code}' created.`);
 });
@@ -70,9 +70,9 @@ const getCurrencyHandler = catchAsync(async (req, res) => {
  * Body: { name?, symbol?, marketRate?, platformRate?, markupPercentage?, isActive?, applyDebtAdjustment? }
  */
 const updateRateHandler = catchAsync(async (req, res) => {
-    const { marketRate, platformRate, markupPercentage, name, symbol, isActive, applyDebtAdjustment } = req.body;
+    const { marketRate, platformRate, depositRate, purchaseRate, markupPercentage, name, symbol, isActive, applyDebtAdjustment } = req.body;
     const { currency, debtAdjustment } = await currencyService.updateCurrencyRate(req.params.code, {
-        marketRate, platformRate, markupPercentage, name, symbol, isActive,
+        marketRate, platformRate, depositRate, purchaseRate, markupPercentage, name, symbol, isActive,
         applyDebtAdjustment,
         adminId: req.user?._id,
     });

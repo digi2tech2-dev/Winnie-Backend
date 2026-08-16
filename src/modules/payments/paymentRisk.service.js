@@ -13,7 +13,7 @@ const {
     ENTITY_TYPES,
     PAYMENT_ACTIONS,
 } = require('../audit/audit.constants');
-const { convertUserCurrencyToUsd } = require('../../services/currencyConverter.service');
+const { RATE_PURPOSES, convertUserCurrencyToUsd } = require('../../services/currencyConverter.service');
 const { BusinessRuleError } = require('../../shared/errors/AppError');
 const {
     PAYMENT_RISK_BASE_CURRENCY,
@@ -47,7 +47,9 @@ const amountToBaseCurrency = async (amount, currency) => {
         throw new BusinessRuleError('Payment risk amount must be a non-negative number.', 'INVALID_PAYMENT_AMOUNT');
     }
 
-    const conversion = await convertUserCurrencyToUsd(parsedAmount, currency);
+    const conversion = await convertUserCurrencyToUsd(parsedAmount, currency, {
+        purpose: RATE_PURPOSES.DEPOSIT,
+    });
     return roundMoney(conversion.usdAmount, 6);
 };
 

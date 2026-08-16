@@ -515,7 +515,7 @@ const getProducts = catchAsync(async (req, res) => {
     const page = parsePage(req.query.page);
     const limit = parseLimit(req.query.limit);
     const { Product } = require('../products/product.model');
-    const { getConversionRate } = require('../../services/currencyConverter.service');
+    const { getPurchaseRate } = require('../../services/currencyConverter.service');
     const { resolveUserPricingGroup } = require('../groups/group.service');
     const { calculateFinalPrice, getProductFinalUnitPrice } = require('../orders/pricing.service');
 
@@ -549,7 +549,7 @@ const getProducts = catchAsync(async (req, res) => {
 
     // ── 2. Resolve user's currency rate ───────────────────────────────────────
     const userCurrency = req.user.currency || 'USD';
-    const rate = await getConversionRate(userCurrency);
+    const rate = await getPurchaseRate(userCurrency);
 
     // ── 3. Apply pipeline: Base → Markup → Currency ───────────────────────────
     const converted = products.map((product) => {
@@ -574,6 +574,9 @@ const getProducts = catchAsync(async (req, res) => {
             groupName: groupPricing.groupName,
             groupPercentage: markupPercentage,
             displayCurrency: userCurrency,
+            purchaseRateSnapshot: rate,
+            exchangeRate: rate,
+            rateType: 'purchase',
             isPurchasable: p.isPaused !== true
                 && p.status !== 'unavailable'
                 && p.isAvailableForApi !== false,
@@ -588,7 +591,7 @@ const getProducts = catchAsync(async (req, res) => {
  */
 const getProduct = catchAsync(async (req, res) => {
     const { Product } = require('../products/product.model');
-    const { getConversionRate } = require('../../services/currencyConverter.service');
+    const { getPurchaseRate } = require('../../services/currencyConverter.service');
     const { resolveUserPricingGroup } = require('../groups/group.service');
     const { calculateFinalPrice, getProductFinalUnitPrice } = require('../orders/pricing.service');
 
@@ -610,7 +613,7 @@ const getProduct = catchAsync(async (req, res) => {
 
     // ── 2. Currency rate ──────────────────────────────────────────────────────
     const userCurrency = req.user.currency || 'USD';
-    const rate = await getConversionRate(userCurrency);
+    const rate = await getPurchaseRate(userCurrency);
 
     // ── 3. Pipeline: Base → Markup → Currency ─────────────────────────────────
     const safeProduct = exposeSafeCustomerProduct(product);
@@ -635,6 +638,9 @@ const getProduct = catchAsync(async (req, res) => {
         groupName: groupPricing.groupName,
         groupPercentage: markupPercentage,
         displayCurrency: userCurrency,
+        purchaseRateSnapshot: rate,
+        exchangeRate: rate,
+        rateType: 'purchase',
         isPurchasable: product.isPaused !== true
             && product.status !== 'unavailable'
             && product.isAvailableForApi !== false,
@@ -678,11 +684,20 @@ const createDeposit = catchAsync(async (req, res) => {
         );
     }
 
-    const exchangeRate = currencyDoc.platformRate;
+    const { getDepositRate } = require('../../services/currencyConverter.service');
+    const { localToUsd, usdToLocal } = require('../../shared/utils/currencyMath');
+    const depositRateSnapshot = Number(currencyDoc.depositRate || currencyDoc.platformRate);
+    const exchangeRate = depositRateSnapshot;
 
     // ── Calculate USD equivalent ─────────────────────────────────────────
     const parsedAmount = parseFloat(requestedAmount);
-    const amountUsd = Number((parsedAmount / exchangeRate).toFixed(2));
+    const usdEquivalent = localToUsd(parsedAmount, depositRateSnapshot);
+    const amountUsd = Number(usdEquivalent.toFixed(2));
+    const walletCurrency = String(req.user.currency || 'USD').toUpperCase();
+    const walletDepositRateSnapshot = await getDepositRate(walletCurrency);
+    const expectedWalletCreditAmount = currency.toUpperCase() === walletCurrency
+        ? Number(parsedAmount.toFixed(2))
+        : usdToLocal(usdEquivalent, walletDepositRateSnapshot);
 
     // ── Build relative receipt path ──────────────────────────────────────
     const receiptImage = `uploads/deposits/${receiptFile.filename}`;
@@ -708,6 +723,13 @@ const createDeposit = catchAsync(async (req, res) => {
         currency: currency.toUpperCase(),
         exchangeRate,
         amountUsd,
+        depositRateSnapshot,
+        walletCurrency,
+        walletDepositRateSnapshot,
+        expectedWalletCreditAmount,
+        usdEquivalent,
+        rateType: 'deposit',
+        legacyFallback: false,
         receiptImage,
         notes: notes || null,
         customFieldSnapshot: validatedCustomFields.customFieldSnapshot,

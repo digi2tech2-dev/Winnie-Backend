@@ -1,6 +1,5 @@
 'use strict';
 
-const mongoose = require('mongoose');
 const { DepositRequest, DEPOSIT_STATUS } = require('./deposit.model');
 const { User } = require('../users/user.model');
 const { assertIdentityVerificationNotRequired } = require('../users/identityVerification.guard');
@@ -15,7 +14,6 @@ const {
     notifyDepositApproved,
     notifyDepositRejected,
 } = require('../notifications/notification.events');
-// convertUsdToUserCurrency removed — deposits now credit requestedAmount directly
 const {
     NotFoundError,
     BusinessRuleError,
@@ -24,6 +22,8 @@ const {
 } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+const { getDepositRate } = require('../../services/currencyConverter.service');
+const { localToUsd, usdToLocal } = require('../../shared/utils/currencyMath');
 
 const ANTI_SCAM_CONFIRMATION_REQUIRED_MESSAGE =
     'Please confirm the anti-scam safety warning before continuing.';
@@ -38,38 +38,64 @@ const assertAntiScamConfirmation = ({ antiScamConfirmed, termsAccepted } = {}) =
     }
 };
 
-// =============================================================================
-// CREATE
-// =============================================================================
+const toMoney = (value) => Number(Number(value || 0).toFixed(2));
 
-/**
- * Customer creates a new deposit request (multi-currency).
- *
- * Business rules:
- *   - User must exist and be ACTIVE (enforced upstream by requireActiveUser middleware).
- *   - A user may NOT have more than one PENDING deposit at a time.
- *   - requestedAmount must be > 0 (enforced by schema).
- *   - amountUsd is pre-calculated by the controller using the frozen exchangeRate.
- *   - No wallet credit at this stage; the request is PENDING until admin review.
- *
- * Audit: DEPOSIT_REQUESTED — fire-and-forget after save.
- *
- * @param {Object} params
- * @param {string|ObjectId} params.userId
- * @param {string}          params.paymentMethodId
- * @param {number}          params.requestedAmount
- * @param {string}          params.currency
- * @param {number}          params.exchangeRate
- * @param {number}          params.amountUsd
- * @param {string}          params.receiptImage
- * @param {string|null}     [params.notes]
- * @param {Array}           [params.customFieldSnapshot]
- * @param {Object}          [params.customFieldValues]
- * @param {Object}          [params.customFieldFiles]
- * @param {Object|null}     [params.auditContext]
- *
- * @returns {Promise<DepositRequest>}
- */
+const resolveDepositCreditSnapshot = async ({
+    deposit,
+    finalAmount,
+    finalCurrency,
+    walletCurrency,
+    adminOverrideApplied = false,
+}) => {
+    const sourceCurrency = String(finalCurrency || deposit.currency || 'USD').toUpperCase();
+    const targetCurrency = String(walletCurrency || deposit.walletCurrency || 'USD').toUpperCase();
+    const legacyFallback = !deposit.depositRateSnapshot || adminOverrideApplied;
+    const fallbackSourceRate = deposit.exchangeRate || await getDepositRate(sourceCurrency);
+    const sourceRate = legacyFallback
+        ? Number(fallbackSourceRate)
+        : Number(deposit.depositRateSnapshot);
+    const canUseWalletSnapshot = !adminOverrideApplied
+        && deposit.walletCurrency
+        && String(deposit.walletCurrency).toUpperCase() === targetCurrency
+        && Number(deposit.walletDepositRateSnapshot) > 0;
+    const walletRate = canUseWalletSnapshot
+        ? Number(deposit.walletDepositRateSnapshot)
+        : await getDepositRate(targetCurrency);
+
+    if (sourceCurrency === targetCurrency) {
+        return {
+            sourceAmount: finalAmount,
+            sourceCurrency,
+            walletAmount: toMoney(finalAmount),
+            walletCurrency: targetCurrency,
+            usdEquivalent: localToUsd(finalAmount, sourceRate),
+            sourceDepositRate: sourceRate,
+            walletDepositRate: walletRate,
+            rateType: 'deposit',
+            legacyFallback,
+            conversionNote: `${finalAmount} ${sourceCurrency} (direct wallet credit)`,
+        };
+    }
+
+    const usdEquivalent = adminOverrideApplied || !Number(deposit.usdEquivalent || deposit.amountUsd)
+        ? localToUsd(finalAmount, sourceRate)
+        : Number(deposit.usdEquivalent || deposit.amountUsd);
+    const walletAmount = usdToLocal(usdEquivalent, walletRate);
+
+    return {
+        sourceAmount: finalAmount,
+        sourceCurrency,
+        walletAmount,
+        walletCurrency: targetCurrency,
+        usdEquivalent,
+        sourceDepositRate: sourceRate,
+        walletDepositRate: walletRate,
+        rateType: 'deposit',
+        legacyFallback,
+        conversionNote: `${finalAmount} ${sourceCurrency} -> ${usdEquivalent} USD -> ${walletAmount} ${targetCurrency}`,
+    };
+};
+
 const createDepositRequest = async ({
     userId,
     paymentMethodId,
@@ -77,6 +103,13 @@ const createDepositRequest = async ({
     currency,
     exchangeRate,
     amountUsd,
+    depositRateSnapshot = null,
+    walletCurrency = null,
+    walletDepositRateSnapshot = null,
+    expectedWalletCreditAmount = null,
+    usdEquivalent = null,
+    rateType = 'deposit',
+    legacyFallback = false,
     receiptImage,
     notes = null,
     customFieldSnapshot = [],
@@ -89,12 +122,10 @@ const createDepositRequest = async ({
 }) => {
     assertAntiScamConfirmation({ antiScamConfirmed, termsAccepted });
 
-    // Confirm user exists (belt-and-suspenders — middleware already checks ACTIVE)
     const user = await User.findById(userId).select('_id role identityVerificationRequired');
     if (!user) throw new NotFoundError('User');
     assertIdentityVerificationNotRequired(user);
 
-    // ── Guard: prevent duplicate pending deposits ────────────────────────
     const existingPending = await DepositRequest.findOne({
         userId,
         status: DEPOSIT_STATUS.PENDING,
@@ -109,10 +140,17 @@ const createDepositRequest = async ({
     const deposit = await DepositRequest.create({
         userId,
         paymentMethodId,
-        requestedAmount: Number(parseFloat(requestedAmount).toFixed(2)),
+        requestedAmount: toMoney(requestedAmount),
         currency,
         exchangeRate,
-        amountUsd: Number(parseFloat(amountUsd).toFixed(2)),
+        amountUsd: toMoney(amountUsd),
+        depositRateSnapshot,
+        walletCurrency,
+        walletDepositRateSnapshot,
+        expectedWalletCreditAmount: expectedWalletCreditAmount == null ? null : toMoney(expectedWalletCreditAmount),
+        usdEquivalent: usdEquivalent == null ? toMoney(amountUsd) : Number(Number(usdEquivalent).toFixed(6)),
+        rateType,
+        legacyFallback,
         receiptImage,
         notes,
         customFieldSnapshot: Array.isArray(customFieldSnapshot) ? customFieldSnapshot : [],
@@ -121,26 +159,34 @@ const createDepositRequest = async ({
         status: DEPOSIT_STATUS.PENDING,
     });
 
-    // Audit: fire-and-forget
+    const baseMetadata = {
+        userId: userId.toString(),
+        paymentMethodId,
+        requestedAmount: deposit.requestedAmount,
+        currency,
+        exchangeRate,
+        amountUsd: deposit.amountUsd,
+        depositRateSnapshot: deposit.depositRateSnapshot,
+        walletCurrency: deposit.walletCurrency,
+        walletDepositRateSnapshot: deposit.walletDepositRateSnapshot,
+        expectedWalletCreditAmount: deposit.expectedWalletCreditAmount,
+        usdEquivalent: deposit.usdEquivalent,
+        rateType: deposit.rateType,
+        legacyFallback: deposit.legacyFallback,
+        customFieldKeys: Object.keys(deposit.customFieldValues || {}),
+        customFieldFileKeys: Object.keys(deposit.customFieldFiles || {}),
+        antiScamConfirmed: true,
+        termsAccepted: true,
+        antiScamConfirmedAt: antiScamConfirmedAt || null,
+    };
+
     createAuditLog({
         actorId: auditContext?.actorId ?? userId,
         actorRole: auditContext?.actorRole ?? ACTOR_ROLES.CUSTOMER,
         action: DEPOSIT_ACTIONS.REQUESTED,
         entityType: ENTITY_TYPES.DEPOSIT,
         entityId: deposit._id,
-        metadata: {
-            userId: userId.toString(),
-            paymentMethodId,
-            requestedAmount: deposit.requestedAmount,
-            currency,
-            exchangeRate,
-            amountUsd: deposit.amountUsd,
-            customFieldKeys: Object.keys(deposit.customFieldValues || {}),
-            customFieldFileKeys: Object.keys(deposit.customFieldFiles || {}),
-            antiScamConfirmed: true,
-            termsAccepted: true,
-            antiScamConfirmedAt: antiScamConfirmedAt || null,
-        },
+        metadata: baseMetadata,
         ipAddress: auditContext?.ipAddress ?? null,
         userAgent: auditContext?.userAgent ?? null,
     });
@@ -161,6 +207,9 @@ const createDepositRequest = async ({
             requestedAmount: deposit.requestedAmount,
             currency: deposit.currency,
             amountUsd: deposit.amountUsd,
+            usdEquivalent: deposit.usdEquivalent,
+            expectedWalletCreditAmount: deposit.expectedWalletCreditAmount,
+            walletCurrency: deposit.walletCurrency,
             status: deposit.status,
         },
     });
@@ -184,43 +233,18 @@ const createDepositRequest = async ({
             requestedAmount: deposit.requestedAmount,
             currency: deposit.currency,
             amountUsd: deposit.amountUsd,
+            usdEquivalent: deposit.usdEquivalent,
+            expectedWalletCreditAmount: deposit.expectedWalletCreditAmount,
+            walletCurrency: deposit.walletCurrency,
             status: deposit.status,
         },
     });
 
     notifyDepositRequested(deposit);
-
     return deposit;
 };
 
-// =============================================================================
-// APPROVE
-// =============================================================================
-
-/**
- * Admin approves a deposit request and credits the user's wallet with amountUsd.
- *
- * All mutations use an atomic compare-and-swap on { _id, status: PENDING }:
- *   1. Load and validate the deposit.
- *   2. Atomic findOneAndUpdate — prevents double-approval even under
- *      concurrent requests (no-op if status changed).
- *   3. Atomically credit the user's wallet with the pre-calculated amountUsd.
- *
- * Concurrency safety:
- *   findOneAndUpdate with { _id, status: PENDING } acts as a compare-and-swap.
- *   The first concurrent approve wins; the second finds no matching document
- *   (status is no longer PENDING) and throws DEPOSIT_ALREADY_APPROVED.
- *
- * Audit: DEPOSIT_APPROVED + WALLET_CREDIT — both fire-and-forget AFTER commit.
- *
- * @param {string|ObjectId} depositId
- * @param {string|ObjectId} adminId
- * @param {Object|null}     [auditContext]
- *
- * @returns {Promise<DepositRequest>}
- */
 const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditContext = null) => {
-    // Pre-read to give clear error messages if status is already wrong
     const existing = await DepositRequest.findById(depositId);
     if (!existing) throw new NotFoundError('DepositRequest');
 
@@ -237,35 +261,20 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
         );
     }
 
-    // ── Resolve final amount & currency (admin overrides take priority) ────
-    const finalAmount = Number(parseFloat(
-        adminOverrides.amount ?? existing.requestedAmount
-    ).toFixed(2));
-    const finalCurrency = (
-        adminOverrides.currency || existing.currency || 'USD'
-    ).toUpperCase();
-
+    const finalAmount = toMoney(adminOverrides.amount ?? existing.requestedAmount);
+    const finalCurrency = (adminOverrides.currency || existing.currency || 'USD').toUpperCase();
     if (finalAmount <= 0) {
         throw new BusinessRuleError('Deposit amount must be greater than zero.', 'INVALID_AMOUNT');
     }
 
-    // ── Atomic compare-and-swap on { _id, status: PENDING } ──────────────
     const $setFields = {
         status: DEPOSIT_STATUS.APPROVED,
         reviewedBy: adminId,
         reviewedAt: new Date(),
     };
-
-    // Persist admin overrides on the deposit document if provided
-    if (adminOverrides.amount != null) {
-        $setFields.requestedAmount = finalAmount;
-    }
-    if (adminOverrides.currency) {
-        $setFields.currency = finalCurrency;
-    }
-    if (adminOverrides.adminNotes) {
-        $setFields.adminNotes = String(adminOverrides.adminNotes).trim();
-    }
+    if (adminOverrides.amount != null) $setFields.requestedAmount = finalAmount;
+    if (adminOverrides.currency) $setFields.currency = finalCurrency;
+    if (adminOverrides.adminNotes) $setFields.adminNotes = String(adminOverrides.adminNotes).trim();
 
     const updated = await DepositRequest.findOneAndUpdate(
         { _id: depositId, status: DEPOSIT_STATUS.PENDING },
@@ -280,38 +289,23 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
         );
     }
 
-    // ── Determine the wallet credit amount (smart cross-currency) ─────────
-    // walletBalance is stored in the user's local currency.
-    //
-    // Case 1 (same currency): Deposit SAR, wallet SAR → credit exact amount.
-    // Case 2 (cross-currency): Deposit EGP, wallet SAR → EGP → USD → SAR.
     const userDoc = await User.findById(updated.userId).select('currency');
     const walletCurrency = (userDoc?.currency ?? 'USD').toUpperCase();
-
-    let walletCreditAmount;
-    let conversionNote;
-
-    if (finalCurrency === walletCurrency) {
-        // Same currency — direct credit, no conversion loss
-        walletCreditAmount = finalAmount;
-        conversionNote = `${finalAmount} ${finalCurrency} (direct, no conversion)`;
-    } else {
-        // Cross-currency: finalCurrency → USD → walletCurrency
-        const { getConversionRate } = require('../../services/currencyConverter.service');
-        const fromRate = await getConversionRate(finalCurrency);   // e.g. EGP → 1 USD = 50 EGP  → rate=50
-        const toRate   = await getConversionRate(walletCurrency);  // e.g. SAR → 1 USD = 3.75 SAR → rate=3.75
-
-        const amountInUsd = Number((finalAmount / fromRate).toFixed(6));
-        walletCreditAmount = Number((amountInUsd * toRate).toFixed(2));
-        conversionNote = `${finalAmount} ${finalCurrency} → ${amountInUsd} USD → ${walletCreditAmount} ${walletCurrency}`;
-    }
+    const adminOverrideApplied = !!(adminOverrides.amount || adminOverrides.currency);
+    const creditSnapshot = await resolveDepositCreditSnapshot({
+        deposit: updated,
+        finalAmount,
+        finalCurrency,
+        walletCurrency,
+        adminOverrideApplied,
+    });
 
     const actorId = auditContext?.actorId ?? adminId;
     const actorRole = auditContext?.actorRole ?? ACTOR_ROLES.ADMIN;
     const ipAddress = auditContext?.ipAddress ?? null;
     const userAgent = auditContext?.userAgent ?? null;
+    const walletCreditAmount = creditSnapshot.walletAmount;
 
-    // Credit the wallet
     const creditResult = await creditWalletDirect({
         userId: updated.userId,
         amount: walletCreditAmount,
@@ -321,18 +315,25 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
         description: `Deposit #${updated._id.toString().slice(-6)} (${finalAmount} ${finalCurrency})`,
         metadata: {
             depositId: updated._id.toString(),
+            sourceAmount: creditSnapshot.sourceAmount,
+            sourceCurrency: creditSnapshot.sourceCurrency,
+            walletAmount: walletCreditAmount,
+            walletCurrency: creditSnapshot.walletCurrency,
+            usdEquivalent: creditSnapshot.usdEquivalent,
+            rateType: creditSnapshot.rateType,
+            depositRateSnapshot: creditSnapshot.sourceDepositRate,
+            walletDepositRateSnapshot: creditSnapshot.walletDepositRate,
+            legacyFallback: creditSnapshot.legacyFallback,
             finalAmount,
             finalCurrency,
-            walletCurrency,
             walletCreditAmount,
-            conversionNote,
+            conversionNote: creditSnapshot.conversionNote,
         },
         idempotencyKey: `deposit:${updated._id.toString()}:approved`,
         actorId,
         actorRole,
     });
 
-    // ── Audit: fire-and-forget ────────────────────────────────────────────
     await processWalletCreditSafely(creditResult.transaction);
 
     createAuditLog({
@@ -346,10 +347,15 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
             finalCurrency,
             originalRequestedAmount: existing.requestedAmount,
             originalCurrency: existing.currency,
-            adminOverrideApplied: !!(adminOverrides.amount || adminOverrides.currency),
+            adminOverrideApplied,
             walletCurrency,
             walletCreditAmount,
-            conversionNote,
+            usdEquivalent: creditSnapshot.usdEquivalent,
+            rateType: creditSnapshot.rateType,
+            depositRateSnapshot: creditSnapshot.sourceDepositRate,
+            walletDepositRateSnapshot: creditSnapshot.walletDepositRate,
+            legacyFallback: creditSnapshot.legacyFallback,
+            conversionNote: creditSnapshot.conversionNote,
             reviewedBy: adminId.toString(),
         },
     });
@@ -363,13 +369,14 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
             depositId: updated._id.toString(),
             walletCurrency,
             walletCreditAmount,
+            usdEquivalent: creditSnapshot.usdEquivalent,
+            rateType: creditSnapshot.rateType,
+            depositRateSnapshot: creditSnapshot.sourceDepositRate,
+            legacyFallback: creditSnapshot.legacyFallback,
             reason: 'DEPOSIT_APPROVED',
         },
     });
 
-    // ── Populate refs before returning to the frontend ────────────────────
-    // Without this, the Zustand store overwrites the populated userId object
-    // with a raw string ID, breaking the admin table's user column.
     const populated = await DepositRequest.findById(updated._id)
         .populate('userId', 'name email avatar currency walletBalance')
         .populate('reviewedBy', 'name email');
@@ -382,25 +389,6 @@ const approveDeposit = async (depositId, adminId, adminOverrides = {}, auditCont
     return populated;
 };
 
-// =============================================================================
-// REJECT
-// =============================================================================
-
-/**
- * Admin rejects a deposit request.
- *
- * Only PENDING requests can be rejected.
- * No financial operation is performed — wallet is untouched.
- *
- * Audit: DEPOSIT_REJECTED — fire-and-forget after save.
- *
- * @param {string|ObjectId} depositId
- * @param {string|ObjectId} adminId
- * @param {string|null}     [adminNotes]      - optional reason for rejection
- * @param {Object|null}     [auditContext]
- *
- * @returns {Promise<DepositRequest>}
- */
 const rejectDeposit = async (depositId, adminId, adminNotes = null, auditContext = null) => {
     const deposit = await DepositRequest.findById(depositId);
     if (!deposit) throw new NotFoundError('DepositRequest');
@@ -424,7 +412,6 @@ const rejectDeposit = async (depositId, adminId, adminNotes = null, auditContext
     if (adminNotes) deposit.adminNotes = adminNotes;
     await deposit.save();
 
-    // Audit: fire-and-forget after save
     createAuditLog({
         actorId: auditContext?.actorId ?? adminId,
         actorRole: auditContext?.actorRole ?? ACTOR_ROLES.ADMIN,
@@ -444,24 +431,13 @@ const rejectDeposit = async (depositId, adminId, adminNotes = null, auditContext
     });
 
     notifyDepositRejected(deposit);
-
     return deposit;
 };
 
-// =============================================================================
-// QUERIES
-// =============================================================================
-
-/**
- * Admin: list deposit requests with optional status filter, paginated.
- * Sorted newest-first so the most recent requests appear on Page 1.
- */
 const listDeposits = async ({ page = 1, limit = 20, status, search } = {}) => {
     const filter = {};
-    // Enforce uppercase to match DEPOSIT_STATUS enum (PENDING, APPROVED, REJECTED)
     if (status) filter.status = String(status).toUpperCase();
 
-    // Search by user name or email
     if (search && String(search).trim()) {
         const regex = new RegExp(String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
         const matchingUsers = await User.find({
@@ -471,7 +447,6 @@ const listDeposits = async ({ page = 1, limit = 20, status, search } = {}) => {
     }
 
     const skip = (page - 1) * limit;
-
     const [deposits, total, summaryStats] = await Promise.all([
         DepositRequest.find(filter)
             .sort({ createdAt: -1 })
@@ -480,7 +455,6 @@ const listDeposits = async ({ page = 1, limit = 20, status, search } = {}) => {
             .populate('userId', 'name email walletBalance currency')
             .populate('reviewedBy', 'name email'),
         DepositRequest.countDocuments(filter),
-        // Base stats — always unfiltered so dashboard cards remain stable
         DepositRequest.aggregate([
             {
                 $group: {
@@ -504,16 +478,11 @@ const listDeposits = async ({ page = 1, limit = 20, status, search } = {}) => {
     };
 };
 
-/**
- * Customer: list their own deposit requests, paginated.
- * Sorted newest-first.
- */
 const listMyDeposits = async (userId, { page = 1, limit = 20, status } = {}) => {
     const filter = { userId };
     if (status) filter.status = status;
 
     const skip = (page - 1) * limit;
-
     const [deposits, total] = await Promise.all([
         DepositRequest.find(filter)
             .sort({ createdAt: -1 })
@@ -528,13 +497,6 @@ const listMyDeposits = async (userId, { page = 1, limit = 20, status } = {}) => 
     };
 };
 
-/**
- * Get a single deposit request by ID.
- * Customers may only see their own; admins may see any.
- *
- * @param {string|ObjectId}      depositId
- * @param {string|ObjectId|null} [requestingUserId] - if set, enforces ownership
- */
 const getDepositById = async (depositId, requestingUserId = null) => {
     const deposit = await DepositRequest.findById(depositId)
         .populate('userId', 'name email')
@@ -549,22 +511,6 @@ const getDepositById = async (depositId, requestingUserId = null) => {
     return deposit;
 };
 
-// =============================================================================
-// UPDATE PENDING DEPOSIT
-// =============================================================================
-
-/**
- * Update a PENDING deposit request (admin editing fields).
- *
- * Guard: strictly rejects updates if the deposit is NOT in PENDING status.
- *
- * @param {string}          depositId
- * @param {Object}          data
- * @param {number}          [data.requestedAmount]
- * @param {string|ObjectId} adminId
- *
- * @returns {Promise<DepositRequest>}
- */
 const updatePendingDeposit = async (depositId, data, adminId) => {
     const deposit = await DepositRequest.findById(depositId);
     if (!deposit) throw new NotFoundError('Deposit request');
@@ -578,12 +524,21 @@ const updatePendingDeposit = async (depositId, data, adminId) => {
 
     const before = {
         requestedAmount: deposit.requestedAmount,
+        amountUsd: deposit.amountUsd,
+        usdEquivalent: deposit.usdEquivalent,
+        expectedWalletCreditAmount: deposit.expectedWalletCreditAmount,
     };
 
     if (data.requestedAmount !== undefined) {
-        deposit.requestedAmount = Number(parseFloat(data.requestedAmount).toFixed(2));
-        // Recalculate amountUsd with stored exchangeRate
-        deposit.amountUsd = Number((deposit.requestedAmount / deposit.exchangeRate).toFixed(2));
+        deposit.requestedAmount = toMoney(data.requestedAmount);
+        const sourceRate = Number(deposit.depositRateSnapshot || deposit.exchangeRate);
+        deposit.amountUsd = toMoney(deposit.requestedAmount / sourceRate);
+        deposit.usdEquivalent = Number((deposit.requestedAmount / sourceRate).toFixed(6));
+        if (deposit.currency && deposit.walletCurrency && deposit.currency === deposit.walletCurrency) {
+            deposit.expectedWalletCreditAmount = deposit.requestedAmount;
+        } else if (deposit.walletDepositRateSnapshot) {
+            deposit.expectedWalletCreditAmount = usdToLocal(deposit.usdEquivalent, deposit.walletDepositRateSnapshot);
+        }
     }
 
     await deposit.save();
@@ -599,6 +554,8 @@ const updatePendingDeposit = async (depositId, data, adminId) => {
             after: {
                 requestedAmount: deposit.requestedAmount,
                 amountUsd: deposit.amountUsd,
+                usdEquivalent: deposit.usdEquivalent,
+                expectedWalletCreditAmount: deposit.expectedWalletCreditAmount,
             },
         },
     });

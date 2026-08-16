@@ -332,6 +332,13 @@ describe('Payments base module', () => {
         expect(tx.sourceId.toString()).toBe(payment._id.toString());
         expect(tx.direction).toBe('CREDIT');
         expect(tx.idempotencyKey).toBe(`payment:${payment._id.toString()}:wallet-credit`);
+        expect(tx.metadata).toMatchObject({
+            sourceAmount: 50,
+            sourceCurrency: 'USD',
+            walletAmount: 50,
+            walletCurrency: 'USD',
+            rateType: 'deposit',
+        });
     });
 
     it('mock confirm credits only the requested wallet amount and excludes payment fees', async () => {

@@ -293,7 +293,7 @@ router.get('/currencies', authorizeRoles('ADMIN'), catchAsync(async (req, res) =
 }));
 
 router.patch('/currencies/:code', authorizeRoles('ADMIN'), validateBody(schemas.updateCurrency), catchAsync(async (req, res) => {
-    const { name, symbol, marketRate, platformRate, markupPercentage, isActive, applyDebtAdjustment } = req.body;
+    const { name, symbol, marketRate, platformRate, depositRate, purchaseRate, markupPercentage, isActive, applyDebtAdjustment } = req.body;
     const code = req.params.code.toUpperCase();
 
     // Delegate to the canonical currency service (handles debt adjustment internally)
@@ -303,6 +303,8 @@ router.patch('/currencies/:code', authorizeRoles('ADMIN'), validateBody(schemas.
         symbol,
         marketRate,
         platformRate,
+        depositRate,
+        purchaseRate,
         markupPercentage,
         isActive,
         applyDebtAdjustment,
@@ -418,7 +420,7 @@ router.patch('/deposits/:id/review', requirePermission('topups.review'), validat
 
     let deposit;
     if (status === 'APPROVED') {
-        deposit = await depositSvc.approveDeposit(id, req.user._id, auditCtx);
+        deposit = await depositSvc.approveDeposit(id, req.user._id, {}, auditCtx);
         sendSuccess(res, deposit, 'Deposit approved and wallet credited.');
     } else {
         deposit = await depositSvc.rejectDeposit(id, req.user._id, adminNotes || null, auditCtx);

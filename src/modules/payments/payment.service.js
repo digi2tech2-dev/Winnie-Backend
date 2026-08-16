@@ -27,7 +27,8 @@ const { processWalletCreditSafely } = require('../referrals/referral.service');
 const {
     convertUserCurrencyToUsd,
     convertUsdToUserCurrency,
-    getConversionRate,
+    getDepositRate,
+    RATE_PURPOSES,
 } = require('../../services/currencyConverter.service');
 const {
     LEDGER_TRANSACTION_TYPES,
@@ -205,7 +206,7 @@ const convertToConfiguredGatewayCurrency = async ({
         const normalizedGatewayCurrency = normalizeCurrency(gatewayCurrency);
 
         if (normalizedRequestedCurrency === normalizedGatewayCurrency) {
-            await getConversionRate(normalizedGatewayCurrency);
+            await getDepositRate(normalizedGatewayCurrency);
             const amount = safeRound(requestedAmount, 2);
 
             return {
@@ -218,12 +219,17 @@ const convertToConfiguredGatewayCurrency = async ({
                 requestedAmountUsd: null,
                 requestedCurrencyRate: null,
                 gatewayCurrencyRate: null,
+                rateType: RATE_PURPOSES.DEPOSIT,
                 convertedAt,
             };
         }
 
-        const usdConversion = await convertUserCurrencyToUsd(Number(requestedAmount), normalizedRequestedCurrency);
-        const gatewayConversion = await convertUsdToUserCurrency(usdConversion.usdAmount, normalizedGatewayCurrency);
+        const usdConversion = await convertUserCurrencyToUsd(Number(requestedAmount), normalizedRequestedCurrency, {
+            purpose: RATE_PURPOSES.DEPOSIT,
+        });
+        const gatewayConversion = await convertUsdToUserCurrency(usdConversion.usdAmount, normalizedGatewayCurrency, {
+            purpose: RATE_PURPOSES.DEPOSIT,
+        });
         const gatewayAmount = safeRound(gatewayConversion.finalAmount, 2);
 
         if (!Number.isFinite(gatewayAmount) || gatewayAmount <= 0) {
@@ -240,6 +246,7 @@ const convertToConfiguredGatewayCurrency = async ({
             requestedAmountUsd: usdConversion.usdAmount,
             requestedCurrencyRate: usdConversion.rate,
             gatewayCurrencyRate: gatewayConversion.rate,
+            rateType: RATE_PURPOSES.DEPOSIT,
             convertedAt,
         };
     } catch (err) {
@@ -454,6 +461,7 @@ const safePaymentMetadata = (metadata = {}) => {
             'requestedAmountUsd',
             'requestedCurrencyRate',
             'gatewayCurrencyRate',
+            'rateType',
             'convertedAt',
         ]);
     }
@@ -1170,6 +1178,14 @@ const finalizeSuccessfulPayment = async (
                     providerStatus: gatewayStatus.providerStatus || null,
                     purpose: payment.purpose,
                     source,
+                    sourceAmount: payment.totalAmount,
+                    sourceCurrency: payment.currency,
+                    walletAmount: payment.amount,
+                    walletCurrency: payment.currency,
+                    usdEquivalent: payment.metadata?.gatewayCurrencyConversion?.requestedAmountUsd ?? null,
+                    rateType: RATE_PURPOSES.DEPOSIT,
+                    depositRateSnapshot: payment.metadata?.gatewayCurrencyConversion?.requestedCurrencyRate ?? null,
+                    gatewayCurrencyConversion: payment.metadata?.gatewayCurrencyConversion || null,
                 },
                 idempotencyKey,
                 actorId: actor?.actorId || actor?._id || actor?.userId || payment.userId,

@@ -183,6 +183,8 @@ const syncRates = async (options = {}) => {
                     symbol: _getDefaultSymbol(code),
                     marketRate,
                     platformRate,
+                    depositRate: platformRate,
+                    purchaseRate: platformRate,
                     markupPercentage: 0,
                     isActive: false,  // auto-created currencies are INACTIVE by default
                     lastUpdatedAt: syncedAt,

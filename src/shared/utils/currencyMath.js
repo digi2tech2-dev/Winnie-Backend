@@ -8,20 +8,17 @@ const { toDecimal, toFiat } = require('./decimalPrecision');
  * All functions use toFixed(2) rounding to avoid floating-point drift
  * in financial calculations.
  *
- * Rate convention:  1 USD = <platformRate> units of local currency.
- *   USD platformRate = 1
- *   EGP platformRate = 50  (1 USD = 50 EGP)
- *   SAR platformRate = 3.75
+ * Rate convention:  1 USD = <rate> units of local currency.
  */
 
 /**
- * Convert a balance from one currency to another using their platform rates.
+ * Convert a balance from one currency to another using compatible rates.
  *
  * Formula: newBalance = (currentBalance / oldRate) * newRate
  *
  * @param {number} balance - Current balance in old currency
- * @param {number} oldRate - platformRate of the old currency (e.g. 50 for EGP)
- * @param {number} newRate - platformRate of the new currency (e.g. 1 for USD)
+ * @param {number} oldRate - rate of the old currency (e.g. 50 for EGP)
+ * @param {number} newRate - rate of the new currency (e.g. 1 for USD)
  * @returns {number} Converted balance, rounded to 2 decimal places
  *
  * @example
@@ -41,7 +38,7 @@ const convertBalance = (balance, oldRate, newRate) => {
  * Convert a USD amount to a local currency amount.
  *
  * @param {number} usdAmount - Amount in USD
- * @param {number} rate      - platformRate of the target currency
+ * @param {number} rate      - rate of the target currency
  * @returns {number} Amount in local currency, rounded to 2 decimal places
  *
  * @example
@@ -56,7 +53,7 @@ const usdToLocal = (usdAmount, rate) => {
  * Convert a local currency amount back to USD.
  *
  * @param {number} localAmount - Amount in local currency
- * @param {number} rate        - platformRate of the source currency
+ * @param {number} rate        - rate of the source currency
  * @returns {number} Amount in USD, rounded to 6 decimal places (precision)
  *
  * @example
@@ -69,4 +66,9 @@ const localToUsd = (localAmount, rate) => {
     return Number(toDecimal(localAmount).dividedBy(toDecimal(rate)).toDecimalPlaces(6).toNumber());
 };
 
-module.exports = { convertBalance, usdToLocal, localToUsd };
+const convertLocalThroughUsd = (localAmount, sourceRate, targetRate) => {
+    const usdEquivalent = localToUsd(localAmount, sourceRate);
+    return usdToLocal(usdEquivalent, targetRate);
+};
+
+module.exports = { convertBalance, usdToLocal, localToUsd, convertLocalThroughUsd };

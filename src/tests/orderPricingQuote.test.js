@@ -3,6 +3,7 @@
 const orderService = require('../modules/orders/order.service');
 const { Currency } = require('../modules/currency/currency.model');
 const { Order } = require('../modules/orders/order.model');
+const { invalidateCurrencyCache } = require('../services/currencyConverter.service');
 const { buildCustomerPricingFields, calculateDiscount } = require('../modules/products/customerPricingPresenter');
 const {
     connectTestDB,
@@ -36,6 +37,7 @@ describe('High precision order quote pricing', () => {
             platformRate: 51,
             isActive: true,
         });
+        invalidateCurrencyCache('EGP');
     });
 
     it('quotes a high precision synced product in customer currency', async () => {
@@ -77,6 +79,37 @@ describe('High precision order quote pricing', () => {
         expect(quote.quantityErrorCode).toBeNull();
         expect(quote.quantityErrorMessage).toBeNull();
         expect(quote.canSubmit).toBe(true);
+    });
+
+    it('uses purchaseRate for quotes and ignores depositRate', async () => {
+        await Currency.updateOne(
+            { code: 'EGP' },
+            { $set: { platformRate: 51, depositRate: 40, purchaseRate: 52 } }
+        );
+        invalidateCurrencyCache('EGP');
+        const customer = await createCustomer({
+            groupId: group._id,
+            currency: 'EGP',
+            walletBalance: 1000,
+        });
+        const product = await createProduct({
+            name: 'Purchase Rate Product',
+            basePrice: '10',
+            finalPrice: '10',
+            minQty: 1,
+            maxQty: 10,
+        });
+
+        const quote = await orderService.quoteOrder({
+            userId: customer._id,
+            productId: product._id,
+            quantity: 1,
+        });
+
+        expect(quote.rateSnapshot).toBe(52);
+        expect(quote.purchaseRateSnapshot).toBe(52);
+        expect(quote.rateType).toBe('purchase');
+        expect(quote.chargedAmount).toBe(520);
     });
 
     it('quotes below minQty with price and quantity validity flags', async () => {
@@ -203,6 +236,9 @@ describe('High precision order quote pricing', () => {
         expect(fields.minTotalUsd).toBe('1.0780225539945481');
         expect(fields.minTotalCustomerCurrency).toBe(54.98);
         expect(fields.displayPriceLabel).toBe('10,000 = EGP 54.98');
+        expect(fields.purchaseRateSnapshot).toBe(51);
+        expect(fields.exchangeRate).toBe(51);
+        expect(fields.rateType).toBe('purchase');
         expect(fields.hasDiscount).toBe(false);
         expect(fields.discountPercent).toBe(0);
     });

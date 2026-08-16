@@ -5,6 +5,8 @@ const depositService = require('./deposit.service');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { BusinessRuleError } = require('../../shared/errors/AppError');
+const { getDepositRate } = require('../../services/currencyConverter.service');
+const { localToUsd, usdToLocal } = require('../../shared/utils/currencyMath');
 
 /**
  * POST /api/deposits
@@ -37,11 +39,18 @@ const createDeposit = catchAsync(async (req, res) => {
         );
     }
 
-    const exchangeRate = currencyDoc.platformRate;
+    const depositRateSnapshot = Number(currencyDoc.depositRate || currencyDoc.platformRate);
+    const exchangeRate = depositRateSnapshot;
 
     // ── Calculate USD equivalent ─────────────────────────────────────────
     const parsedAmount = parseFloat(requestedAmount);
-    const amountUsd = Number((parsedAmount / exchangeRate).toFixed(2));
+    const usdEquivalent = localToUsd(parsedAmount, depositRateSnapshot);
+    const amountUsd = Number(usdEquivalent.toFixed(2));
+    const walletCurrency = String(req.user.currency || 'USD').toUpperCase();
+    const walletDepositRateSnapshot = await getDepositRate(walletCurrency);
+    const expectedWalletCreditAmount = currency.toUpperCase() === walletCurrency
+        ? Number(parsedAmount.toFixed(2))
+        : usdToLocal(usdEquivalent, walletDepositRateSnapshot);
 
     // ── Build relative receipt path ──────────────────────────────────────
     // req.file.path is absolute; we store only the relative part.
@@ -55,6 +64,13 @@ const createDeposit = catchAsync(async (req, res) => {
         currency: currency.toUpperCase(),
         exchangeRate,
         amountUsd,
+        depositRateSnapshot,
+        walletCurrency,
+        walletDepositRateSnapshot,
+        expectedWalletCreditAmount,
+        usdEquivalent,
+        rateType: 'deposit',
+        legacyFallback: false,
         receiptImage,
         notes: notes || null,
         antiScamConfirmed,
@@ -96,6 +112,7 @@ const approveDeposit = catchAsync(async (req, res) => {
     const deposit = await depositService.approveDeposit(
         id,
         req.user._id,
+        {},
         req.auditContext
     );
 
@@ -134,6 +151,7 @@ const reviewDeposit = catchAsync(async (req, res) => {
         deposit = await depositService.approveDeposit(
             id,
             req.user._id,
+            {},
             req.auditContext
         );
         sendSuccess(res, deposit, 'Deposit approved and wallet credited successfully.');

@@ -100,6 +100,11 @@ const createHistoricalPayment = (customer, amount = 25) => (
         totalAmount: amount,
         currency: 'USD',
         status: PAYMENT_STATUSES.REQUIRES_ACTION,
+        gatewayCreated: true,
+        gatewayCreatedAt: new Date(),
+        gatewayPaymentId: `mock_${Date.now()}`,
+        gatewayReference: `mock_ref_${Date.now()}`,
+        checkoutUrl: 'http://localhost:5173/mock-payment/historical',
     })
 );
 
