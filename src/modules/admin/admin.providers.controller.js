@@ -189,6 +189,16 @@ const getFazerCardsCatalogSummary = catchAsync(async (req, res) => {
     sendSuccess(res, data, 'FazerCards catalog summary retrieved');
 });
 
+const refreshFazerCardsSteamGiftGameIndex = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.refreshSteamGiftGameIndex();
+    sendSuccess(res, data, 'FazerCards Steam Gifts game index refreshed');
+});
+
+const searchFazerCardsSteamGiftGameIndex = catchAsync(async (req, res) => {
+    const data = await fazerCardsCatalogSvc.searchSteamGiftGameIndex(req.query);
+    sendSuccess(res, data, 'FazerCards Steam Gifts game index searched');
+});
+
 const getFazerCardsLaunchHealth = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.getLaunchHealth();
     sendSuccess(res, data, 'FazerCards launch health retrieved');
@@ -409,6 +419,8 @@ module.exports = {
     syncFazerCardsCatalogAll,
     getFazerCardsCatalogSyncStatus,
     getFazerCardsCatalogSummary,
+    refreshFazerCardsSteamGiftGameIndex,
+    searchFazerCardsSteamGiftGameIndex,
     getFazerCardsLaunchHealth,
     listFazerCardsWebhookDeliveries,
     listFazerCardsContracts,

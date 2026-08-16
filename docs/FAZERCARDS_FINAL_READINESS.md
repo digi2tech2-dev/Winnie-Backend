@@ -224,6 +224,21 @@ Broad auto-provider go-live should wait until controlled live tests confirm real
 - Bulk catalog behavior: sync-all still does not broad-sync Steam Gifts or fetch the 174986-game catalog.
 - Remaining risks: no live Steam Gift order has been validated yet; invite-link recipient and region behavior must be confirmed with one controlled test.
 
+### Steam Gifts Game Index
+
+- Admin-only local index: `FazerCardsSteamGiftGameIndex`.
+- Stored fields: game `name`, numeric `appid`, normalized search name, provider/source, `lastSeenAt`, and `indexedAt`.
+- Index refresh endpoint: `POST /api/admin/providers/fazercards/steam-gifts/index/refresh`.
+- Search endpoint: `GET /api/admin/providers/fazercards/steam-gifts/index/search?q=&limit=20`.
+- Refresh calls only `GET /api/v2/steam-gifts/games` once and upserts game names/AppIDs only.
+- Refresh does not create ProviderProducts, Winnie Products, Orders, or provider order payloads.
+- Search is local-only and never calls FazerCards on each keystroke/search request.
+- AppID details remain on-demand through `POST /api/admin/providers/fazercards/catalog/sync-family` with `family=STEAM_GIFTS` and explicit `appid`.
+- On-demand details call only `GET /api/v2/steam-gifts/games/{appid}` and normalize offer-region rows into ProviderProducts.
+- Sync-all still skips Steam Gifts broad discovery.
+- Provider rate limit: Steam Gifts games list is 1 request per 3 minutes per API key, so index refresh is explicit admin action only and rate-protected.
+- Optional safety config: `FAZERCARDS_STEAM_GIFTS_INDEX_MAX_RESULTS` may cap refresh size; unset means the explicit admin refresh can request the full provider list.
+
 ## Contract Consistency Check
 
 Every family contract now explicitly carries:

@@ -503,6 +503,11 @@ const fazerCardsCatalogSyncAllSchema = Joi.object({
     includeSteamGifts: Joi.boolean().default(false),
 });
 
+const fazerCardsSteamGiftIndexSearchSchema = Joi.object({
+    q: Joi.string().trim().max(120).allow('', null),
+    limit: Joi.number().integer().min(1).max(50).default(20),
+});
+
 const fazerCardsTopupDryRunSchema = Joi.object({
     productId: objectId().required().messages({
         'any.required': 'productId is required',
@@ -782,6 +787,7 @@ module.exports = {
         fazerCardsCatalogSync: fazerCardsCatalogSyncSchema,
         fazerCardsCatalogSyncFamily: fazerCardsCatalogSyncFamilySchema,
         fazerCardsCatalogSyncAll: fazerCardsCatalogSyncAllSchema,
+        fazerCardsSteamGiftIndexSearch: fazerCardsSteamGiftIndexSearchSchema,
         fazerCardsTopupDryRun: fazerCardsTopupDryRunSchema,
         fazerCardsUnifiedDryRun: fazerCardsUnifiedDryRunSchema,
         fazerCardsCodeDeliveryDryRun: fazerCardsCodeDeliveryDryRunSchema,

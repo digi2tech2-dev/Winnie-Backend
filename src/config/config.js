@@ -137,6 +137,9 @@ const config = {
                 : parseFloat(process.env.FAZERCARDS_CODE_DELIVERY_MAX_ORDER_USD),
             webhookEnabled: process.env.FAZERCARDS_WEBHOOK_ENABLED === 'true',
             webhookSecret: process.env.FAZERCARDS_WEBHOOK_SECRET || '',
+            steamGiftsIndexMaxResults: process.env.FAZERCARDS_STEAM_GIFTS_INDEX_MAX_RESULTS === undefined
+                ? null
+                : parseInt(process.env.FAZERCARDS_STEAM_GIFTS_INDEX_MAX_RESULTS, 10),
             blockedRegions: (process.env.FAZERCARDS_BLOCKED_REGIONS || 'RU,RUSSIA,CIS')
                 .split(',')
                 .map((region) => region.trim().toUpperCase())

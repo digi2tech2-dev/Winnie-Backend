@@ -28,6 +28,7 @@ const { FazerCardsClient } = require('../modules/providers/fazercards/fazercards
 const { ProviderDeliveredCode } = require('../modules/providers/fazercards/providerDeliveredCode.model');
 const { ProviderPilotOrder } = require('../modules/providers/fazercards/providerPilotOrder.model');
 const { FazerCardsWebhookEvent } = require('../modules/providers/fazercards/fazercardsWebhookEvent.model');
+const { FazerCardsSteamGiftGameIndex } = require('../modules/providers/fazercards/fazerCardsSteamGiftGameIndex.model');
 const { decryptSecret, isEncryptedSecret } = require('../shared/utils/secretEncryption');
 const {
     FazerCardsAdapter,
@@ -653,6 +654,7 @@ beforeEach(async () => {
     config.providers.fazerCards.codeDeliveryMaxOrderUsd = 3.00;
     config.providers.fazerCards.webhookEnabled = false;
     config.providers.fazerCards.webhookSecret = '';
+    config.providers.fazerCards.steamGiftsIndexMaxResults = null;
     config.providers.fazerCards.blockedRegions = ['RU', 'RUSSIA', 'CIS'];
     axios.create.mockReset();
     await clearCollections();
@@ -2128,6 +2130,108 @@ describe('FazerCards multi-family catalog discovery', () => {
                 statusCode: 400,
                 errors: [expect.objectContaining({ field: 'appid' })],
             });
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the Steam Gifts game index from the read-only game list once without creating ProviderProducts', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        config.providers.fazerCards.steamGiftsIndexMaxResults = 10;
+        client.request.mockResolvedValueOnce({
+            status: 200,
+            headers: { 'x-request-id': 'req-steam-index' },
+            data: {
+                ok: true,
+                games: [
+                    { appid: 730, name: 'Counter-Strike 2' },
+                    { appid: 570, name: 'Dota 2' },
+                    { appid: null, name: 'Broken Game' },
+                ],
+                meta: { total: 174986, returned: 3, truncated: true },
+            },
+        });
+
+        const result = await fazerCardsCatalogSvc.refreshSteamGiftGameIndex();
+        const indexed = await FazerCardsSteamGiftGameIndex.find({}).sort({ appid: 1 }).lean();
+
+        expect(result).toMatchObject({
+            success: true,
+            familyKey: 'STEAM_GIFTS',
+            total: 174986,
+            returned: 3,
+            upserted: 2,
+            skipped: 1,
+            partial: true,
+            maxResults: 10,
+            requestId: 'req-steam-index',
+        });
+        expect(indexed.map((item) => ({ appid: item.appid, name: item.name, normalizedName: item.normalizedName, rawSanitized: item.rawSanitized }))).toEqual([
+            { appid: 570, name: 'Dota 2', normalizedName: 'dota 2', rawSanitized: null },
+            { appid: 730, name: 'Counter-Strike 2', normalizedName: 'counter strike 2', rawSanitized: null },
+        ]);
+        expect(client.request).toHaveBeenCalledTimes(1);
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'get',
+            url: '/steam-gifts/games',
+            params: { limit: 10 },
+        }));
+        const urls = client.request.mock.calls.map(([call]) => String(call.url));
+        expect(urls.some((url) => /\/steam-gifts\/games\/\d+/.test(url))).toBe(false);
+        expect(urls.some((url) => String(url).includes('/order'))).toBe(false);
+        expect(await ProviderProduct.countDocuments({ familyKey: 'STEAM_GIFTS' })).toBe(0);
+        expect(await Product.countDocuments({})).toBe(0);
+        expect(await Order.countDocuments({})).toBe(0);
+    });
+
+    it('rate-limits Steam Gifts index refresh using the latest indexed timestamp', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        await FazerCardsSteamGiftGameIndex.create({
+            appid: 730,
+            name: 'Counter-Strike 2',
+            normalizedName: 'counter strike 2',
+            indexedAt: new Date(),
+            lastSeenAt: new Date(),
+        });
+
+        await expect(fazerCardsCatalogSvc.refreshSteamGiftGameIndex())
+            .rejects.toMatchObject({ code: 'FAZERCARDS_STEAM_GIFTS_INDEX_RATE_LIMITED' });
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('searches the local Steam Gifts game index by appid or game name without provider calls', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        await FazerCardsSteamGiftGameIndex.create([
+            { appid: 730, name: 'Counter-Strike 2', normalizedName: 'counter strike 2' },
+            { appid: 1245620, name: 'ELDEN RING', normalizedName: 'elden ring' },
+        ]);
+
+        const byAppId = await fazerCardsCatalogSvc.searchSteamGiftGameIndex({ q: '730', limit: 20 });
+        const byName = await fazerCardsCatalogSvc.searchSteamGiftGameIndex({ q: 'elden', limit: 20 });
+
+        expect(byAppId).toMatchObject({
+            indexEmpty: false,
+            items: [expect.objectContaining({ appid: 730, name: 'Counter-Strike 2' })],
+        });
+        expect(byName).toMatchObject({
+            indexEmpty: false,
+            items: [expect.objectContaining({ appid: 1245620, name: 'ELDEN RING' })],
+        });
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('returns a clean empty-index response for Steam Gifts local search', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const result = await fazerCardsCatalogSvc.searchSteamGiftGameIndex({ q: 'counter', limit: 20 });
+
+        expect(result).toMatchObject({
+            indexEmpty: true,
+            items: [],
+            message: 'Steam Gifts index is empty. Refresh the index or enter AppID manually.',
+        });
         expect(client.request).not.toHaveBeenCalled();
     });
 

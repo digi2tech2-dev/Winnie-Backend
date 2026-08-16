@@ -26,6 +26,7 @@ const { getFazerCardsFamily, listFazerCardsFamilies } = require('./fazercardsFam
 const fazerCardsContracts = require('./fazercardsContracts');
 const { ProviderDeliveredCode, DELIVERY_STATUSES } = require('./providerDeliveredCode.model');
 const { ProviderPilotOrder } = require('./providerPilotOrder.model');
+const { FazerCardsSteamGiftGameIndex } = require('./fazerCardsSteamGiftGameIndex.model');
 const {
     sanitizeProviderCodePayload,
     storeDeliveredCodesForOrder,
@@ -74,6 +75,9 @@ const UNIMPLEMENTED_FAMILY_BLOCK_REASONS = Object.freeze({
 const IMPORTED_PRODUCT_LAUNCH_SELECT = '_id name externalProductId providerProduct isActive visibleInStore status customerPurchaseEnabled providerExecutionMode providerExecutionEnabled providerExecutionBlocked providerBlockReason familyKey fulfillmentMode orderFields dynamicFields';
 let syncAllInProgress = false;
 let lastSyncAllSummary = null;
+let steamGiftIndexRefreshInProgress = false;
+
+const STEAM_GIFT_INDEX_RATE_LIMIT_MS = 3 * 60 * 1000;
 
 const buildCustomerVisibilityStatus = (product = {}) => {
     const status = String(product?.status || '').trim().toLowerCase();
@@ -367,6 +371,15 @@ const parseNumber = (value, fallback = null) => {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
 };
+
+const normalizeSteamGiftGameName = (value) => String(value || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const normalizeMeta = (data = {}, params = {}) => ({
     total: data?.meta?.total ?? data?.total ?? null,
@@ -843,6 +856,150 @@ const emptySyncFamilyResult = (familyKey, overrides = {}) => {
         errors: [],
         catalogOnly: family?.executionAvailable !== true,
         ...overrides,
+    };
+};
+
+const getSteamGiftIndexMaxResults = () => {
+    const configured = parseInt(config.providers.fazerCards.steamGiftsIndexMaxResults, 10);
+    return Number.isFinite(configured) && configured > 0 ? configured : null;
+};
+
+const extractSteamGiftIndexGames = (data = {}) => {
+    if (Array.isArray(data?.games)) return data.games;
+    if (Array.isArray(data?.items)) return data.items;
+    if (Array.isArray(data?.data?.games)) return data.data.games;
+    if (Array.isArray(data)) return data;
+    return [];
+};
+
+const summarizeSteamGiftIndexItem = (item = {}) => ({
+    appid: item.appid,
+    name: item.name,
+    indexedAt: item.indexedAt,
+    lastSeenAt: item.lastSeenAt,
+});
+
+const refreshSteamGiftGameIndex = async (options = {}, adapterOptions = {}) => {
+    if (steamGiftIndexRefreshInProgress) {
+        throw new BusinessRuleError('Steam Gifts index refresh is already running.', 'FAZERCARDS_STEAM_GIFTS_INDEX_REFRESH_IN_PROGRESS');
+    }
+
+    const latest = await FazerCardsSteamGiftGameIndex.findOne({ provider: PROVIDER_CODES.FAZER_CARDS })
+        .sort({ indexedAt: -1 })
+        .select('indexedAt')
+        .lean();
+    const now = new Date();
+    if (latest?.indexedAt && now.getTime() - new Date(latest.indexedAt).getTime() < STEAM_GIFT_INDEX_RATE_LIMIT_MS) {
+        throw new BusinessRuleError('Steam Gifts index refresh is rate-limited. Try again later.', 'FAZERCARDS_STEAM_GIFTS_INDEX_RATE_LIMITED');
+    }
+
+    steamGiftIndexRefreshInProgress = true;
+    try {
+        const adapter = new FazerCardsAdapter(adapterOptions);
+        const maxResults = getSteamGiftIndexMaxResults();
+        const params = maxResults ? { limit: maxResults } : {};
+        const response = await adapter.fetchSteamGiftGames(params);
+        const games = extractSteamGiftIndexGames(response.data);
+        const operations = [];
+        let skipped = 0;
+
+        for (const game of games) {
+            const appid = parseNumber(firstValue(game.appid, game.app_id, game.id), null);
+            const name = String(firstValue(game.name, game.title, '')).trim();
+            if (!Number.isInteger(appid) || appid <= 0 || !name) {
+                skipped++;
+                continue;
+            }
+            operations.push({
+                updateOne: {
+                    filter: { appid },
+                    update: {
+                        $set: {
+                            appid,
+                            name,
+                            normalizedName: normalizeSteamGiftGameName(name),
+                            provider: PROVIDER_CODES.FAZER_CARDS,
+                            source: 'steam-gifts',
+                            lastSeenAt: now,
+                            indexedAt: now,
+                            rawSanitized: null,
+                        },
+                    },
+                    upsert: true,
+                },
+            });
+        }
+
+        let upsertedCount = 0;
+        let modifiedCount = 0;
+        const chunkSize = 1000;
+        for (let index = 0; index < operations.length; index += chunkSize) {
+            const result = await FazerCardsSteamGiftGameIndex.bulkWrite(operations.slice(index, index + chunkSize), { ordered: false });
+            upsertedCount += result.upsertedCount || 0;
+            modifiedCount += result.modifiedCount || 0;
+        }
+
+        const meta = response.data?.meta || {};
+        const warning = meta.truncated === true || (maxResults && games.length >= maxResults)
+            ? 'Steam Gifts index refresh was partial/truncated.'
+            : null;
+
+        return {
+            success: true,
+            familyKey: 'STEAM_GIFTS',
+            total: meta.total ?? null,
+            returned: meta.returned ?? games.length,
+            upserted: upsertedCount,
+            updated: modifiedCount,
+            skipped,
+            indexedAt: now,
+            warning,
+            partial: Boolean(warning),
+            maxResults,
+            requestId: response.requestId || null,
+        };
+    } finally {
+        steamGiftIndexRefreshInProgress = false;
+    }
+};
+
+const searchSteamGiftGameIndex = async ({ q = '', limit = 20 } = {}) => {
+    const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50);
+    const query = String(q || '').trim();
+    const totalIndexed = await FazerCardsSteamGiftGameIndex.countDocuments({ provider: PROVIDER_CODES.FAZER_CARDS });
+
+    if (totalIndexed === 0) {
+        return {
+            items: [],
+            indexEmpty: true,
+            message: 'Steam Gifts index is empty. Refresh the index or enter AppID manually.',
+            query,
+            limit: normalizedLimit,
+        };
+    }
+
+    const normalizedQuery = normalizeSteamGiftGameName(query);
+    const filter = { provider: PROVIDER_CODES.FAZER_CARDS };
+    if (query) {
+        const numericAppId = /^\d+$/.test(query) ? Number(query) : null;
+        if (numericAppId) {
+            filter.appid = numericAppId;
+        } else if (normalizedQuery) {
+            filter.normalizedName = { $regex: escapeRegex(normalizedQuery), $options: 'i' };
+        }
+    }
+
+    const items = await FazerCardsSteamGiftGameIndex.find(filter)
+        .sort(query && /^\d+$/.test(query) ? { appid: 1 } : { normalizedName: 1, appid: 1 })
+        .limit(normalizedLimit)
+        .lean();
+
+    return {
+        items: items.map(summarizeSteamGiftIndexItem),
+        indexEmpty: false,
+        message: '',
+        query,
+        limit: normalizedLimit,
     };
 };
 
@@ -4204,6 +4361,8 @@ module.exports = {
     syncAllCatalogFamilies,
     getCatalogSyncStatus,
     getCatalogSummary,
+    refreshSteamGiftGameIndex,
+    searchSteamGiftGameIndex,
     getLaunchHealth,
     backfillLegacyFamilies,
     listProviderProducts,

@@ -475,6 +475,11 @@ class FazerCardsAdapter extends BaseProviderAdapter {
         return { data, requestId, status };
     }
 
+    async fetchSteamGiftGames(params = {}) {
+        const { data, requestId, status } = await this.client.listSteamGiftGames(params);
+        return { data, requestId, status };
+    }
+
     normalizeTopupOfferProduct(input) {
         return normalizeTopupOfferProduct(input, this.options);
     }
