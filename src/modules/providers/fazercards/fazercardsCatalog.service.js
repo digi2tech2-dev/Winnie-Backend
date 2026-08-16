@@ -9,7 +9,7 @@ const { Order, ORDER_STATUS } = require('../../orders/order.model');
 const { refundFailedOrder } = require('../../orders/orderFulfillment.service');
 const { Currency } = require('../../currency/currency.model');
 const { PROVIDER_CODES } = require('../provider.constants');
-const { BusinessRuleError, ConflictError, NotFoundError } = require('../../../shared/errors/AppError');
+const { BusinessRuleError, ConflictError, NotFoundError, ValidationError } = require('../../../shared/errors/AppError');
 const {
     FazerCardsAdapter,
     extractTopupIdentifiers,
@@ -684,12 +684,14 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName 
     if (family.familyKey === 'STEAM_GIFTS') {
         const appId = String(appid || '').trim();
         if (!appId) {
-            throw new BusinessRuleError(
-                'Steam Gifts sync requires an explicit appid. Broad Steam Gifts catalog sync is intentionally disabled.',
-                'FAZERCARDS_STEAM_GIFTS_APPID_REQUIRED'
+            const error = new ValidationError(
+                'Steam Gifts requires an AppID for on-demand sync.',
+                [{ field: 'appid', message: 'اكتب AppID أولاً لمزامنة Steam Gifts' }]
             );
+            error.code = 'FAZERCARDS_STEAM_GIFTS_APPID_REQUIRED';
+            throw error;
         }
-        const details = await adapter.fetchCatalogPath(`/steam-gifts/games/${encodeURIComponent(appId)}`, {}, 'steam_gifts_game_details');
+        const details = await adapter.fetchSteamGiftGame(appId);
         const game = { appid: appId, name: String(gameName || '').trim() || details.data?.name || `Steam App ${appId}` };
         const products = normalizeSteamGiftProducts(game, details.data);
         return {

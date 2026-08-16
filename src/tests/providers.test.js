@@ -2122,7 +2122,12 @@ describe('FazerCards multi-family catalog discovery', () => {
         axios.create.mockReturnValue(client);
 
         await expect(fazerCardsCatalogSvc.syncCatalogFamily({ family: 'STEAM_GIFTS', limit: 10 }))
-            .rejects.toMatchObject({ code: 'FAZERCARDS_STEAM_GIFTS_APPID_REQUIRED' });
+            .rejects.toMatchObject({
+                code: 'FAZERCARDS_STEAM_GIFTS_APPID_REQUIRED',
+                message: 'Steam Gifts requires an AppID for on-demand sync.',
+                statusCode: 400,
+                errors: [expect.objectContaining({ field: 'appid' })],
+            });
         expect(client.request).not.toHaveBeenCalled();
     });
 
