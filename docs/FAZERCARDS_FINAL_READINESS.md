@@ -25,8 +25,6 @@ Ready for controlled live testing, with gates still required:
 - `TELEGRAM`
 - `STEAM_TOPUP`
 - `STEAM_GIFTS` after explicit appid/offer-region import
-
-Contract/dry-run ready but not ready for auto-provider launch:
 - `MANUAL_SERVICES`
 
 Disabled/unavailable:
@@ -41,10 +39,10 @@ Broad auto-provider go-live should wait until controlled live tests confirm real
 | `TOPUPS` | Implemented | Confirmed | Implemented | No | Yes, gated | Yes when admin publishes | Controlled-live candidate |
 | `GIFTCARDS` | Implemented | Confirmed | Implemented | Encrypted `ProviderDeliveredCode` | Yes, gated | Yes when admin publishes | Controlled-live candidate |
 | `GAME_KEYS` | Implemented | Confirmed | Implemented | Encrypted `ProviderDeliveredCode` | Yes, gated | Yes when admin publishes | Controlled-live candidate |
-| `TELEGRAM` | Implemented | Confirmed for Stars/Premium | Generic hooks ready | No | Explicit product-level only, excluded from bulk auto | Yes when admin publishes | Controlled-live candidate |
-| `STEAM_TOPUP` | Implemented | Confirmed with check-login preflight | Generic hooks ready | No | Explicit product-level only, excluded from bulk auto | Yes when admin publishes | Controlled-live candidate, high risk |
-| `MANUAL_SERVICES` | Implemented | Confirmed for provider order; chat message-only | Generic status and chat hooks ready | No | No | Yes as team/manual flow | Dry-run ready, operations workflow pending |
-| `STEAM_GIFTS` | Read-only access confirmed; appid/on-demand sync only | Confirmed | Generic hooks ready | No | Explicit product-level only, excluded from bulk auto | Yes when admin publishes one on-demand product | Controlled-live candidate, no broad sync |
+| `TELEGRAM` | Implemented | Confirmed for Stars/Premium | Generic hooks ready | No | Yes, gated | Yes when admin publishes | Controlled-live candidate |
+| `STEAM_TOPUP` | Implemented | Confirmed with check-login preflight | Generic hooks ready | No | Yes, gated | Yes when admin publishes | Controlled-live candidate, high risk |
+| `MANUAL_SERVICES` | Implemented | Confirmed for provider order; chat message-only | Generic status and chat hooks ready | No | Yes, gated | Yes when admin publishes | Controlled-live candidate; attachment support still needs verify |
+| `STEAM_GIFTS` | Read-only access confirmed; appid/on-demand sync only | Confirmed | Generic hooks ready | No | Yes, gated | Yes when admin publishes one on-demand product | Controlled-live candidate, no broad sync |
 
 ## A) TOPUPS
 
@@ -146,8 +144,8 @@ Broad auto-provider go-live should wait until controlled live tests confirm real
 
 - Async behavior: provider debits immediately; local status should rely on initial response, status sync, and webhook updates.
 - Status/webhook handling: generic parser can process completed/processing/failed/unknown; no code delivery expected.
-- Auto readiness: explicit product-level `AUTO_PROVIDER` can be enabled only after readiness passes and env gates are enabled externally; Telegram remains excluded from bulk auto.
-- Why still not bulk-enabled: no controlled Telegram live validation has confirmed order creation/status/webhook behavior for this account.
+- Auto readiness: `AUTO_PROVIDER` can be enabled only after readiness passes and env gates are enabled externally. Bulk auto may include Telegram, but broken products are skipped/failed by the family guard.
+- Remaining risks: no controlled Telegram live validation has confirmed order creation/status/webhook behavior for this account.
 
 ## E) STEAM_TOPUP
 
@@ -168,7 +166,7 @@ Broad auto-provider go-live should wait until controlled live tests confirm real
 
 - Check-login requirement: future auto execution must run `check-login` successfully before order creation.
 - Async/status/webhook behavior: generic status and webhook parser can update local orders safely.
-- Auto readiness: explicit product-level `AUTO_PROVIDER` can be enabled only after readiness passes, including `steamLogin` field and currency/amount metadata; Steam Topup remains excluded from bulk auto.
+- Auto readiness: `AUTO_PROVIDER` can be enabled only after readiness passes, including `steamLogin` field and currency/amount metadata. Bulk auto may include Steam Topup, but check-login and provider order execution remain gated.
 - Why high-risk: wrong Steam login can deliver value to the wrong recipient; account/login precheck must be verified live before broad automation.
 
 ## F) MANUAL_SERVICES
@@ -195,7 +193,8 @@ Broad auto-provider go-live should wait until controlled live tests confirm real
 ```
 
 - Webhook/chat behavior: `manual_service.chat.message` and `manual_service.chat.waiting_reply` create safe admin notes/diagnostics; raw provider chat is not exposed to customers.
-- Why team/manual by default: provider-side manual service automation needs an operations workflow decision before auto execution.
+- Auto readiness: `AUTO_PROVIDER` can be enabled only after readiness passes, including `manual_service_id`, `product_id`, copied customer fields, valid cost, and provider gates.
+- Remaining risks: attachment chat/upload support remains `NEEDS_VERIFY`; message-only chat and status/webhook diagnostics are available for basic provider order automation.
 
 ## G) STEAM_GIFTS
 
@@ -221,8 +220,8 @@ Broad auto-provider go-live should wait until controlled live tests confirm real
 - Required customer field: `invite_url` / Steam invite link.
 - Required provider identifiers: `app_id`, `sub_id`, `region`.
 - Example normalized ProviderProduct id: `FAZER_STEAM_GIFT:730:54029:CIS`.
-- Auto readiness: controlled-live candidate only. Product-level `AUTO_PROVIDER` can be enabled after appid/offer-region import, customer field readiness, cost/balance/max guard checks, and env gates are enabled externally.
-- Bulk auto behavior: excluded from bulk auto and sync-all broad discovery.
+- Auto readiness: `AUTO_PROVIDER` can be enabled after appid/offer-region import, customer field readiness, cost/balance/max guard checks, and env gates are enabled externally. Bulk auto may include Steam Gifts, but only explicit appid/on-demand imported products can pass readiness.
+- Bulk catalog behavior: sync-all still does not broad-sync Steam Gifts or fetch the 174986-game catalog.
 - Remaining risks: no live Steam Gift order has been validated yet; invite-link recipient and region behavior must be confirmed with one controlled test.
 
 ## Contract Consistency Check
@@ -256,23 +255,20 @@ Response parsers:
 
 ## Auto Provider Rules
 
-Bulk auto allowed only:
-- `TOPUPS`
-- `GIFTCARDS`
-- `GAME_KEYS`
-
-Explicit product-level controlled auto candidates:
+Bulk auto allowed for all supported documented families that pass readiness:
 - `TOPUPS`
 - `GIFTCARDS`
 - `GAME_KEYS`
 - `TELEGRAM`
 - `STEAM_TOPUP`
 - `STEAM_GIFTS`
+- `MANUAL_SERVICES`
 
 Blocked from auto-provider:
-- `MANUAL_SERVICES`: provider order/chat exists, but team workflow remains the default.
+- `UNKNOWN`
+- Any product/family failing readiness checks: missing identifiers, missing required customer fields, invalid/missing cost, unsupported/blocked ProviderProduct, hidden/inactive/unavailable product, or unsupported execution mode.
 
-Bulk auto launch uses the same contract guard, so Telegram, Steam Topup, Steam Gifts, and Manual Services cannot be bulk-enabled accidentally.
+Bulk auto launch uses the same contract guard as product-level enablement, so it can include every supported family without blindly enabling broken products.
 
 ## Dynamic Fields Verification
 
@@ -321,4 +317,4 @@ Next controlled live order sequence:
 2. GameKeys low-value order.
 3. Topups with a known valid game/account ID.
 
-Keep Telegram, Steam Topup, and Steam Gifts out of bulk auto-provider launch until a dedicated live validation phase confirms each provider flow end-to-end. Manual Services should remain team-managed until its operations workflow is approved.
+Bulk auto can include all supported families after admin action, but keep environment gates disabled until controlled live validation confirms each provider flow end-to-end. Steam Gifts remains explicit appid/on-demand only for catalog sync, Steam Topup requires check-login before order creation, Telegram is asynchronous and relies on status/webhooks, and Manual Services attachment upload remains `NEEDS_VERIFY`.

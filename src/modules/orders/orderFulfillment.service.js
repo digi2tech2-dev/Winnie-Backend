@@ -256,7 +256,7 @@ const isFazerCardsCodeDeliveryOrder = (product = {}, providerProduct = {}) => {
         && ['GIFTCARDS', 'GAME_KEYS'].includes(String(safeProviderProduct.familyKey || safeProduct.familyKey || '').trim().toUpperCase());
 };
 
-const FAZER_CARDS_CONTROLLED_AUTO_FAMILIES = new Set(['TELEGRAM', 'STEAM_TOPUP', 'STEAM_GIFTS']);
+const FAZER_CARDS_CONTROLLED_AUTO_FAMILIES = new Set(['TELEGRAM', 'STEAM_TOPUP', 'STEAM_GIFTS', 'MANUAL_SERVICES']);
 
 const isFazerCardsControlledAutoOrder = (product = {}, providerProduct = {}) => {
     const safeProduct = product || {};
@@ -400,7 +400,9 @@ const placeFazerCardsControlledAutoOrder = async ({
         ? `fazercards:telegram-${telegramKind || 'unknown'}:${order._id.toString()}`
         : familyKey === 'STEAM_GIFTS'
             ? `fazercards:steam-gift:${order._id.toString()}`
-            : `fazercards:steam-topup:${order._id.toString()}`;
+            : familyKey === 'MANUAL_SERVICES'
+                ? `fazercards:manual-service:${order._id.toString()}`
+                : `fazercards:steam-topup:${order._id.toString()}`;
 
     if (product.providerExecutionMode !== fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
         return buildFazerCardsManualReviewResult({
@@ -582,6 +584,13 @@ const placeFazerCardsControlledAutoOrder = async ({
                 region: payload.region,
                 idempotencyKey: providerIdempotencyKey,
             });
+        } else if (familyKey === 'MANUAL_SERVICES') {
+            response = await adapter.client.createManualServiceOrder({
+                manual_service_id: payload.manual_service_id,
+                product_id: payload.product_id,
+                fields: payload.fields,
+                idempotencyKey: providerIdempotencyKey,
+            });
         } else {
             return buildFazerCardsRejectedResult({
                 providerIdempotencyKey,
@@ -625,12 +634,16 @@ const placeFazerCardsControlledAutoOrder = async ({
             ? 'FAZERCARDS_TELEGRAM_ORDER_REVIEW'
             : familyKey === 'STEAM_GIFTS'
                 ? 'FAZERCARDS_STEAM_GIFT_ORDER_REVIEW'
-                : 'FAZERCARDS_STEAM_TOPUP_ORDER_REVIEW',
+                : familyKey === 'MANUAL_SERVICES'
+                    ? 'FAZERCARDS_MANUAL_SERVICE_ORDER_REVIEW'
+                    : 'FAZERCARDS_STEAM_TOPUP_ORDER_REVIEW',
         defaultErrorMessage: familyKey === 'TELEGRAM'
             ? 'FazerCards Telegram order requires manual review.'
             : familyKey === 'STEAM_GIFTS'
                 ? 'FazerCards Steam Gift order requires manual review.'
-                : 'FazerCards Steam top-up order requires manual review.',
+                : familyKey === 'MANUAL_SERVICES'
+                    ? 'FazerCards Manual Service order requires manual review.'
+                    : 'FazerCards Steam top-up order requires manual review.',
     });
 };
 

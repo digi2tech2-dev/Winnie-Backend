@@ -45,8 +45,17 @@ const PROVIDER_EXECUTION_MODES = Object.freeze({
     DISABLED: 'DISABLED',
 });
 
-const BULK_AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']);
-const CONTROLLED_AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS', 'TELEGRAM', 'STEAM_TOPUP', 'STEAM_GIFTS']);
+const SUPPORTED_AUTO_PROVIDER_FAMILIES = Object.freeze([
+    'TOPUPS',
+    'GIFTCARDS',
+    'GAME_KEYS',
+    'TELEGRAM',
+    'STEAM_TOPUP',
+    'STEAM_GIFTS',
+    'MANUAL_SERVICES',
+]);
+const BULK_AUTO_PROVIDER_FAMILIES = new Set(SUPPORTED_AUTO_PROVIDER_FAMILIES);
+const CONTROLLED_AUTO_PROVIDER_FAMILIES = new Set(SUPPORTED_AUTO_PROVIDER_FAMILIES);
 const MANUAL_FULFILLMENT_FAMILIES = new Set(['MANUAL_SERVICES']);
 const DISABLED_FAMILIES = new Set([]);
 const CODE_DELIVERY_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
@@ -1147,8 +1156,8 @@ const CONTRACTS = Object.freeze({
         async: true,
         statusWebhookBehavior: 'Generic status sync/webhooks can update Telegram orders; no code delivery expected. Unknown status requires review and no blind refund.',
         autoProviderAllowed: true,
-        bulkAutoProviderAllowed: false,
-        readinessReason: 'Controlled test only; TELEGRAM can be enabled only by explicit product-level AUTO_PROVIDER action and remains excluded from bulk auto.',
+        bulkAutoProviderAllowed: true,
+        readinessReason: 'Telegram can be enabled for gated AUTO_PROVIDER only when product/customer fields, payload, status sync, webhooks, and provider gates pass readiness.',
         canImportDraft: true,
         canDryRun: true,
         canLivePilot: true,
@@ -1177,7 +1186,7 @@ const CONTRACTS = Object.freeze({
         storageStrategy: 'ORDER_PROVIDER_METADATA',
         customerDeliveryStrategy: 'NO_CODE_DELIVERY_STATUS_ONLY',
         requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'webhook/status sync'],
-        blockers: ['Excluded from bulk AUTO_PROVIDER. Use only one explicit product-level controlled test after real target validation.'],
+        blockers: ['Requires readiness checks, environment gates, and asynchronous status/webhook confirmation before any real provider order.'],
         warnings: ['Telegram provider fulfillment is asynchronous. Balance is debited by FazerCards immediately after a real buy request.'],
     }),
     STEAM_TOPUP: Object.freeze({
@@ -1202,8 +1211,8 @@ const CONTRACTS = Object.freeze({
         async: true,
         statusWebhookBehavior: 'Generic status sync/webhooks can update Steam top-up orders; check-login must pass before any future real provider order.',
         autoProviderAllowed: true,
-        bulkAutoProviderAllowed: false,
-        readinessReason: 'Controlled test only; STEAM_TOPUP can be enabled only by explicit product-level AUTO_PROVIDER action after check-login readiness and remains excluded from bulk auto.',
+        bulkAutoProviderAllowed: true,
+        readinessReason: 'Steam top-up can be enabled for gated AUTO_PROVIDER only when steamLogin field, currency/amount metadata, check-login preflight, status sync, webhooks, and provider gates pass readiness.',
         canImportDraft: true,
         canDryRun: true,
         canLivePilot: true,
@@ -1226,7 +1235,7 @@ const CONTRACTS = Object.freeze({
         storageStrategy: 'ORDER_PROVIDER_METADATA',
         customerDeliveryStrategy: 'NO_CODE_DELIVERY_STATUS_ONLY',
         requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'steam-topup check-login preflight', 'webhook/status sync'],
-        blockers: ['Excluded from bulk AUTO_PROVIDER. High-risk flow requires explicit product-level controlled test and check-login preflight.'],
+        blockers: ['High-risk flow requires check-login preflight, readiness checks, environment gates, and status/webhook confirmation before any real provider order.'],
         warnings: ['High risk: wrong Steam login can deliver value to the wrong recipient. check-login must pass before any real provider order.'],
     }),
     MANUAL_SERVICES: Object.freeze({
@@ -1235,7 +1244,7 @@ const CONTRACTS = Object.freeze({
         mode: 'MANUAL_SERVICE_PROVIDER_ORDER',
         fulfillmentMode: FULFILLMENT_MODES.MANUAL_SERVICE,
         supportStage: SUPPORT_STAGES.DRY_RUN_READY,
-        executionStage: EXECUTION_STAGES.CUSTOMER_FLOW_NOT_READY,
+        executionStage: EXECUTION_STAGES.CUSTOMER_FLOW_READY_BUT_GATED,
         riskLevel: RISK_LEVELS.HIGH,
         catalogStatus: 'implemented',
         providerEndpoints: {
@@ -1250,12 +1259,12 @@ const CONTRACTS = Object.freeze({
         codeDelivery: false,
         async: true,
         statusWebhookBehavior: 'Generic status sync/webhooks update order status; manual-service chat webhooks append safe admin notes only.',
-        autoProviderAllowed: false,
-        bulkAutoProviderAllowed: false,
-        readinessReason: 'Docs-based payload and message-only chat client exist, but customer fulfillment stays team-managed until operations workflow is approved.',
+        autoProviderAllowed: true,
+        bulkAutoProviderAllowed: true,
+        readinessReason: 'Manual Services can be enabled for gated AUTO_PROVIDER only when provider identifiers, customer fields, message-only chat/status handling, and provider gates pass readiness.',
         canImportDraft: true,
         canDryRun: true,
-        canLivePilot: false,
+        canLivePilot: true,
         canCustomerPurchase: true,
         customerInputSchema: {
             source: 'providerProduct.requiredFields or admin-defined orderFields',
@@ -1277,8 +1286,8 @@ const CONTRACTS = Object.freeze({
         storageStrategy: 'ORDER_PROVIDER_METADATA_AND_ADMIN_NOTES',
         customerDeliveryStrategy: 'ADMIN_MANAGED_MANUAL_WORKFLOW',
         requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'manual service fields', 'manual service chat admin workflow'],
-        blockers: ['AUTO_PROVIDER remains disabled until manual service operations workflow is explicitly approved.'],
-        warnings: ['Provider-side manual service order and chat contracts are documented, but customer fulfillment remains team-managed by default.'],
+        blockers: ['Attachment chat/upload support remains NEEDS_VERIFY and is not required for basic provider order automation unless a provider offer requires attachments.'],
+        warnings: ['Provider-side manual service orders are asynchronous. Message-only chat diagnostics are supported; attachment handling remains NEEDS_VERIFY.'],
     }),
     STEAM_GIFTS: Object.freeze({
         familyKey: 'STEAM_GIFTS',
@@ -1302,8 +1311,8 @@ const CONTRACTS = Object.freeze({
         async: true,
         statusWebhookBehavior: 'Generic FazerCards status sync/webhooks update local order; completed finishes, failed/refunded refund once, unknown requires review with no blind refund.',
         autoProviderAllowed: true,
-        bulkAutoProviderAllowed: false,
-        readinessReason: 'Read-only catalog access is confirmed; controlled product-level execution only; no bulk auto until live validation.',
+        bulkAutoProviderAllowed: true,
+        readinessReason: 'Steam Gifts can be enabled for gated AUTO_PROVIDER only after explicit appid/offer-region import, invite URL field readiness, and provider gates pass readiness; broad catalog sync remains disabled.',
         canImportDraft: true,
         canDryRun: true,
         canLivePilot: true,
@@ -1325,7 +1334,7 @@ const CONTRACTS = Object.freeze({
         storageStrategy: 'ORDER_PROVIDER_METADATA',
         customerDeliveryStrategy: 'NO_CODE_DELIVERY_STATUS_ONLY',
         requiredCapabilities: ['FAZERCARDS_ENABLED', 'FAZERCARDS_REAL_ORDERS_ENABLED', 'providerExecutionEnabled', 'invite_url customer field', 'appid/sub_id/region metadata'],
-        blockers: ['Excluded from bulk AUTO_PROVIDER. Use explicit appid/on-demand import and one product-level controlled test only.'],
+        blockers: ['Broad catalog sync remains disabled; only explicit appid/on-demand imported products can pass readiness.'],
         warnings: ['Steam Gifts catalog is huge; sync only an explicit appid and selected offer/region.', 'No live Steam Gift order validation has been completed yet.'],
     }),
 });
@@ -1371,7 +1380,7 @@ const getContractSummary = () => ({
             blockers: contract.blockers,
         },
     ])),
-    nextBestExecutionOrder: ['GIFTCARDS', 'GAME_KEYS', 'TOPUPS', 'TELEGRAM', 'STEAM_TOPUP', 'MANUAL_SERVICES'],
+    nextBestExecutionOrder: ['GIFTCARDS', 'GAME_KEYS', 'TOPUPS', 'TELEGRAM', 'STEAM_TOPUP', 'STEAM_GIFTS', 'MANUAL_SERVICES'],
 });
 
 const normalizeFamilyKey = (familyKey) => asString(familyKey).toUpperCase();
@@ -1409,6 +1418,7 @@ const getAutoProviderIdentifiers = (familyKey, providerProduct = {}) => {
     if (normalized === 'TELEGRAM') return extractTelegramIdentifiers(providerProduct);
     if (normalized === 'STEAM_TOPUP') return extractSteamTopupIdentifiers(providerProduct);
     if (normalized === 'STEAM_GIFTS') return extractSteamGiftIdentifiers(providerProduct);
+    if (normalized === 'MANUAL_SERVICES') return extractManualServiceIdentifiers(providerProduct);
     return {};
 };
 
@@ -1461,6 +1471,14 @@ const validateAutoProviderReadinessForProduct = ({
         if (providerProduct.isSupported !== true) errors.push({ code: 'AUTO_PROVIDER_REQUIRES_SUPPORTED_PROVIDER_PRODUCT', message: 'Auto provider execution requires a supported ProviderProduct.' });
         if (providerProduct.isBlocked === true) errors.push({ code: 'AUTO_PROVIDER_REQUIRES_UNBLOCKED_PROVIDER_PRODUCT', message: 'Auto provider execution requires an unblocked ProviderProduct.' });
         if (providerProduct.executionBlocked === true) errors.push({ code: 'AUTO_PROVIDER_REQUIRES_EXECUTION_UNBLOCKED', message: 'Auto provider execution is blocked for this ProviderProduct.' });
+        const rawCost = firstValue(providerProduct.costPrice, providerProduct.rawPrice);
+        const cost = Number(rawCost);
+        if (rawCost === undefined || rawCost === null || rawCost === '' || !Number.isFinite(cost) || cost <= 0) {
+            errors.push({
+                code: 'AUTO_PROVIDER_PROVIDER_COST_INVALID',
+                message: 'Auto provider execution requires a valid positive provider cost.',
+            });
+        }
     }
 
     if (normalizedFamilyKey === 'TOPUPS') {
@@ -1519,6 +1537,17 @@ const validateAutoProviderReadinessForProduct = ({
             errors.push({
                 code: 'AUTO_PROVIDER_STEAM_GIFT_INVITE_FIELD_MISSING',
                 message: 'Steam Gift auto provider execution requires an invite_url customer field.',
+            });
+        }
+    } else if (normalizedFamilyKey === 'MANUAL_SERVICES') {
+        const requiredFields = normalizeCustomerFieldDefinitions(product, providerProduct)
+            .filter((field) => field.isActive !== false && field.required !== false);
+        if (!identifiers.manualServiceId) errors.push({ code: 'AUTO_PROVIDER_MANUAL_SERVICE_ID_MISSING', message: 'Manual Service auto provider execution requires manual_service_id.' });
+        if (!identifiers.productId) errors.push({ code: 'AUTO_PROVIDER_MANUAL_SERVICE_PRODUCT_ID_MISSING', message: 'Manual Service auto provider execution requires product_id.' });
+        if (requiredFields.length === 0) {
+            errors.push({
+                code: 'AUTO_PROVIDER_MANUAL_SERVICE_FIELDS_MISSING',
+                message: 'Manual Service auto provider execution requires customer fields copied from the provider offer or configured by admin.',
             });
         }
     }

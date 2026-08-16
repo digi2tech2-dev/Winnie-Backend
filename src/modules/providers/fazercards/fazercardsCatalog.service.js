@@ -46,21 +46,30 @@ const SYNC_ALL_DEFAULT_FAMILIES = Object.freeze([
 ]);
 const DRAFT_IMPORT_FAMILIES = new Set([...SYNC_ALL_DEFAULT_FAMILIES, 'STEAM_GIFTS']);
 const CODE_DELIVERY_IMPORT_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
-const AUTO_PROVIDER_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']);
+const AUTO_PROVIDER_FAMILIES = new Set([
+    'TOPUPS',
+    'GIFTCARDS',
+    'GAME_KEYS',
+    'TELEGRAM',
+    'STEAM_TOPUP',
+    'STEAM_GIFTS',
+    'MANUAL_SERVICES',
+]);
 const LAUNCH_PUBLISH_FAMILIES = Object.freeze([
     'TOPUPS',
     'GIFTCARDS',
     'GAME_KEYS',
     'TELEGRAM',
     'STEAM_TOPUP',
+    'STEAM_GIFTS',
     'MANUAL_SERVICES',
 ]);
-const ALL_LAUNCH_FAMILIES = Object.freeze([...LAUNCH_PUBLISH_FAMILIES, 'STEAM_GIFTS']);
+const ALL_LAUNCH_FAMILIES = Object.freeze([...LAUNCH_PUBLISH_FAMILIES]);
 const UNIMPLEMENTED_FAMILY_BLOCK_REASONS = Object.freeze({
-    TELEGRAM: 'TELEGRAM_EXECUTION_NOT_IMPLEMENTED',
-    STEAM_TOPUP: 'STEAM_TOPUP_EXECUTION_NOT_IMPLEMENTED',
-    MANUAL_SERVICES: 'MANUAL_SERVICE_EXECUTION_NOT_IMPLEMENTED',
-    STEAM_GIFTS: 'STEAM_GIFTS_CONTROLLED_ON_DEMAND',
+    TELEGRAM: 'TELEGRAM_READINESS_REQUIRED',
+    STEAM_TOPUP: 'STEAM_TOPUP_READINESS_REQUIRED',
+    MANUAL_SERVICES: 'MANUAL_SERVICE_READINESS_REQUIRED',
+    STEAM_GIFTS: 'STEAM_GIFTS_ON_DEMAND_READINESS_REQUIRED',
 });
 const IMPORTED_PRODUCT_LAUNCH_SELECT = '_id name externalProductId providerProduct isActive visibleInStore status customerPurchaseEnabled providerExecutionMode providerExecutionEnabled providerExecutionBlocked providerBlockReason familyKey fulfillmentMode orderFields dynamicFields';
 let syncAllInProgress = false;
@@ -609,12 +618,28 @@ const normalizeManualServiceProduct = (category = {}, offer = {}) => {
     const offerName = String(firstValue(offer.name, offer.title, offerId));
     const price = firstValue(offer.price_usd, offer.priceUsd);
     const requiredFields = normalizeManualServiceFields(category, offer);
+    const costPrice = parseNumber(price, null);
+    const supported = serviceId !== 'unknown_service'
+        && offerId !== 'unknown_offer'
+        && costPrice !== null
+        && costPrice > 0
+        && requiredFields.length > 0;
     return makeBlockedFamilyProduct(family, {
         externalProductId: `FAZER_MANUAL_SERVICE:${serviceId}:${offerId}`,
         name: `${categoryName} - ${offerName}`,
         rawName: `${categoryName} - ${offerName}`,
         rawPrice: String(price || '0'),
-        costPrice: parseNumber(price, null),
+        costPrice,
+        executionBlocked: !supported,
+        isSupported: supported,
+        isBlocked: !supported,
+        blockReason: supported
+            ? null
+            : requiredFields.length === 0
+                ? 'MANUAL_SERVICE_FIELDS_MISSING'
+                : costPrice === null || costPrice <= 0
+                    ? 'INVALID_PRICE'
+                    : 'MANUAL_SERVICE_IDENTIFIERS_MISSING',
         category: serviceId,
         categoryName,
         offerId,
@@ -2186,10 +2211,10 @@ const getUnsupportedFamilyReadiness = async (productId) => {
 
     const warnings = [
         controlledLiveCandidate
-            ? `${family?.displayName || familyKey || 'FazerCards'} is a controlled-live candidate only and remains excluded from bulk auto.`
+            ? `${family?.displayName || familyKey || 'FazerCards'} can use gated AUTO_PROVIDER when all readiness checks pass.`
             : `${family?.displayName || familyKey || 'FazerCards'} live execution is not implemented yet.`,
     ];
-    if (familyKey === 'STEAM_GIFTS') warnings.push('Steam Gifts catalog access is read-only confirmed; use explicit appid/on-demand import and keep bulk auto disabled.');
+    if (familyKey === 'STEAM_GIFTS') warnings.push('Steam Gifts catalog access is read-only confirmed; use explicit appid/on-demand import; broad catalog sync remains disabled.');
     if (familyKey === 'STEAM_TOPUP') warnings.push('Steam top-up requires successful check-login immediately before any provider order.');
     if (familyKey === 'TELEGRAM') warnings.push('Telegram fulfillment is asynchronous; completed/failed statuses must be confirmed by response, status sync, or webhook.');
     if (!checks.globalRealOrdersEnabled) warnings.push('Global real order gate is disabled.');
@@ -2230,11 +2255,11 @@ const getUnsupportedFamilyReadiness = async (productId) => {
         warnings: [...new Set(warnings.filter(Boolean))],
         nextActions: [
             controlledLiveCandidate
-                ? 'Use explicit single-product AUTO_PROVIDER only for a controlled live test.'
+                ? 'Enable AUTO_PROVIDER only for products that pass readiness and server-side gates.'
                 : 'Keep the product hidden and inactive until this family has a tested execution flow.',
             'Use dry-run preview to inspect stored identifiers and required fields.',
             controlledLiveCandidate
-                ? 'Keep this family excluded from bulk AUTO_PROVIDER until live validation is complete.'
+                ? 'Bulk AUTO_PROVIDER will skip or fail products that do not pass readiness.'
                 : 'Do not enable live execution for this family until a controlled pilot is approved.',
         ],
     };
@@ -3742,12 +3767,6 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
             message: 'This FazerCards family can only be enabled for AUTO_PROVIDER through an explicit single-product controlled action.',
         });
     }
-    if (familyKey === 'STEAM_GIFTS' && enablingVisibility && updates._explicitProductLevelAuto !== true) {
-        errors.push({
-            code: 'FAZERCARDS_STEAM_GIFTS_ON_DEMAND_ONLY',
-            message: 'Steam Gifts can only be published through an explicit single-product on-demand action.',
-        });
-    }
     if (contract.supportStage === fazerCardsContracts.SUPPORT_STAGES.DISABLED_UNAVAILABLE && enablingVisibility) {
         errors.push({ code: 'FAMILY_DISABLED_UNAVAILABLE', message: 'This FazerCards family is currently unavailable.' });
     }
@@ -3937,7 +3956,7 @@ const bulkUpdateLaunchControls = async (payload = {}, adminId = null, auditConte
 
     const dryRun = payload.dryRun === true;
     const products = await Product.find({ _id: { $in: productIds }, deletedAt: null })
-        .populate('providerProduct', 'providerCode familyKey fulfillmentMode externalProductId rawName category categoryName offerId offerName requiredFields rawPayload minQty maxQty stock isSupported isBlocked executionBlocked blockReason')
+        .populate('providerProduct', 'providerCode familyKey fulfillmentMode externalProductId rawName category categoryName offerId offerName requiredFields rawPayload minQty maxQty stock costPrice rawPrice currency isSupported isBlocked executionBlocked blockReason region platform')
         .lean();
     const productsById = new Map(products.map((product) => [product._id.toString(), product]));
     const results = [];

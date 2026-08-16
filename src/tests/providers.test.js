@@ -457,7 +457,34 @@ const createFazerControlledAutoOrder = async ({
     const isPremium = isTelegram && telegramKind === 'premium';
     const isSteam = familyKey === 'STEAM_TOPUP';
     const isSteamGift = familyKey === 'STEAM_GIFTS';
-    const defaults = isSteamGift
+    const isManualService = familyKey === 'MANUAL_SERVICES';
+    const defaults = isManualService
+        ? {
+            externalProductId: 'FAZER_MANUAL_SERVICE:social_boost:starter',
+            rawName: 'Social Boost - Starter',
+            rawPrice: '0.75',
+            costPrice: '0.75',
+            category: 'social_boost',
+            categoryName: 'Social Boost',
+            offerId: 'starter',
+            offerName: 'Starter',
+            fulfillmentMode: FULFILLMENT_MODES.MANUAL_SERVICE,
+            minQty: 1,
+            maxQty: 1,
+            requiredFields: [{ key: 'account_username', label: 'Account Username', type: 'text', required: true }],
+            rawPayload: {
+                family: 'MANUAL_SERVICES',
+                category: { id: 'social_boost', name: 'Social Boost' },
+                offer: {
+                    id: 'starter',
+                    product_id: 'starter',
+                    name: 'Starter',
+                    price_usd: '0.75',
+                    fields: [{ key: 'account_username', label: 'Account Username', type: 'text', required: true }],
+                },
+            },
+        }
+        : isSteamGift
         ? {
             externalProductId: 'FAZER_STEAM_GIFT:730:54029:CIS',
             rawName: 'Counter-Strike 2 - Prime Status Upgrade - CIS',
@@ -533,12 +560,16 @@ const createFazerControlledAutoOrder = async ({
         },
     });
     const { customer, group } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
-    const orderFields = isSteamGift
+    const orderFields = isManualService
+        ? [{ id: 'account_username', key: 'account_username', label: 'Account Username', type: 'text', required: true, isActive: true }]
+        : isSteamGift
         ? [{ id: 'invite_url', key: 'invite_url', label: 'Steam Invite URL', type: 'text', required: true, isActive: true }]
         : isSteam
         ? [{ id: 'steam_login', key: 'steam_login', label: 'Steam Login', type: 'text', required: true, isActive: true }]
         : [{ id: 'telegram_username', key: 'telegram_username', label: 'Telegram Username', type: 'text', required: true, isActive: true }];
-    const values = customerFields || (isSteamGift
+    const values = customerFields || (isManualService
+        ? { account_username: 'pilot_account' }
+        : isSteamGift
         ? { invite_url: 'https://s.team/p/abc-def' }
         : isSteam ? { steam_login: 'pilot_steam' } : { telegram_username: '@pilot_user' });
     const product = await Product.create({
@@ -918,17 +949,17 @@ describe('FazerCards family contracts', () => {
             GAME_KEYS: true,
             TELEGRAM: true,
             STEAM_TOPUP: true,
-            MANUAL_SERVICES: false,
+            MANUAL_SERVICES: true,
             STEAM_GIFTS: true,
         });
         expect(Object.fromEntries(contracts.map((contract) => [contract.familyKey, contract.bulkAutoProviderAllowed]))).toMatchObject({
             TOPUPS: true,
             GIFTCARDS: true,
             GAME_KEYS: true,
-            TELEGRAM: false,
-            STEAM_TOPUP: false,
-            MANUAL_SERVICES: false,
-            STEAM_GIFTS: false,
+            TELEGRAM: true,
+            STEAM_TOPUP: true,
+            MANUAL_SERVICES: true,
+            STEAM_GIFTS: true,
         });
     });
 
@@ -2543,32 +2574,33 @@ describe('FazerCards CODE_DELIVERY foundation', () => {
 
 describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
     it.each([
-        ['TELEGRAM', FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP, 'TELEGRAM_EXECUTION_NOT_IMPLEMENTED'],
-        ['STEAM_TOPUP', FULFILLMENT_MODES.STEAM_TOPUP_WITH_LOGIN, 'STEAM_TOPUP_EXECUTION_NOT_IMPLEMENTED'],
-        ['MANUAL_SERVICES', FULFILLMENT_MODES.MANUAL_SERVICE, 'MANUAL_SERVICE_EXECUTION_NOT_IMPLEMENTED'],
-    ])('imports %s as inactive hidden provider-blocked draft', async (familyKey, fulfillmentMode, blockReason) => {
+        ['TELEGRAM', FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP],
+        ['STEAM_TOPUP', FULFILLMENT_MODES.STEAM_TOPUP_WITH_LOGIN],
+        ['MANUAL_SERVICES', FULFILLMENT_MODES.MANUAL_SERVICE],
+    ])('imports %s as inactive hidden provider-disabled draft', async (familyKey, fulfillmentMode) => {
         const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey });
 
         const result = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
             sellPrice: 4.25,
             name: `${familyKey} Draft Product`,
         });
+        const imported = result.product.toObject();
 
-        expect(result.product).toMatchObject({
+        expect(imported).toMatchObject({
             name: `${familyKey} Draft Product`,
             isActive: false,
             visibleInStore: false,
             status: PRODUCT_STATUSES.UNAVAILABLE,
             executionType: EXECUTION_TYPES.MANUAL,
             providerExecutionEnabled: false,
-            providerExecutionBlocked: true,
-            providerBlockReason: blockReason,
+            providerExecutionBlocked: false,
+            providerBlockReason: null,
             providerCode: PROVIDER_CODES.FAZER_CARDS,
             familyKey,
             fulfillmentMode,
             externalProductId: providerProduct.externalProductId,
         });
-        expect(result.product.providerProduct.toString()).toBe(providerProduct._id.toString());
+        expect(imported.providerProduct.toString()).toBe(providerProduct._id.toString());
         expect(await Order.countDocuments({})).toBe(0);
         expect(await WalletTransaction.countDocuments({})).toBe(0);
         expect(axios.create).not.toHaveBeenCalled();
@@ -2631,14 +2663,14 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
                 familyKey: 'TELEGRAM',
                 fulfillmentMode: FULFILLMENT_MODES.TELEGRAM_STARS_TOPUP,
                 providerExecutionEnabled: false,
-                providerExecutionBlocked: true,
+                providerExecutionBlocked: false,
             },
             payload: {
                 telegram_username: 'pilot_user',
                 quantity: 100,
             },
         });
-        expect(result.blockers).toContain('Excluded from bulk AUTO_PROVIDER. Use only one explicit product-level controlled test after real target validation.');
+        expect(result.contract.bulkAutoProviderAllowed).toBe(true);
         expect(result.warnings).toContain('Dry run only. No FazerCards order was created.');
         expect(axios.create).not.toHaveBeenCalled();
         expect(await Order.countDocuments({})).toBe(0);
@@ -2674,9 +2706,9 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
                 executionImplemented: true,
                 controlledLiveCandidate: true,
                 autoProviderAllowedForExplicitProduct: true,
-                bulkAutoProviderAllowed: false,
+                bulkAutoProviderAllowed: true,
                 productExecutionEnabled: false,
-                productExecutionBlocked: true,
+                productExecutionBlocked: false,
                 productHidden: true,
                 productInactive: true,
             },
@@ -2686,9 +2718,9 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
                 requiredFieldKeys: ['steamLogin'],
             },
         });
-        expect(result.blockers).toContain('Excluded from bulk AUTO_PROVIDER. High-risk flow requires explicit product-level controlled test and check-login preflight.');
+        expect(result.contract.bulkAutoProviderAllowed).toBe(true);
         expect(result.requiredCapabilities).toContain('steam-topup check-login preflight');
-        expect(result.warnings).toContain('Steam Wallet Top-up is a controlled-live candidate only and remains excluded from bulk auto.');
+        expect(result.warnings).toContain('Steam Wallet Top-up can use gated AUTO_PROVIDER when all readiness checks pass.');
         expect(axios.create).not.toHaveBeenCalled();
     });
 
@@ -2730,14 +2762,14 @@ describe('FazerCards Phase 6 launch-ready catalog plumbing', () => {
                 executionImplemented: true,
                 controlledLiveCandidate: true,
                 autoProviderAllowedForExplicitProduct: true,
-                bulkAutoProviderAllowed: false,
+                bulkAutoProviderAllowed: true,
                 hasSteamGiftAppId: true,
                 hasSteamGiftSubId: true,
                 hasSteamGiftRegion: true,
                 hasSteamGiftInviteField: true,
             },
         });
-        expect(readiness.warnings).toContain('Steam Gifts catalog access is read-only confirmed; use explicit appid/on-demand import and keep bulk auto disabled.');
+        expect(readiness.warnings).toContain('Steam Gifts catalog access is read-only confirmed; use explicit appid/on-demand import; broad catalog sync remains disabled.');
         expect(axios.create).not.toHaveBeenCalled();
         expect(await Order.countDocuments({})).toBe(0);
         expect(await WalletTransaction.countDocuments({})).toBe(0);
@@ -3593,6 +3625,52 @@ describe('FazerCards Telegram and Steam controlled execution', () => {
                 expect((await User.findById(customer._id)).walletBalance).toBe(beforeWallet);
             }
         }
+    });
+
+    it('executes Manual Services through the controlled AUTO_PROVIDER path with stable idempotency', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        config.providers.fazerCards.maxOrderUsd = 1.00;
+        const { order } = await createFazerControlledAutoOrder({ familyKey: 'MANUAL_SERVICES' });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({ status: 200, headers: {}, data: { ok: true, balance: '10.00', currency: 'USD' } })
+            .mockResolvedValueOnce({ status: 200, headers: { 'x-request-id': 'req-manual-service' }, data: { ok: true, order: { id: 'manual_service_order_1', status: 'processing' } } });
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(updated.providerOrderId).toBe('manual_service_order_1');
+        expect(updated.providerStatus).toBe('Pending');
+        expect(updated.providerIdempotencyKey).toBe(`fazercards:manual-service:${order._id.toString()}`);
+        expect(refunded).toBe(false);
+        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
+            method: 'post',
+            url: '/manual-services/order',
+            data: {
+                manual_service_id: 'social_boost',
+                product_id: 'starter',
+                fields: { account_username: 'pilot_account' },
+            },
+            headers: { 'Idempotency-Key': `fazercards:manual-service:${order._id.toString()}` },
+        }));
+    });
+
+    it('rejects Manual Services missing required fields before any provider request', async () => {
+        config.providers.fazerCards.realOrdersEnabled = true;
+        const { order } = await createFazerControlledAutoOrder({
+            familyKey: 'MANUAL_SERVICES',
+            customerFields: {},
+        });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: updated } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(updated.providerErrorCode).toBe('CUSTOMER_INPUT_MISSING');
+        expect(client.request).not.toHaveBeenCalled();
     });
 });
 
@@ -4752,7 +4830,7 @@ describe('FazerCards Phase 9 launch operations', () => {
         expect((await Order.findById(order._id)).refunded).toBe(true);
     });
 
-    it('bulk launch dry-run rejects invalid auto execution for unconfirmed families and does not modify products', async () => {
+    it('bulk launch dry-run rejects AUTO_PROVIDER when provider readiness fails and does not modify products', async () => {
         const { providerProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
         const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
             sellPrice: 1.75,
@@ -4773,14 +4851,14 @@ describe('FazerCards Phase 9 launch operations', () => {
         expect(result.success).toBe(false);
         expect(result.updated).toBe(0);
         expect(result.results[0].errors).toEqual(expect.arrayContaining([
-            expect.objectContaining({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED' }),
+            expect.objectContaining({ code: 'AUTO_PROVIDER_REQUIRES_SUPPORTED_PROVIDER_PRODUCT' }),
         ]));
         expect(after.isActive).toBe(false);
         expect(after.visibleInStore).toBe(false);
         expect(after.customerPurchaseEnabled).toBe(false);
     });
 
-    it('bulk launch rejects Steam Gifts customer enablement because Steam Gifts are on-demand only', async () => {
+    it('bulk launch rejects Steam Gifts customer enablement when invite field readiness is missing', async () => {
         const { provider } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
         const providerProduct = await ProviderProduct.create({
             provider: provider._id,
@@ -4811,7 +4889,7 @@ describe('FazerCards Phase 9 launch operations', () => {
             providerCode: PROVIDER_CODES.FAZER_CARDS,
             familyKey: 'STEAM_GIFTS',
             fulfillmentMode: FULFILLMENT_MODES.STEAM_GIFT_INVITE,
-            providerExecutionMode: 'DISABLED',
+            providerExecutionMode: 'MANUAL_FULFILLMENT',
         });
 
         const result = await fazerCardsCatalogSvc.bulkUpdateLaunchControls({
@@ -4825,7 +4903,7 @@ describe('FazerCards Phase 9 launch operations', () => {
         });
 
         expect(result.success).toBe(false);
-        expect(result.results[0].errors.map((error) => error.code)).toContain('FAZERCARDS_STEAM_GIFTS_ON_DEMAND_ONLY');
+        expect(result.results[0].errors.map((error) => error.code)).toContain('MANUAL_PRODUCT_REQUIRES_CUSTOMER_FIELDS');
     });
 
     it('bulk launch applies valid manual fulfillment controls for unconfirmed families', async () => {
@@ -5109,6 +5187,20 @@ describe('FazerCards Phase 9 launch operations', () => {
         ['TELEGRAM', { rawPayload: { family: 'TELEGRAM', kind: 'telegram_stars', response: { price_per_star: '0.001' } } }],
         ['STEAM_TOPUP', { rawPayload: { family: 'STEAM_TOPUP', currency: 'USD', amount: 10, rate: { currency: 'USD', amount: 10 } } }],
         ['STEAM_GIFTS', {}],
+        ['MANUAL_SERVICES', {
+            requiredFields: [{ key: 'account_username', label: 'Account Username', type: 'text', required: true }],
+            rawPayload: {
+                family: 'MANUAL_SERVICES',
+                category: { id: 'social_boost', name: 'Social Boost' },
+                offer: {
+                    id: 'starter',
+                    product_id: 'starter',
+                    name: 'Starter',
+                    price_usd: '0.75',
+                    fields: [{ key: 'account_username', label: 'Account Username', type: 'text', required: true }],
+                },
+            },
+        }],
     ])('single product launch can enable controlled AUTO_PROVIDER for %s only when readiness passes', async (familyKey, providerProductPatch) => {
         const { providerProduct } = await createFazerCatalogOnlyProviderProduct({
             familyKey,
@@ -5316,7 +5408,7 @@ describe('FazerCards Phase 9 launch operations', () => {
         });
     });
 
-    it('publish eligible AUTO_PROVIDER updates confirmed families only and leaves unconfirmed families unchanged', async () => {
+    it('publish eligible AUTO_PROVIDER updates all ready supported families', async () => {
         const { providerProduct: topupProviderProduct } = await createFazerTopupProviderProduct();
         const { product: topupProduct } = await fazerCardsCatalogSvc.importProviderProduct(topupProviderProduct._id, {
             sellPrice: 1.25,
@@ -5327,10 +5419,65 @@ describe('FazerCards Phase 9 launch operations', () => {
             sellPrice: 3.25,
             name: 'GiftCard Publish Auto Candidate',
         });
-        const { providerProduct: telegramProviderProduct } = await createFazerCatalogOnlyProviderProduct({ familyKey: 'TELEGRAM' });
+        const { providerProduct: gameKeyProviderProduct } = await createFazerCodeDeliveryProviderProduct({ familyKey: 'GAME_KEYS' });
+        const { product: gameKeyProduct } = await fazerCardsCatalogSvc.importProviderProduct(gameKeyProviderProduct._id, {
+            sellPrice: 6.25,
+            name: 'GameKey Publish Auto Candidate',
+        });
+        const { providerProduct: telegramProviderProduct } = await createFazerCatalogOnlyProviderProduct({
+            familyKey: 'TELEGRAM',
+            overrides: { executionBlocked: false, isSupported: true, isBlocked: false, blockReason: null },
+        });
         const { product: telegramProduct } = await fazerCardsCatalogSvc.importProviderProduct(telegramProviderProduct._id, {
             sellPrice: 1.75,
-            name: 'Telegram Not Auto Candidate',
+            name: 'Telegram Publish Auto Candidate',
+        });
+        const { providerProduct: steamProviderProduct } = await createFazerCatalogOnlyProviderProduct({
+            familyKey: 'STEAM_TOPUP',
+            overrides: {
+                executionBlocked: false,
+                isSupported: true,
+                isBlocked: false,
+                blockReason: null,
+                rawPayload: { family: 'STEAM_TOPUP', currency: 'USD', amount: 10, rate: { currency: 'USD', amount: 10 } },
+            },
+        });
+        const { product: steamProduct } = await fazerCardsCatalogSvc.importProviderProduct(steamProviderProduct._id, {
+            sellPrice: 2.25,
+            name: 'Steam Topup Publish Auto Candidate',
+        });
+        const { providerProduct: steamGiftProviderProduct } = await createFazerCatalogOnlyProviderProduct({
+            familyKey: 'STEAM_GIFTS',
+            overrides: { executionBlocked: false, isSupported: true, isBlocked: false, blockReason: null },
+        });
+        const { product: steamGiftProduct } = await fazerCardsCatalogSvc.importProviderProduct(steamGiftProviderProduct._id, {
+            sellPrice: 16.25,
+            name: 'Steam Gift Publish Auto Candidate',
+        });
+        const { providerProduct: manualProviderProduct } = await createFazerCatalogOnlyProviderProduct({
+            familyKey: 'MANUAL_SERVICES',
+            overrides: {
+                executionBlocked: false,
+                isSupported: true,
+                isBlocked: false,
+                blockReason: null,
+                requiredFields: [{ key: 'account_username', label: 'Account Username', type: 'text', required: true }],
+                rawPayload: {
+                    family: 'MANUAL_SERVICES',
+                    category: { id: 'social_boost', name: 'Social Boost' },
+                    offer: {
+                        id: 'starter',
+                        product_id: 'starter',
+                        name: 'Starter',
+                        price_usd: '0.75',
+                        fields: [{ key: 'account_username', label: 'Account Username', type: 'text', required: true }],
+                    },
+                },
+            },
+        });
+        const { product: manualProduct } = await fazerCardsCatalogSvc.importProviderProduct(manualProviderProduct._id, {
+            sellPrice: 1.75,
+            name: 'Manual Service Publish Auto Candidate',
         });
 
         const result = await fazerCardsCatalogSvc.publishEligibleLaunchControls({
@@ -5338,44 +5485,134 @@ describe('FazerCards Phase 9 launch operations', () => {
         });
         const updatedTopup = await Product.findById(topupProduct._id).lean();
         const updatedGiftCard = await Product.findById(giftCardProduct._id).lean();
+        const updatedGameKey = await Product.findById(gameKeyProduct._id).lean();
         const updatedTelegram = await Product.findById(telegramProduct._id).lean();
+        const updatedSteam = await Product.findById(steamProduct._id).lean();
+        const updatedSteamGift = await Product.findById(steamGiftProduct._id).lean();
+        const updatedManual = await Product.findById(manualProduct._id).lean();
 
         expect(result).toMatchObject({
             success: true,
-            total: 2,
-            updated: 2,
+            total: 7,
+            updated: 7,
             failed: 0,
             publishScope: expect.objectContaining({
-                families: expect.arrayContaining(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']),
+                families: expect.arrayContaining(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS', 'TELEGRAM', 'STEAM_TOPUP', 'STEAM_GIFTS', 'MANUAL_SERVICES']),
                 providerExecutionMode: 'AUTO_PROVIDER',
             }),
         });
-        expect(updatedTopup).toMatchObject({
-            providerExecutionMode: 'AUTO_PROVIDER',
-            providerExecutionEnabled: true,
-            providerExecutionBlocked: false,
-            executionType: EXECUTION_TYPES.AUTOMATIC,
-        });
-        expect(updatedGiftCard).toMatchObject({
-            providerExecutionMode: 'AUTO_PROVIDER',
-            providerExecutionEnabled: true,
-            providerExecutionBlocked: false,
-            executionType: EXECUTION_TYPES.AUTOMATIC,
-        });
-        expect(updatedTelegram).toMatchObject({
-            isActive: false,
-            visibleInStore: false,
-            customerPurchaseEnabled: false,
-            providerExecutionMode: 'MANUAL_FULFILLMENT',
-            providerExecutionEnabled: false,
-        });
+        for (const updated of [updatedTopup, updatedGiftCard, updatedGameKey, updatedTelegram, updatedSteam, updatedSteamGift, updatedManual]) {
+            expect(updated).toMatchObject({
+                providerExecutionMode: 'AUTO_PROVIDER',
+                providerExecutionEnabled: true,
+                providerExecutionBlocked: false,
+                executionType: EXECUTION_TYPES.AUTOMATIC,
+                isActive: true,
+                visibleInStore: true,
+                status: PRODUCT_STATUSES.AVAILABLE,
+                customerPurchaseEnabled: true,
+            });
+        }
     });
 
-    it.each(['TELEGRAM', 'STEAM_TOPUP', 'MANUAL_SERVICES', 'STEAM_GIFTS'])('bulk AUTO_PROVIDER publish excludes %s', async (familyKey) => {
-        await expect(fazerCardsCatalogSvc.publishEligibleLaunchControls({
+    it.each([
+        ['TELEGRAM', { executionBlocked: true, isSupported: false, isBlocked: true }, 'AUTO_PROVIDER_REQUIRES_SUPPORTED_PROVIDER_PRODUCT'],
+        ['STEAM_TOPUP', { rawPayload: { family: 'STEAM_TOPUP', currency: 'USD' } }, 'AUTO_PROVIDER_STEAM_TOPUP_AMOUNT_MISSING'],
+        ['STEAM_GIFTS', { region: null, externalProductId: 'FAZER_STEAM_GIFT:730:54029', rawPayload: { family: 'STEAM_GIFTS', game: { appid: 730 }, offer: { sub_id: 54029 } } }, 'AUTO_PROVIDER_STEAM_GIFT_REGION_MISSING'],
+        ['MANUAL_SERVICES', { requiredFields: [] }, 'AUTO_PROVIDER_MANUAL_SERVICE_FIELDS_MISSING'],
+    ])('bulk AUTO_PROVIDER skips broken %s products that fail readiness', async (familyKey, overrides, expectedCode) => {
+        const { providerProduct } = await createFazerCatalogOnlyProviderProduct({
             familyKey,
+            overrides: {
+                executionBlocked: false,
+                isSupported: true,
+                isBlocked: false,
+                blockReason: null,
+                ...overrides,
+            },
+        });
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            sellPrice: 1.75,
+            name: `${familyKey} Broken Bulk Auto Candidate`,
+        });
+
+        const result = await fazerCardsCatalogSvc.bulkUpdateLaunchControls({
+            productIds: [product._id.toString()],
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
             providerExecutionMode: 'AUTO_PROVIDER',
-        })).rejects.toMatchObject({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED' });
+            providerExecutionEnabled: true,
+            dryRun: true,
+        });
+
+        expect(result).toMatchObject({ success: false, failed: 1, wouldUpdate: 0 });
+        expect(result.results[0].errors).toEqual(expect.arrayContaining([
+            expect.objectContaining({ code: expectedCode }),
+        ]));
+    });
+
+    it('bulk AUTO_PROVIDER keeps UNKNOWN products blocked', async () => {
+        const provider = await Provider.create({
+            name: `FazerCards Unknown ${Date.now()}`,
+            slug: `fazer-cards-unknown-${Date.now()}`,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            baseUrl: 'https://api.fzr.cards/api/v2',
+            isActive: true,
+            syncInterval: 0,
+        });
+        const providerProduct = await ProviderProduct.create({
+            provider: provider._id,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            externalProductId: 'FAZER_UNKNOWN:thing',
+            rawName: 'Unknown Fazer Product',
+            rawPrice: '1',
+            costPrice: '1',
+            currency: 'USD',
+            familyKey: 'UNKNOWN',
+            fulfillmentMode: FULFILLMENT_MODES.UNKNOWN,
+            isSupported: true,
+            isBlocked: false,
+            executionBlocked: false,
+            requiredFields: [{ key: 'account_username', label: 'Account Username', type: 'text', required: true }],
+        });
+        const product = await Product.create({
+            name: 'Unknown Fazer Launch Candidate',
+            basePrice: '2',
+            finalPrice: '2',
+            currency: 'USD',
+            minQty: 1,
+            maxQty: 1,
+            isActive: false,
+            visibleInStore: false,
+            status: PRODUCT_STATUSES.UNAVAILABLE,
+            customerPurchaseEnabled: false,
+            provider,
+            providerProduct,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            familyKey: 'UNKNOWN',
+            fulfillmentMode: FULFILLMENT_MODES.UNKNOWN,
+            providerExecutionMode: 'DISABLED',
+            providerExecutionEnabled: false,
+            orderFields: [{ id: 'account_username', key: 'account_username', label: 'Account Username', type: 'text', required: true, isActive: true }],
+        });
+
+        const result = await fazerCardsCatalogSvc.bulkUpdateLaunchControls({
+            productIds: [product._id.toString()],
+            customerPurchaseEnabled: true,
+            isActive: true,
+            visibleInStore: true,
+            status: PRODUCT_STATUSES.AVAILABLE,
+            providerExecutionMode: 'AUTO_PROVIDER',
+            providerExecutionEnabled: true,
+            dryRun: true,
+        });
+
+        expect(result).toMatchObject({ success: false, failed: 1 });
+        expect(result.results[0].errors).toEqual(expect.arrayContaining([
+            expect.objectContaining({ code: 'CONTRACT_AUTO_EXECUTION_NOT_ALLOWED' }),
+        ]));
     });
 
     it('bulk launch returns per-product customer visibility reasons', async () => {

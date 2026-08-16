@@ -72,7 +72,7 @@ const FAZERCARDS_FAMILIES = Object.freeze({
         executionEnabled: false,
         executionGloballyGated: true,
         catalogStrategy: 'appid_on_demand',
-        warning: 'Steam Gifts read-only catalog access is confirmed. Use explicit appid/on-demand import only; excluded from bulk auto.',
+        warning: 'Steam Gifts read-only catalog access is confirmed. Use explicit appid/on-demand import only; broad catalog sync stays disabled.',
     }),
     TELEGRAM: Object.freeze({
         familyKey: 'TELEGRAM',
@@ -86,7 +86,7 @@ const FAZERCARDS_FAMILIES = Object.freeze({
         executionAvailable: true,
         executionEnabled: false,
         executionGloballyGated: true,
-        warning: 'Telegram execution is implemented for explicit controlled product-level tests only and remains excluded from bulk auto.',
+        warning: 'Telegram execution is gated by environment, product readiness, and asynchronous status/webhook confirmation.',
     }),
     MANUAL_SERVICES: Object.freeze({
         familyKey: 'MANUAL_SERVICES',
