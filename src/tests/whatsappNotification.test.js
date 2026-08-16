@@ -12,8 +12,10 @@ const axios = require('axios');
 const app = require('../app');
 const config = require('../config/config');
 const whatsappService = require('../modules/notifications/whatsapp/whatsappNotification.service');
+const queueLockService = require('../modules/notifications/whatsapp/whatsappQueueLock.service');
 const { notifyDepositRequested } = require('../modules/notifications/notification.events');
 const { WhatsAppNotificationLog } = require('../modules/notifications/whatsapp/whatsappNotificationLog.model');
+const { WhatsAppQueueLock } = require('../modules/notifications/whatsapp/whatsappQueueLock.model');
 const { AdminWhatsAppRecipient } = require('../modules/notifications/whatsapp/adminWhatsAppRecipient.model');
 const { normalizePhoneNumber } = require('../modules/notifications/whatsapp/phoneNormalizer');
 const { User } = require('../modules/users/user.model');
@@ -51,6 +53,10 @@ beforeEach(async () => {
     process.env.OPENWA_DEFAULT_COUNTRY_CODE = '20';
     process.env.OPENWA_MAX_RETRIES = '3';
     process.env.OPENWA_RETRY_DELAY_SECONDS = '1';
+    process.env.WHATSAPP_QUEUE_ENABLED = 'true';
+    process.env.WHATSAPP_WORKER_LOCK_TTL_MS = '60000';
+    process.env.WHATSAPP_WORKER_HEARTBEAT_MS = '10000';
+    process.env.WHATSAPP_PROCESSING_STALE_AFTER_MS = '600000';
     axios.post.mockReset();
     axios.get.mockReset();
     axios.post.mockResolvedValue({ data: { id: 'provider-message-1' } });
@@ -67,6 +73,10 @@ afterEach(() => {
     delete process.env.OPENWA_DEFAULT_COUNTRY_CODE;
     delete process.env.OPENWA_MAX_RETRIES;
     delete process.env.OPENWA_RETRY_DELAY_SECONDS;
+    delete process.env.WHATSAPP_QUEUE_ENABLED;
+    delete process.env.WHATSAPP_WORKER_LOCK_TTL_MS;
+    delete process.env.WHATSAPP_WORKER_HEARTBEAT_MS;
+    delete process.env.WHATSAPP_PROCESSING_STALE_AFTER_MS;
 });
 
 const tokenFor = (user) => jwt.sign({ id: user._id, role: user.role }, config.jwt.secret, { expiresIn: '1h' });
@@ -260,6 +270,106 @@ describe('WhatsApp notifications', () => {
         expect(failed.nextRetryAt).toBeInstanceOf(Date);
     });
 
+    it('allows only one worker to acquire the WhatsApp queue lock', async () => {
+        const first = await queueLockService.acquireQueueLock({ ownerId: 'worker-a', ttlMs: 60000 });
+        const second = await queueLockService.acquireQueueLock({ ownerId: 'worker-b', ttlMs: 60000 });
+
+        expect(first).toBeTruthy();
+        expect(first.ownerId).toBe('worker-a');
+        expect(second).toBeNull();
+        expect(await WhatsAppQueueLock.countDocuments({ name: queueLockService.LOCK_NAME })).toBe(1);
+    });
+
+    it('lets another worker acquire an expired WhatsApp queue lock', async () => {
+        await queueLockService.acquireQueueLock({ ownerId: 'worker-a', ttlMs: 60000 });
+        await WhatsAppQueueLock.updateOne(
+            { name: queueLockService.LOCK_NAME },
+            { $set: { expiresAt: new Date(Date.now() - 1000) } }
+        );
+
+        const second = await queueLockService.acquireQueueLock({ ownerId: 'worker-b', ttlMs: 60000 });
+
+        expect(second).toBeTruthy();
+        expect(second.ownerId).toBe('worker-b');
+        expect(await WhatsAppQueueLock.countDocuments({ name: queueLockService.LOCK_NAME })).toBe(1);
+    });
+
+    it('skips processing quietly when the WhatsApp queue lock is already held', async () => {
+        await queueLockService.acquireQueueLock({ ownerId: 'worker-a', ttlMs: 60000 });
+        await whatsappService.queueWhatsAppNotification({
+            recipientType: 'admin',
+            phone: '+201022222222',
+            eventType: 'manual_deposit_pending',
+            payload: { amount: 100, currency: 'EGP' },
+        });
+
+        const processed = await whatsappService.processPendingMessages({ limit: 1, ownerId: 'worker-b' });
+        const pending = await WhatsAppNotificationLog.findOne({ status: 'pending' }).lean();
+
+        expect(processed).toEqual([]);
+        expect(axios.post).not.toHaveBeenCalled();
+        expect(pending).toBeTruthy();
+    });
+
+    it('recovers stale processing logs conservatively without immediate send', async () => {
+        process.env.WHATSAPP_PROCESSING_STALE_AFTER_MS = '1';
+        const log = await WhatsAppNotificationLog.create({
+            recipientType: 'admin',
+            phone: '201011111111',
+            chatId: '201011111111@c.us',
+            eventType: 'test_message',
+            title: 'Stale',
+            message: 'Stale',
+            status: 'processing',
+            retryCount: 0,
+            maxRetries: 3,
+        });
+        await WhatsAppNotificationLog.updateOne(
+            { _id: log._id },
+            { $set: { updatedAt: new Date(Date.now() - 60_000) } },
+            { timestamps: false }
+        );
+
+        await whatsappService.processPendingMessages({ limit: 5 });
+
+        const recovered = await WhatsAppNotificationLog.findById(log._id).lean();
+        expect(axios.post).not.toHaveBeenCalled();
+        expect(recovered.status).toBe('retry_pending');
+        expect(recovered.retryCount).toBe(1);
+        expect(recovered.reason).toBe('STALE_PROCESSING_RECOVERED');
+        expect(recovered.nextRetryAt).toBeInstanceOf(Date);
+        expect(recovered.metadata.recovery.previousStatus).toBe('processing');
+    });
+
+    it('marks stale processing logs failed when retry limit is reached', async () => {
+        process.env.WHATSAPP_PROCESSING_STALE_AFTER_MS = '1';
+        const log = await WhatsAppNotificationLog.create({
+            recipientType: 'admin',
+            phone: '201011111111',
+            chatId: '201011111111@c.us',
+            eventType: 'test_message',
+            title: 'Stale max',
+            message: 'Stale max',
+            status: 'processing',
+            retryCount: 3,
+            maxRetries: 3,
+        });
+        await WhatsAppNotificationLog.updateOne(
+            { _id: log._id },
+            { $set: { updatedAt: new Date(Date.now() - 60_000) } },
+            { timestamps: false }
+        );
+
+        await whatsappService.processPendingMessages({ limit: 5 });
+
+        const failed = await WhatsAppNotificationLog.findById(log._id).lean();
+        expect(axios.post).not.toHaveBeenCalled();
+        expect(failed.status).toBe('failed');
+        expect(failed.retryCount).toBe(3);
+        expect(failed.reason).toBe('STALE_PROCESSING_MAX_RETRIES');
+        expect(failed.nextRetryAt).toBeNull();
+    });
+
     it('marks OpenWA HTTP 500 as sent_unconfirmed and does not auto-retry', async () => {
         const error = new Error('Cannot read properties of undefined (reading id)');
         error.response = { status: 500, data: { message: error.message } };
@@ -330,6 +440,23 @@ describe('WhatsApp notifications', () => {
         const sent = await WhatsAppNotificationLog.findById(log._id).lean();
         expect(axios.post).toHaveBeenCalledTimes(1);
         expect(sent.status).toBe('sent');
+    });
+
+    it('does not call OpenWA send when OpenWA is disabled', async () => {
+        process.env.OPENWA_ENABLED = 'false';
+        const log = await whatsappService.queueWhatsAppNotification({
+            recipientType: 'admin',
+            phone: '+201022222222',
+            eventType: 'manual_deposit_pending',
+            payload: { amount: 100, currency: 'EGP' },
+        });
+
+        await whatsappService.processPendingMessages({ limit: 1 });
+
+        const skipped = await WhatsAppNotificationLog.findById(log._id).lean();
+        expect(axios.post).not.toHaveBeenCalled();
+        expect(skipped.status).toBe('skipped');
+        expect(skipped.reason).toBe('OPENWA_DISABLED');
     });
 
     it('maxRetries=0 never schedules retry_pending for retryable OpenWA failures', async () => {

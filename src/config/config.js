@@ -149,6 +149,7 @@ const config = {
 
     openwa: {
         enabled: process.env.OPENWA_ENABLED === 'true',
+        queueEnabled: process.env.WHATSAPP_QUEUE_ENABLED !== 'false',
         baseUrl: process.env.OPENWA_BASE_URL || 'http://127.0.0.1:2785/api',
         apiKey: process.env.OPENWA_API_KEY,
         sessionId: process.env.OPENWA_SESSION_ID,
@@ -157,6 +158,9 @@ const config = {
         sendTimeoutMs: parseInt(process.env.OPENWA_SEND_TIMEOUT_MS || '15000', 10),
         maxRetries: parseInt(process.env.OPENWA_MAX_RETRIES || '3', 10),
         retryDelaySeconds: parseInt(process.env.OPENWA_RETRY_DELAY_SECONDS || '60', 10),
+        workerLockTtlMs: parseInt(process.env.WHATSAPP_WORKER_LOCK_TTL_MS || '120000', 10),
+        workerHeartbeatMs: parseInt(process.env.WHATSAPP_WORKER_HEARTBEAT_MS || '30000', 10),
+        processingStaleAfterMs: parseInt(process.env.WHATSAPP_PROCESSING_STALE_AFTER_MS || '600000', 10),
     },
 };
 

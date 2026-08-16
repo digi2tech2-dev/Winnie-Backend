@@ -32,6 +32,9 @@ const stop = () => {
     if (interval) clearInterval(interval);
     interval = null;
     running = false;
+    void service.releaseQueueLock().catch(() => {
+        // Best-effort cleanup; an expired lock can be claimed by another worker.
+    });
 };
 
 module.exports = { start, stop, tick };

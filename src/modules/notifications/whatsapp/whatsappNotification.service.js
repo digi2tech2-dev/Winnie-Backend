@@ -9,6 +9,13 @@ const { WhatsAppNotificationLog } = require('./whatsappNotificationLog.model');
 const { normalizePhoneNumber } = require('./phoneNormalizer');
 const openwaClient = require('./openwa.client');
 const { renderTemplate } = require('./whatsappTemplates');
+const {
+    acquireQueueLock,
+    buildOwner,
+    getQueueRuntimeConfig,
+    releaseQueueLock,
+    renewQueueLock,
+} = require('./whatsappQueueLock.service');
 const { createAuditLog } = require('../../audit/audit.service');
 const {
     ADMIN_ACTIONS,
@@ -659,9 +666,18 @@ const queueAdminEvent = async ({ eventType, relatedEntityType = null, relatedEnt
 
 const claimLogForProcessing = async (log) => {
     if (!log?._id) return null;
+    const owner = buildOwner();
     return WhatsAppNotificationLog.findOneAndUpdate(
         { _id: log._id, status: log.status },
-        { $set: { status: LOG_STATUSES.PROCESSING } },
+        {
+            $set: {
+                status: LOG_STATUSES.PROCESSING,
+                'metadata.processing': {
+                    ownerId: owner.ownerId,
+                    claimedAt: new Date(),
+                },
+            },
+        },
         { new: true }
     );
 };
@@ -730,16 +746,94 @@ const processOneLog = async (log) => {
     }
 };
 
-const processPendingMessages = async ({ limit = 20 } = {}) => {
+const recoverStaleProcessingMessages = async ({ limit = 100 } = {}) => {
+    const runtime = {
+        ...getRuntimeOpenWaConfig(),
+        ...getQueueRuntimeConfig(),
+    };
+    const now = new Date();
+    const staleBefore = new Date(now.getTime() - runtime.processingStaleAfterMs);
+    const logs = await WhatsAppNotificationLog.find({
+        status: LOG_STATUSES.PROCESSING,
+        updatedAt: { $lte: staleBefore },
+    })
+        .sort({ updatedAt: 1 })
+        .limit(limit);
+
+    const recovered = [];
+    for (const log of logs) {
+        const currentRetryCount = Number(log.retryCount || 0);
+        const maxRetries = Number(log.maxRetries || runtime.maxRetries || 0);
+        const nextRetryCount = currentRetryCount >= maxRetries
+            ? currentRetryCount
+            : currentRetryCount + 1;
+        const shouldRetry = nextRetryCount < maxRetries;
+        const metadata = {
+            ...(log.metadata || {}),
+            recovery: {
+                ...(log.metadata?.recovery || {}),
+                staleProcessingRecoveredAt: now,
+                staleProcessingUpdatedAt: log.updatedAt,
+                previousStatus: LOG_STATUSES.PROCESSING,
+            },
+        };
+        const update = shouldRetry
+            ? {
+                status: LOG_STATUSES.RETRY_PENDING,
+                retryCount: nextRetryCount,
+                nextRetryAt: new Date(now.getTime() + runtime.retryDelaySeconds * 1000),
+                reason: 'STALE_PROCESSING_RECOVERED',
+                errorMessage: 'WhatsApp notification processing became stale and was queued for a conservative retry.',
+                metadata,
+            }
+            : {
+                status: LOG_STATUSES.FAILED,
+                retryCount: nextRetryCount,
+                nextRetryAt: null,
+                reason: 'STALE_PROCESSING_MAX_RETRIES',
+                errorMessage: 'WhatsApp notification processing became stale and reached the retry limit.',
+                metadata,
+            };
+
+        const updated = await WhatsAppNotificationLog.findOneAndUpdate(
+            { _id: log._id, status: LOG_STATUSES.PROCESSING, updatedAt: log.updatedAt },
+            { $set: update },
+            { new: true }
+        );
+        if (updated) recovered.push(updated);
+    }
+
+    return recovered;
+};
+
+const processPendingMessages = async ({ limit = 20, ownerId = null } = {}) => {
+    const queueRuntime = getQueueRuntimeConfig();
+    if (!queueRuntime.queueEnabled) return [];
+
     if (processingPendingMessages) {
         processPendingAgain = true;
         return [];
     }
 
+    const lock = await acquireQueueLock({ ownerId });
+    if (!lock) return [];
+
     processingPendingMessages = true;
+    let lockLost = false;
+    const heartbeat = setInterval(() => {
+        void renewQueueLock({ ownerId }).then((renewed) => {
+            if (!renewed) lockLost = true;
+        }).catch(() => {
+            lockLost = true;
+        });
+    }, queueRuntime.workerHeartbeatMs);
+    heartbeat.unref?.();
+
     const results = [];
 
     try {
+        await recoverStaleProcessingMessages({ limit: Math.max(limit, 25) });
+
         do {
             processPendingAgain = false;
             const now = new Date();
@@ -762,6 +856,7 @@ const processPendingMessages = async ({ limit = 20 } = {}) => {
                 .limit(limit);
 
             for (const log of logs) {
+                if (lockLost) break;
                 const processed = await processOneLog(log);
                 if (processed) results.push(processed);
             }
@@ -769,7 +864,9 @@ const processPendingMessages = async ({ limit = 20 } = {}) => {
 
         return results;
     } finally {
+        clearInterval(heartbeat);
         processingPendingMessages = false;
+        await releaseQueueLock({ ownerId });
     }
 };
 
@@ -865,7 +962,9 @@ module.exports = {
     queueWhatsAppNotification,
     queueCustomerEvent,
     queueAdminEvent,
+    recoverStaleProcessingMessages,
     processPendingMessages,
+    releaseQueueLock,
     listLogs,
     retryLog,
 };
