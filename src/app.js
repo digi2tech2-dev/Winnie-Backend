@@ -36,6 +36,7 @@ const adminRoutes = require('./modules/admin/admin.routes');    // ← dashboard
 const meRoutes = require('./modules/me/me.routes');          // ← user panel
 const currencyRoutes = require('./modules/currency/currency.routes');
 const uploadRoutes = require('./shared/routes/upload.routes');
+const secureUploadRoutes = require('./shared/routes/secureUpload.routes');
 const path = require('path');
 // Seed default settings on startup (idempotent, no-op if already seeded)
 require('./modules/admin/setting.model').seedDefaultSettings().catch(() => { });
@@ -92,8 +93,12 @@ if (config.env !== 'test') {
 }
 
 // ── Static Files ──────────────────────────────────────────────────────────────
-// Serve uploaded files (deposit receipts, etc.) from /uploads
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
+const uploadsRoot = path.join(__dirname, '..', 'uploads');
+const publicUploadFolders = ['avatars', 'categories', 'payments', 'products'];
+
+publicUploadFolders.forEach((folder) => {
+    app.use(`/uploads/${folder}`, express.static(path.join(uploadsRoot, folder)));
+});
 
 // ── Passport (OAuth strategies) ───────────────────────────────────────────────
 // Only initialize when Google credentials are configured.
@@ -136,6 +141,7 @@ app.use(`${API_PREFIX}/deposits`, depositRoutes);
 app.use(`${API_PREFIX}/payments`, paymentRoutes);
 app.use(`${API_PREFIX}/webhooks/payments`, paymentWebhookRoutes);
 app.use(`${API_PREFIX}/webhooks/providers/fazercards`, fazerCardsWebhookRoutes);
+app.use(`${API_PREFIX}/secure-uploads`, secureUploadRoutes);
 app.use(`${API_PREFIX}`, referralRoutes);
 app.use(`${API_PREFIX}`, groupRequestRoutes);
 app.use(`${API_PREFIX}/notifications`, notificationRoutes);

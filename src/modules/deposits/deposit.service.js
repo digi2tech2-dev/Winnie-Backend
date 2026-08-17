@@ -24,6 +24,7 @@ const { createAuditLog } = require('../audit/audit.service');
 const { DEPOSIT_ACTIONS, WALLET_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
 const { getDepositRate } = require('../../services/currencyConverter.service');
 const { localToUsd, usdToLocal } = require('../../shared/utils/currencyMath');
+const { createSignedUploadUrl } = require('../../shared/utils/secureUploadSigner');
 
 const ANTI_SCAM_CONFIRMATION_REQUIRED_MESSAGE =
     'Please confirm the anti-scam safety warning before continuing.';
@@ -39,6 +40,16 @@ const assertAntiScamConfirmation = ({ antiScamConfirmed, termsAccepted } = {}) =
 };
 
 const toMoney = (value) => Number(Number(value || 0).toFixed(2));
+
+const isAdminReviewer = (user = {}) => (
+    user.role === 'ADMIN' ||
+    (user.role === 'SUPERVISOR' && Array.isArray(user.permissions) && user.permissions.includes('topups.review'))
+);
+
+const sameId = (left, right) => {
+    if (!left || !right) return false;
+    return left.toString() === right.toString();
+};
 
 const resolveDepositCreditSnapshot = async ({
     deposit,
@@ -563,6 +574,18 @@ const updatePendingDeposit = async (depositId, data, adminId) => {
     return deposit;
 };
 
+const getReceiptSignedUrl = async (depositId, viewer = {}, options = {}) => {
+    const deposit = await DepositRequest.findById(depositId).select('userId receiptImage');
+    if (!deposit) throw new NotFoundError('DepositRequest');
+
+    if (!isAdminReviewer(viewer) && !sameId(deposit.userId, viewer._id || viewer.id)) {
+        throw new AuthorizationError('You do not have permission to view this receipt.');
+    }
+
+    if (!deposit.receiptImage) throw new NotFoundError('Deposit receipt');
+    return createSignedUploadUrl(deposit.receiptImage, options);
+};
+
 module.exports = {
     createDepositRequest,
     approveDeposit,
@@ -571,4 +594,5 @@ module.exports = {
     listMyDeposits,
     getDepositById,
     updatePendingDeposit,
+    getReceiptSignedUrl,
 };

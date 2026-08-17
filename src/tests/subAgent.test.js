@@ -429,7 +429,29 @@ describe('Sub-agent referral and commission rules', () => {
             proofImage,
         });
 
-        expect(request.proofImageUrl).toContain('/uploads/sub-agent-requests/');
+        expect(request.proofImagePath).toBe('uploads/sub-agent-requests/sub-agent-test.jpg');
+        expect(request.proofImageUrl).toContain('/api/secure-uploads/file?');
+    });
+
+    it('creates signed proof URLs for owner and admin reviewers only by record id', async () => {
+        const group = await createGroup();
+        const owner = await createCustomer({ groupId: group._id });
+        const otherCustomer = await createCustomer({ groupId: group._id });
+        const request = await groupRequestService.createGroupRequest({
+            userId: owner._id,
+            requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            reason: 'With proof',
+            proofImage,
+        });
+
+        const ownerUrl = await groupRequestService.getMyProofSignedUrl(owner._id, request.id);
+        const adminUrl = await groupRequestService.getAdminProofSignedUrl(request.id);
+
+        expect(ownerUrl.url).toContain('/api/secure-uploads/file?');
+        expect(ownerUrl.url).not.toMatch(/jwt|bearer|authorization|token=/i);
+        expect(adminUrl.url).toContain('/api/secure-uploads/file?');
+        await expect(groupRequestService.getMyProofSignedUrl(otherCustomer._id, request.id))
+            .rejects.toMatchObject({ code: 'NOT_FOUND' });
     });
 
     it('admin wallet adjustment does not create commission', async () => {

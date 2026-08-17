@@ -171,4 +171,16 @@ const reviewDeposit = catchAsync(async (req, res) => {
     }
 });
 
-module.exports = { createDeposit, listDeposits, approveDeposit, rejectDeposit, reviewDeposit };
+const getReceiptSignedUrl = catchAsync(async (req, res) => {
+    const signedUrl = await depositService.getReceiptSignedUrl(req.params.id, req.user);
+    sendSuccess(res, signedUrl, 'Deposit receipt URL created.');
+});
+
+module.exports = {
+    createDeposit,
+    listDeposits,
+    approveDeposit,
+    rejectDeposit,
+    reviewDeposit,
+    getReceiptSignedUrl,
+};

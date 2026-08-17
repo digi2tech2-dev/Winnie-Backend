@@ -56,6 +56,16 @@ router.get(
 );
 
 router.get(
+    '/me/group-change-requests/:id/proof-url',
+    authenticate,
+    requireActiveUser,
+    authorizeRoles('CUSTOMER'),
+    requestIdValidation,
+    validate,
+    groupRequestController.getMyProofSignedUrl
+);
+
+router.get(
     '/me/group-change-requests/:id',
     authenticate,
     requireActiveUser,
@@ -86,6 +96,19 @@ router.get(
     adminGroupRequestListValidation,
     validate,
     groupRequestController.adminListRequests
+);
+
+router.get(
+    '/admin/group-change-requests/:id/proof-url',
+    authenticate,
+    authorizeRoles('ADMIN', 'SUPERVISOR'),
+    requireAnyPermission(
+        GROUP_REQUEST_PERMISSIONS.VIEW,
+        GROUP_REQUEST_PERMISSIONS.MANAGE
+    ),
+    requestIdValidation,
+    validate,
+    groupRequestController.adminGetProofSignedUrl
 );
 
 router.get(

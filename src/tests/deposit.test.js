@@ -560,6 +560,38 @@ describe('[7] getDepositById', () => {
     });
 });
 
+describe('[7.5] secure deposit receipt URLs', () => {
+    it('allows an admin reviewer to create a signed receipt URL', async () => {
+        const customer = await makeCustomer();
+        const admin = await createAdmin();
+        const deposit = await createPendingDeposit(customer._id);
+
+        const result = await depositService.getReceiptSignedUrl(deposit._id, admin);
+
+        expect(result.url).toContain('/api/secure-uploads/file?');
+        expect(result.url).not.toMatch(/jwt|bearer|authorization|token=/i);
+        expect(result.expiresIn).toBeGreaterThan(0);
+    });
+
+    it('allows a customer to create a signed URL for their own receipt', async () => {
+        const customer = await makeCustomer();
+        const deposit = await createPendingDeposit(customer._id);
+
+        const result = await depositService.getReceiptSignedUrl(deposit._id, customer);
+
+        expect(result.url).toContain('/api/secure-uploads/file?');
+    });
+
+    it('rejects a customer viewing another customer receipt', async () => {
+        const owner = await makeCustomer();
+        const otherCustomer = await makeCustomer();
+        const deposit = await createPendingDeposit(owner._id);
+
+        await expect(depositService.getReceiptSignedUrl(deposit._id, otherCustomer))
+            .rejects.toMatchObject({ statusCode: 403 });
+    });
+});
+
 describe('[8] Audit log correctness', () => {
     let customer;
     let admin;

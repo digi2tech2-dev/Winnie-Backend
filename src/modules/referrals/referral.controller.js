@@ -217,6 +217,11 @@ const adminListSubAgentRequests = catchAsync(async (req, res) => {
     sendPaginated(res, { requests: result.requests }, result.pagination, 'Sub-agent requests retrieved.');
 });
 
+const adminGetSubAgentRequestProofSignedUrl = catchAsync(async (req, res) => {
+    const signedUrl = await groupRequestService.getAdminProofSignedUrl(req.params.id);
+    sendSuccess(res, signedUrl, 'Sub-agent request proof URL created.');
+});
+
 const adminApproveSubAgentRequest = catchAsync(async (req, res) => {
     const result = await groupRequestService.approveGroupRequest(req.params.id, {
         approvedGroupId: req.body.approvedGroupId || req.body.groupId || null,
@@ -282,6 +287,7 @@ module.exports = {
     adminMarkReferralPayoutPaid,
     adminRejectReferralPayout,
     adminListSubAgentRequests,
+    adminGetSubAgentRequestProofSignedUrl,
     adminApproveSubAgentRequest,
     adminRejectSubAgentRequest,
     adminListSubAgents,

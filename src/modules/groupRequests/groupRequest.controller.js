@@ -53,6 +53,11 @@ const getMyRequest = catchAsync(async (req, res) => {
     sendSuccess(res, { request }, 'Group request retrieved.');
 });
 
+const getMyProofSignedUrl = catchAsync(async (req, res) => {
+    const signedUrl = await groupRequestService.getMyProofSignedUrl(req.user._id, req.params.id);
+    sendSuccess(res, signedUrl, 'Group request proof URL created.');
+});
+
 const cancelMyRequest = catchAsync(async (req, res) => {
     const request = await groupRequestService.cancelMyRequest(req.user._id, req.params.id, {
         actor: actorFrom(req),
@@ -84,6 +89,11 @@ const adminListRequests = catchAsync(async (req, res) => {
 const adminGetRequest = catchAsync(async (req, res) => {
     const request = await groupRequestService.getRequestById(req.params.id);
     sendSuccess(res, { request }, 'Group request retrieved.');
+});
+
+const adminGetProofSignedUrl = catchAsync(async (req, res) => {
+    const signedUrl = await groupRequestService.getAdminProofSignedUrl(req.params.id);
+    sendSuccess(res, signedUrl, 'Group request proof URL created.');
 });
 
 const adminApproveRequest = catchAsync(async (req, res) => {
@@ -119,10 +129,12 @@ module.exports = {
     createMyRequest,
     listMyRequests,
     getMyRequest,
+    getMyProofSignedUrl,
     cancelMyRequest,
     getGroupChangeOptions,
     adminListRequests,
     adminGetRequest,
+    adminGetProofSignedUrl,
     adminApproveRequest,
     adminRejectRequest,
 };

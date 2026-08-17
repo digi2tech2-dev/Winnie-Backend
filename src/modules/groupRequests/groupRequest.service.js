@@ -34,6 +34,7 @@ const {
     GROUP_REQUEST_STATUS,
     GROUP_REQUEST_PERMISSIONS,
 } = require('./groupRequest.constants');
+const { createSignedUploadUrl } = require('../../shared/utils/secureUploadSigner');
 
 const GROUP_PROJECTION = 'name percentage isActive deletedAt';
 const USER_PROJECTION = 'name email role status groupId isSubAgent subAgentStatus permissions referralCode referredBy referredByAgentId referralCommissionStoppedAt agentProfile';
@@ -68,6 +69,21 @@ const normalizeProofImage = (proofImage = null) => {
         proofImageMimeType: trimOrNull(proofImage.proofImageMimeType || proofImage.mimeType),
         proofImageSize: proofImage.proofImageSize ?? proofImage.size ?? null,
     };
+};
+
+const proofPathFromRequest = (request = {}) => (
+    trimOrNull(request.proofImagePath) || trimOrNull(request.proofImageUrl)
+);
+
+const buildSignedProofImageUrl = (request = {}) => {
+    const proofPath = proofPathFromRequest(request);
+    if (!proofPath) return null;
+
+    try {
+        return createSignedUploadUrl(proofPath).url;
+    } catch (_) {
+        return null;
+    }
 };
 
 const runQuery = (query, session = null) => (session ? query.session(session) : query);
@@ -182,7 +198,7 @@ const formatRequest = (request, { admin = false } = {}) => {
         reason: request.reason || null,
         adminNote: admin || reviewed ? request.adminNote || null : null,
         proofImagePath: request.proofImagePath || null,
-        proofImageUrl: request.proofImageUrl || null,
+        proofImageUrl: buildSignedProofImageUrl(request),
         proofImageOriginalName: request.proofImageOriginalName || null,
         proofImageMimeType: request.proofImageMimeType || null,
         proofImageSize: request.proofImageSize ?? null,
@@ -681,6 +697,24 @@ const listRequests = async ({
 
 const getRequestById = async (id) => getFormattedRequestById(id, { admin: true });
 
+const getMyProofSignedUrl = async (userId, id) => {
+    const request = await GroupChangeRequest.findOne({ _id: id, userId }).select('proofImagePath proofImageUrl').lean();
+    if (!request) throw new NotFoundError('Group change request');
+
+    const proofPath = proofPathFromRequest(request);
+    if (!proofPath) throw new NotFoundError('Proof image');
+    return createSignedUploadUrl(proofPath);
+};
+
+const getAdminProofSignedUrl = async (id) => {
+    const request = await GroupChangeRequest.findById(id).select('proofImagePath proofImageUrl').lean();
+    if (!request) throw new NotFoundError('Group change request');
+
+    const proofPath = proofPathFromRequest(request);
+    if (!proofPath) throw new NotFoundError('Proof image');
+    return createSignedUploadUrl(proofPath);
+};
+
 const approveGroupRequest = async (id, {
     approvedGroupId = null,
     adminNote = null,
@@ -932,6 +966,8 @@ module.exports = {
     getGroupChangeOptionsForUser,
     listRequests,
     getRequestById,
+    getMyProofSignedUrl,
+    getAdminProofSignedUrl,
     approveGroupRequest,
     rejectGroupRequest,
     formatRequest,

@@ -1,6 +1,7 @@
 'use strict';
 
 const { Router } = require('express');
+const { param } = require('express-validator');
 const depositController = require('./deposit.controller');
 const {
     createDepositValidation,
@@ -47,6 +48,13 @@ router.get(
     '/',
     listDepositsValidation, validate,
     depositController.listDeposits
+);
+
+router.get(
+    '/:id/receipt-url',
+    param('id').isMongoId(),
+    validate,
+    depositController.getReceiptSignedUrl
 );
 
 // ─── Admin Routes ─────────────────────────────────────────────────────────────

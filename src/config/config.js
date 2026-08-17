@@ -17,6 +17,11 @@ const config = {
         expiresIn: process.env.JWT_EXPIRES_IN || '7d',
     },
 
+    secureUploads: {
+        signingSecret: process.env.SECURE_UPLOAD_SIGNING_SECRET || process.env.JWT_SECRET,
+        urlTtlSeconds: parseInt(process.env.SECURE_UPLOAD_URL_TTL_SECONDS || '600', 10),
+    },
+
     bcrypt: {
         rounds: parseInt(process.env.BCRYPT_ROUNDS, 10) || 12,
     },

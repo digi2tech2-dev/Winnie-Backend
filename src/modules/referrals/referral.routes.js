@@ -215,6 +215,16 @@ router.get(
     referralController.adminListSubAgentRequests
 );
 
+router.get(
+    '/admin/sub-agents/requests/:id/proof-url',
+    authenticate,
+    authorizeRoles('ADMIN', 'SUPERVISOR'),
+    requireAnyPermission(GROUP_REQUEST_PERMISSIONS.VIEW, GROUP_REQUEST_PERMISSIONS.MANAGE),
+    param('id').isMongoId(),
+    validate,
+    referralController.adminGetSubAgentRequestProofSignedUrl
+);
+
 router.post(
     '/admin/sub-agents/requests/:id/approve',
     authenticate,

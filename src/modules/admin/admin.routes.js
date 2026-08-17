@@ -382,6 +382,11 @@ router.get('/deposits', requirePermission('topups.review'), catchAsync(async (re
     });
 }));
 
+router.get('/deposits/:id/receipt-url', requirePermission('topups.review'), catchAsync(async (req, res) => {
+    const signedUrl = await depositSvc.getReceiptSignedUrl(req.params.id, req.user);
+    sendSuccess(res, signedUrl, 'Deposit receipt URL created.');
+}));
+
 router.get('/deposits/:id', requirePermission('topups.review'), catchAsync(async (req, res) => {
     const deposit = await depositSvc.getDepositById(req.params.id);
     sendSuccess(res, deposit);

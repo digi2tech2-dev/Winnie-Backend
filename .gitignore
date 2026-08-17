@@ -4,3 +4,5 @@ dist/
 *.log
 logs/
 Project/
+uploads/deposits/
+uploads/sub-agent-requests/
