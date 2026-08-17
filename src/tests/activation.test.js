@@ -431,25 +431,38 @@ describe('API token management', () => {
         group = await createGroup({ name: 'ApiTokenGroup', percentage: 0 });
     });
 
-    it('regenerateMyApiToken returns a new token and persists it', async () => {
-        const customer = await createCustomer({ groupId: group._id });
+    it('regenerateMyApiToken returns a new key once and stores only its hash', async () => {
+        const customer = await createCustomer({ groupId: group._id, isApiEnabled: true });
         const result = await userService.regenerateMyApiToken(customer._id);
 
-        expect(result.apiToken).toMatch(/^[a-f0-9]{64}$/);
+        expect(result.apiKey).toMatch(/^winnie_/);
+        expect(result.apiAccess.enabled).toBe(true);
+        expect(result.apiAccess.hasApiKey).toBe(true);
         expect(result.user.apiToken).toBeUndefined();
+        expect(result.user.apiKeyHash).toBeUndefined();
 
-        const fresh = await User.findById(customer._id).select('+apiToken');
-        expect(fresh.apiToken).toBe(result.apiToken);
+        const fresh = await User.findById(customer._id).select('+apiToken +apiKeyHash');
+        expect(fresh.apiToken).toBeNull();
+        expect(fresh.apiKeyHash).toMatch(/^[a-f0-9]{64}$/);
+        expect(fresh.apiKeyHash).not.toBe(result.apiKey);
     });
 
-    it('updateUser enables API access and generates apiToken when missing', async () => {
-        const customer = await createCustomer({ groupId: group._id, isApiEnabled: false, apiToken: null });
+    it('regenerateMyApiToken rejects users before admin enables API access', async () => {
+        const customer = await createCustomer({ groupId: group._id, isApiEnabled: false });
+
+        await expect(userService.regenerateMyApiToken(customer._id))
+            .rejects.toMatchObject({ code: 'API_ACCESS_DISABLED' });
+    });
+
+    it('updateUser enables API access and generates hashed key metadata when missing', async () => {
+        const customer = await createCustomer({ groupId: group._id, isApiEnabled: false, apiToken: null, apiKeyHash: null });
 
         await userService.updateUser(customer._id, { isApiEnabled: true });
-        const fresh = await User.findById(customer._id).select('+apiToken');
+        const fresh = await User.findById(customer._id).select('+apiToken +apiKeyHash');
 
         expect(fresh.isApiEnabled).toBe(true);
-        expect(fresh.apiToken).toMatch(/^[a-f0-9]{64}$/);
+        expect(fresh.apiToken).toBeNull();
+        expect(fresh.apiKeyHash).toMatch(/^[a-f0-9]{64}$/);
     });
 });
 

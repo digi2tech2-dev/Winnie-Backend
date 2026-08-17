@@ -116,6 +116,7 @@ const updateUserSchema = Joi.object({
     status: Joi.string().valid('PENDING', 'ACTIVE', 'REJECTED'),
     verified: Joi.boolean(),
     isApiEnabled: Joi.boolean(),
+    apiAccessEnabled: Joi.boolean(),
     permissions,
     creditLimit: Joi.number().min(0).messages({
         'number.min': 'Credit limit cannot be negative',

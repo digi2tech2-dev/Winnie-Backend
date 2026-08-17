@@ -97,6 +97,26 @@ const updateUser = catchAsync(async (req, res) => {
     sendSuccess(res, { user }, 'User updated');
 });
 
+const getUserApiAccess = catchAsync(async (req, res) => {
+    const result = await svc.getUserApiAccess(req.params.id);
+    sendSuccess(res, result, 'API access status retrieved');
+});
+
+const enableUserApiAccess = catchAsync(async (req, res) => {
+    const result = await svc.enableUserApiAccess(req.params.id, req.user._id);
+    sendSuccess(res, result, result.apiKey ? 'API access enabled. Copy the key now.' : 'API access enabled');
+});
+
+const disableUserApiAccess = catchAsync(async (req, res) => {
+    const result = await svc.disableUserApiAccess(req.params.id, req.user._id);
+    sendSuccess(res, result, 'API access disabled and key revoked');
+});
+
+const regenerateUserApiKey = catchAsync(async (req, res) => {
+    const result = await svc.regenerateUserApiKey(req.params.id, req.user._id);
+    sendSuccess(res, result, 'API key regenerated. Copy the key now.');
+});
+
 // DELETE /admin/users/:id
 const deleteUser = catchAsync(async (req, res) => {
     const user = await svc.deleteUser(req.params.id, req.user._id);
@@ -260,8 +280,12 @@ module.exports = {
     listEligibleSupervisorUsers,
     listDeletedUsers,
     getUserById,
+    getUserApiAccess,
     createSupervisor,
     updateUser,
+    enableUserApiAccess,
+    disableUserApiAccess,
+    regenerateUserApiKey,
     deleteUser,
     deleteSupervisor,
     restoreUser,

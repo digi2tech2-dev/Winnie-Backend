@@ -22,6 +22,17 @@ const FAZER_CARDS_CUSTOMER_PRODUCT_FILTER = {
     ],
 };
 
+const CLIENT_API_PRODUCT_FILTER = {
+    isActive: true,
+    visibleInStore: { $ne: false },
+    isPaused: { $ne: true },
+    status: 'available',
+    customerPurchaseEnabled: true,
+    isAvailableForApi: { $ne: false },
+    deletedAt: null,
+    $and: [FAZER_CARDS_CUSTOMER_PRODUCT_FILTER],
+};
+
 const RESERVED_ORDER_KEYS = new Set([
     'productId',
     'qty',
@@ -90,12 +101,7 @@ const listProducts = async (user) => {
     const groupPricing = await resolveUserPricingGroup(user);
     const markupPercentage = groupPricing.percentage;
 
-    const products = await Product.find({
-        isActive: true,
-        isAvailableForApi: { $ne: false },
-        deletedAt: null,
-        $and: [FAZER_CARDS_CUSTOMER_PRODUCT_FILTER],
-    })
+    const products = await Product.find(CLIENT_API_PRODUCT_FILTER)
         .select('name basePrice finalPrice minQty maxQty executionType dynamicFields orderFields displayOrder')
         .sort({ displayOrder: 1, name: 1 });
 
@@ -128,11 +134,8 @@ const findExistingClientOrder = (userId, idempotencyKey) => (
 
 const getApiProductForOrder = async (productId) => {
     const product = await Product.findOne({
+        ...CLIENT_API_PRODUCT_FILTER,
         _id: productId,
-        isActive: true,
-        isAvailableForApi: { $ne: false },
-        deletedAt: null,
-        $and: [FAZER_CARDS_CUSTOMER_PRODUCT_FILTER],
     }).select('dynamicFields orderFields');
 
     if (!product) {
@@ -142,11 +145,11 @@ const getApiProductForOrder = async (productId) => {
     return product;
 };
 
-const createOrder = async ({ user, body, auditContext = null }) => {
+const createOrder = async ({ user, body, idempotencyKey: headerIdempotencyKey = null, auditContext = null, apiKeyPrefix = null }) => {
     const userId = user._id;
     const productId = body.productId;
     const quantity = parseInt(body.qty, 10);
-    const idempotencyKey = String(body.order_uuid).trim();
+    const idempotencyKey = String(headerIdempotencyKey || body.order_uuid || '').trim();
 
     const existingOrder = await findExistingClientOrder(userId, idempotencyKey);
     if (existingOrder) {
@@ -173,6 +176,9 @@ const createOrder = async ({ user, body, auditContext = null }) => {
         productId,
         quantity,
         idempotencyKey,
+        source: 'client_api',
+        apiKeyPrefix,
+        externalOrderId: idempotencyKey,
         orderFieldsValues,
         customerInput,
         auditContext,

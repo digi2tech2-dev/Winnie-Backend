@@ -10,7 +10,6 @@
  * writes that are inherently atomic.
  */
 
-const crypto = require('crypto');
 const { User, USER_STATUS, ROLES } = require('../users/user.model');
 const Group = require('../groups/group.model');
 const { Currency } = require('../currency/currency.model');
@@ -32,6 +31,12 @@ const {
     ENTITY_TYPES,
     ACTOR_ROLES,
 } = require('../audit/audit.constants');
+const {
+    applyGeneratedApiKey,
+    buildApiAccessMetadata,
+    hasActiveApiKey,
+    revokeApiKey,
+} = require('../users/apiAccess.service');
 
 const SUPERVISOR_PERMISSION_GROUPS = Object.freeze([
     {
@@ -113,7 +118,9 @@ const ALLOWED_SUPERVISOR_PERMISSIONS = Object.freeze(
 // ─── Private helper ────────────────────────────────────────────────────────────
 
 const _findOrFail = async (id) => {
-    const user = await User.findById(id).populate('groupId', 'name percentage');
+    const user = await User.findById(id)
+        .select('+apiToken +apiKeyHash +apiKeyLastUsedIp')
+        .populate('groupId', 'name percentage');
     if (!user) throw new NotFoundError('User');
     return user;
 };
@@ -223,8 +230,40 @@ const _sanitizeUserSnapshot = (snapshot) => {
     delete sanitized.emailVerificationToken;
     delete sanitized.emailVerificationExpires;
     delete sanitized.apiToken;
+    delete sanitized.apiKeyHash;
+    delete sanitized.apiKeyLastUsedIp;
     return sanitized;
 };
+
+const _findApiAccessUserOrFail = async (id) => {
+    const user = await User.findById(id)
+        .select('+apiToken +apiKeyHash +apiKeyLastUsedIp')
+        .populate('groupId', 'name percentage isActive');
+    if (!user) throw new NotFoundError('User');
+    return user;
+};
+
+const _toApiAccessResult = (user, apiKey = null) => ({
+    apiAccess: buildApiAccessMetadata(user),
+    ...(apiKey ? { apiKey } : {}),
+    user: typeof user.toSafeObject === 'function' ? user.toSafeObject() : user,
+});
+
+const _auditApiAccess = ({ adminId, action, user, before, after, metadata = {} }) => (
+    createAuditLog({
+        actorId: adminId,
+        actorRole: ACTOR_ROLES.ADMIN,
+        action,
+        entityType: ENTITY_TYPES.USER,
+        entityId: user._id,
+        metadata: {
+            before,
+            after,
+            targetUserId: user._id,
+            ...metadata,
+        },
+    })
+);
 
 const _resolveAssignableGroup = async (groupId) => {
     if (groupId === null) return null;
@@ -519,7 +558,8 @@ const updateUser = async (id, data, adminId) => {
     const user = await _findOrFail(id);
     const before = _sanitizeUserSnapshot(user.toObject());
 
-    const { name, email, groupId, status, verified, permissions, isApiEnabled } = data;
+    const { name, email, groupId, status, verified, permissions } = data;
+    const isApiEnabled = data.isApiEnabled ?? data.apiAccessEnabled;
 
     if (name !== undefined) user.name = name.trim();
     if (status !== undefined) {
@@ -544,12 +584,15 @@ const updateUser = async (id, data, adminId) => {
         user.permissions = _normalizePermissions(permissions);
     }
     if (isApiEnabled !== undefined) {
-        user.isApiEnabled = isApiEnabled;
         if (isApiEnabled === true) {
-            const hasApiToken = await User.exists({ _id: id, apiToken: { $nin: [null, ''] } });
-            if (!hasApiToken) {
-                user.apiToken = crypto.randomBytes(32).toString('hex');
+            if (!hasActiveApiKey(user)) {
+                applyGeneratedApiKey(user);
+            } else {
+                user.isApiEnabled = true;
+                user.apiToken = null;
             }
+        } else {
+            revokeApiKey(user);
         }
     }
 
@@ -574,6 +617,100 @@ const updateUser = async (id, data, adminId) => {
 };
 
 // ─── Soft Delete ───────────────────────────────────────────────────────────────
+
+const getUserApiAccess = async (id) => {
+    const user = await _findApiAccessUserOrFail(id);
+    return _toApiAccessResult(user);
+};
+
+const enableUserApiAccess = async (id, adminId) => {
+    const user = await _findApiAccessUserOrFail(id);
+    if (user.deletedAt) {
+        throw new BusinessRuleError('Cannot enable API access for a deleted user.', 'DELETED_USER_API_ACCESS');
+    }
+
+    const before = buildApiAccessMetadata(user);
+    let apiKey = null;
+
+    if (!hasActiveApiKey(user)) {
+        apiKey = applyGeneratedApiKey(user);
+    } else {
+        user.isApiEnabled = true;
+        user.apiToken = null;
+    }
+
+    await user.save();
+    await user.populate('groupId', 'name percentage isActive');
+
+    _auditApiAccess({
+        adminId,
+        action: ADMIN_ACTIONS.API_ACCESS_ENABLED,
+        user,
+        before,
+        after: buildApiAccessMetadata(user),
+        metadata: {
+            generatedKey: Boolean(apiKey),
+            legacyKeyPresentBefore: before.legacyKeyPresent === true,
+        },
+    });
+
+    return _toApiAccessResult(user, apiKey);
+};
+
+const disableUserApiAccess = async (id, adminId) => {
+    const user = await _findApiAccessUserOrFail(id);
+    const before = buildApiAccessMetadata(user);
+
+    revokeApiKey(user);
+    await user.save();
+    await user.populate('groupId', 'name percentage isActive');
+
+    const after = buildApiAccessMetadata(user);
+    _auditApiAccess({
+        adminId,
+        action: ADMIN_ACTIONS.API_ACCESS_DISABLED,
+        user,
+        before,
+        after,
+        metadata: { revokedKey: before.hasApiKey === true || before.legacyKeyPresent === true },
+    });
+    _auditApiAccess({
+        adminId,
+        action: ADMIN_ACTIONS.API_KEY_REVOKED,
+        user,
+        before,
+        after,
+        metadata: { reason: 'api_access_disabled' },
+    });
+
+    return _toApiAccessResult(user);
+};
+
+const regenerateUserApiKey = async (id, adminId) => {
+    const user = await _findApiAccessUserOrFail(id);
+    if (user.deletedAt) {
+        throw new BusinessRuleError('Cannot regenerate API key for a deleted user.', 'DELETED_USER_API_KEY_REGENERATE');
+    }
+
+    const before = buildApiAccessMetadata(user);
+    const apiKey = applyGeneratedApiKey(user);
+    await user.save();
+    await user.populate('groupId', 'name percentage isActive');
+
+    _auditApiAccess({
+        adminId,
+        action: ADMIN_ACTIONS.API_KEY_REGENERATED,
+        user,
+        before,
+        after: buildApiAccessMetadata(user),
+        metadata: {
+            previousKeyRevoked: before.hasApiKey === true || before.legacyKeyPresent === true,
+            legacyKeyPresentBefore: before.legacyKeyPresent === true,
+        },
+    });
+
+    return _toApiAccessResult(user, apiKey);
+};
 
 const deleteUser = async (id, adminId) => {
     const user = await _findOrFail(id);
@@ -1272,8 +1409,12 @@ module.exports = {
     listSupervisorPermissions,
     listDeletedUsers,
     getUserById,
+    getUserApiAccess,
     createSupervisor,
     updateUser,
+    enableUserApiAccess,
+    disableUserApiAccess,
+    regenerateUserApiKey,
     deleteUser,
     deleteSupervisor,
     restoreUser,

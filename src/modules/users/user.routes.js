@@ -39,8 +39,22 @@ router.patch('/me', userController.updateMyProfile);
 router.patch('/me/avatar', avatarUpload.single('avatar'), userController.updateMyAvatar);
 
 /**
+ * @route  GET /api/users/me/api-access
+ * @desc   Get safe API access metadata
+ * @access Any authenticated user
+ */
+router.get('/me/api-access', userController.getMyApiAccess);
+
+/**
+ * @route  POST /api/users/me/api-access/regenerate
+ * @desc   Regenerate own API key when API access is enabled
+ * @access Any authenticated user
+ */
+router.post('/me/api-access/regenerate', userController.regenerateMyApiToken);
+
+/**
  * @route  PATCH /api/users/me/api-token
- * @desc   Regenerate own API token
+ * @desc   Regenerate own API key (legacy route alias)
  * @access Any authenticated user
  */
 router.patch('/me/api-token', userController.regenerateMyApiToken);

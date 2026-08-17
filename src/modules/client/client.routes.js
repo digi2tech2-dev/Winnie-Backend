@@ -3,6 +3,7 @@
 const { Router } = require('express');
 
 const apiAuth = require('../../shared/middlewares/apiAuth');
+const { clientApiLimiter } = require('../../shared/middlewares/rateLimiter');
 const clientController = require('./client.controller');
 const {
     createClientOrderValidation,
@@ -13,6 +14,7 @@ const {
 const router = Router();
 
 router.use(apiAuth);
+router.use(clientApiLimiter);
 
 router.get('/profile', clientController.getProfile);
 router.get('/products', clientController.getProducts);

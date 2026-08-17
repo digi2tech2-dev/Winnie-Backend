@@ -211,6 +211,49 @@ const userSchema = new mongoose.Schema(
             select: false,
             index: true,
         },
+        apiKeyHash: {
+            type: String,
+            trim: true,
+            default: null,
+            select: false,
+        },
+        apiKeyPrefix: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+        apiKeyLast4: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+        apiKeyCreatedAt: {
+            type: Date,
+            default: null,
+        },
+        apiKeyLastRotatedAt: {
+            type: Date,
+            default: null,
+        },
+        apiKeyRevokedAt: {
+            type: Date,
+            default: null,
+        },
+        apiKeyLastUsedAt: {
+            type: Date,
+            default: null,
+        },
+        apiKeyLastUsedIp: {
+            type: String,
+            trim: true,
+            default: null,
+            select: false,
+        },
+        apiKeyVersion: {
+            type: Number,
+            default: 0,
+            min: 0,
+        },
 
         permissions: {
             type: [String],
@@ -572,6 +615,10 @@ userSchema.index(
     { referralCode: 1 },
     { unique: true, partialFilterExpression: { referralCode: { $type: 'string' } } }
 );
+userSchema.index(
+    { apiKeyHash: 1 },
+    { unique: true, partialFilterExpression: { apiKeyHash: { $type: 'string' } } }
+);
 // status index defined inline above
 
 // ─── Virtuals ────────────────────────────────────────────────────────────────
@@ -588,6 +635,14 @@ userSchema.virtual('isActive').get(function () {
 userSchema.virtual('isBlocked').get(function () {
     return Boolean(this.blockedAt);
 });
+
+userSchema.virtual('apiAccessEnabled')
+    .get(function () {
+        return this.isApiEnabled === true;
+    })
+    .set(function (value) {
+        this.isApiEnabled = value === true;
+    });
 
 userSchema.virtual('displayStatus').get(function () {
     if (this.deletedAt) return 'DELETED';
@@ -663,6 +718,8 @@ userSchema.methods.toSafeObject = function () {
     delete obj.twoFactorTempToken;
     delete obj.twoFactorTempTokenExpires;
     delete obj.apiToken;
+    delete obj.apiKeyHash;
+    delete obj.apiKeyLastUsedIp;
     if (obj.whatsappNotifications) {
         delete obj.whatsappNotifications.verificationCodeHash;
         delete obj.whatsappNotifications.verificationCodeExpiresAt;

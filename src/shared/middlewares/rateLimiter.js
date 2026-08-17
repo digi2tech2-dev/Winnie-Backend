@@ -16,6 +16,7 @@
  */
 
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = rateLimit;
 
 // ── General API Rate Limiter ──────────────────────────────────────────────────
 
@@ -59,4 +60,21 @@ const walletLimiter = rateLimit({
     },
 });
 
-module.exports = { apiLimiter, authLimiter, walletLimiter };
+const clientApiLimiter = rateLimit({
+    windowMs: parseInt(process.env.CLIENT_API_RATE_LIMIT_WINDOW_MS || `${15 * 60 * 1000}`, 10),
+    max: parseInt(process.env.CLIENT_API_RATE_LIMIT_MAX || '120', 10),
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+        if (req.user?._id) return `client-api:user:${req.user._id.toString()}`;
+        return ipKeyGenerator(req.ip);
+    },
+    message: {
+        success: false,
+        error_code: 129,
+        code: 'CLIENT_API_RATE_LIMIT_EXCEEDED',
+        message: 'Too many client API requests. Please slow down and try again later.',
+    },
+});
+
+module.exports = { apiLimiter, authLimiter, walletLimiter, clientApiLimiter };

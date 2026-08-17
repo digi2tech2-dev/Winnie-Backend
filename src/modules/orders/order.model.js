@@ -258,6 +258,26 @@ const orderSchema = new mongoose.Schema(
             sparse: true,
         },
 
+        source: {
+            type: String,
+            trim: true,
+            enum: ['web', 'client_api'],
+            default: 'web',
+            index: true,
+        },
+
+        apiKeyPrefix: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
+        externalOrderId: {
+            type: String,
+            trim: true,
+            default: null,
+        },
+
         // ── Timestamps for audit ─────────────────────────────────────────────
 
         refundedAt: {

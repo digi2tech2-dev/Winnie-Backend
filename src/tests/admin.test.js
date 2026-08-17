@@ -182,9 +182,9 @@ describe('[1] Admin Users Service', () => {
         expect(updated.status).toBe(USER_STATUS.ACTIVE);
     });
 
-    it('updateUser enables API access and creates apiToken when missing', async () => {
+    it('updateUser enables API access and creates hashed API key metadata when missing', async () => {
         const { customer, admin } = await setup();
-        await User.findByIdAndUpdate(customer._id, { $set: { isApiEnabled: false, apiToken: null } });
+        await User.findByIdAndUpdate(customer._id, { $set: { isApiEnabled: false, apiToken: null, apiKeyHash: null } });
 
         await adminUsersService.updateUser(
             customer._id,
@@ -192,13 +192,15 @@ describe('[1] Admin Users Service', () => {
             admin._id
         );
 
-        const updated = await User.findById(customer._id).select('+apiToken');
+        const updated = await User.findById(customer._id).select('+apiToken +apiKeyHash');
         expect(updated.isApiEnabled).toBe(true);
-        expect(typeof updated.apiToken).toBe('string');
-        expect(updated.apiToken.length).toBeGreaterThan(0);
+        expect(updated.apiToken).toBeNull();
+        expect(updated.apiKeyHash).toMatch(/^[a-f0-9]{64}$/);
+        expect(updated.apiKeyPrefix).toBe('winnie');
+        expect(updated.apiKeyLast4).toHaveLength(4);
     });
 
-    it('updateUser keeps existing apiToken when API access is enabled', async () => {
+    it('updateUser replaces legacy apiToken with a hashed key when API access is enabled', async () => {
         const { customer, admin } = await setup();
         const existingToken = 'existing-api-token-123';
         await User.findByIdAndUpdate(customer._id, {
@@ -211,9 +213,71 @@ describe('[1] Admin Users Service', () => {
             admin._id
         );
 
-        const updated = await User.findById(customer._id).select('+apiToken');
+        const updated = await User.findById(customer._id).select('+apiToken +apiKeyHash');
         expect(updated.isApiEnabled).toBe(true);
-        expect(updated.apiToken).toBe(existingToken);
+        expect(updated.apiToken).toBeNull();
+        expect(updated.apiKeyHash).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it('enableUserApiAccess returns the full key once and stores only hash metadata', async () => {
+        const { customer, admin } = await setup();
+        const result = await adminUsersService.enableUserApiAccess(customer._id, admin._id);
+
+        expect(result.apiKey).toMatch(/^winnie_/);
+        expect(result.apiAccess.enabled).toBe(true);
+        expect(result.apiAccess.hasApiKey).toBe(true);
+        expect(result.user.apiToken).toBeUndefined();
+        expect(result.user.apiKeyHash).toBeUndefined();
+
+        const stored = await User.findById(customer._id).select('+apiToken +apiKeyHash');
+        expect(stored.apiToken).toBeNull();
+        expect(stored.apiKeyHash).toMatch(/^[a-f0-9]{64}$/);
+        expect(stored.apiKeyHash).not.toBe(result.apiKey);
+
+        const audit = await AuditLog.findOne({ action: ADMIN_ACTIONS.API_ACCESS_ENABLED });
+        expect(audit).toBeTruthy();
+        expect(JSON.stringify(audit.metadata)).not.toContain(result.apiKey);
+    });
+
+    it('getUserApiAccess returns safe metadata without full key or hash', async () => {
+        const { customer, admin } = await setup();
+        await adminUsersService.enableUserApiAccess(customer._id, admin._id);
+
+        const status = await adminUsersService.getUserApiAccess(customer._id);
+        expect(status.apiKey).toBeUndefined();
+        expect(status.apiAccess.enabled).toBe(true);
+        expect(status.apiAccess.apiKeyPrefix).toBe('winnie');
+        expect(status.user.apiKeyHash).toBeUndefined();
+        expect(status.user.apiToken).toBeUndefined();
+    });
+
+    it('disableUserApiAccess revokes the current hashed key', async () => {
+        const { customer, admin } = await setup();
+        await adminUsersService.enableUserApiAccess(customer._id, admin._id);
+
+        const result = await adminUsersService.disableUserApiAccess(customer._id, admin._id);
+        expect(result.apiAccess.enabled).toBe(false);
+        expect(result.apiAccess.hasApiKey).toBe(false);
+
+        const stored = await User.findById(customer._id).select('+apiToken +apiKeyHash');
+        expect(stored.isApiEnabled).toBe(false);
+        expect(stored.apiToken).toBeNull();
+        expect(stored.apiKeyHash).toBeNull();
+        expect(stored.apiKeyRevokedAt).toBeTruthy();
+    });
+
+    it('regenerateUserApiKey invalidates the old key hash and returns a new key once', async () => {
+        const { customer, admin } = await setup();
+        const first = await adminUsersService.enableUserApiAccess(customer._id, admin._id);
+        const firstStored = await User.findById(customer._id).select('+apiKeyHash');
+
+        const second = await adminUsersService.regenerateUserApiKey(customer._id, admin._id);
+        const secondStored = await User.findById(customer._id).select('+apiKeyHash');
+
+        expect(second.apiKey).toMatch(/^winnie_/);
+        expect(second.apiKey).not.toBe(first.apiKey);
+        expect(secondStored.apiKeyHash).not.toBe(firstStored.apiKeyHash);
+        expect(second.user.apiKeyHash).toBeUndefined();
     });
 
     it('updateUser rejects duplicate email', async () => {

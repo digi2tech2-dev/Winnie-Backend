@@ -152,6 +152,10 @@ router.delete('/supervisors/:id', authorizeRoles('ADMIN'), usersCtrl.deleteSuper
 router.get('/users', requirePermission('users.view'), validateQuery(schemas.listUsersQuery), usersCtrl.listUsers);
 router.get('/users/deleted', authorizeRoles('ADMIN'), usersCtrl.listDeletedUsers); // MUST be before /:id
 router.post('/users/adjust-debt', authorizeRoles('ADMIN'), requirePermission('wallet.adjust'), walletLimiter, validateBody(schemas.debtAdjustment), walletCtrl.adjustDebt);
+router.get('/users/:id/api-access', authorizeRoles('ADMIN'), usersCtrl.getUserApiAccess);
+router.post('/users/:id/api-access/enable', authorizeRoles('ADMIN'), usersCtrl.enableUserApiAccess);
+router.post('/users/:id/api-access/disable', authorizeRoles('ADMIN'), usersCtrl.disableUserApiAccess);
+router.post('/users/:id/api-access/regenerate', authorizeRoles('ADMIN'), usersCtrl.regenerateUserApiKey);
 router.get('/users/:id', requirePermission('users.view'), usersCtrl.getUserById);
 router.patch('/users/:id', authorizeRoles('ADMIN'), validateBody(schemas.updateUser), usersCtrl.updateUser);
 router.delete('/users/:id', requirePermission('users.delete'), usersCtrl.deleteUser);

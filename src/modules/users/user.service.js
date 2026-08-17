@@ -1,11 +1,16 @@
 'use strict';
 
-const crypto = require('crypto');
 const { User, ROLES, USER_STATUS } = require('./user.model');
 const Group = require('../groups/group.model');
 const { NotFoundError, ConflictError, BusinessRuleError, AuthenticationError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { USER_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+const {
+    applyGeneratedApiKey,
+    buildApiAccessMetadata,
+    hasActiveApiKey,
+    revokeApiKey,
+} = require('./apiAccess.service');
 
 /** Shared populate projection for group fields shown in user responses. */
 const GROUP_PROJECTION = 'name percentage isActive';
@@ -167,9 +172,10 @@ const rejectUser = async (targetUserId, adminId, auditContext = null) => {
  * Activation lifecycle is intentionally handled via approveUser/rejectUser
  * so that all audit fields (approvedBy/At, rejectedBy/At) are always set correctly.
  */
-const updateUser = async (id, { groupId, creditLimit, name, isApiEnabled }) => {
-    const user = await User.findById(id);
+const updateUser = async (id, { groupId, creditLimit, name, isApiEnabled, apiAccessEnabled }) => {
+    const user = await User.findById(id).select('+apiToken +apiKeyHash +apiKeyLastUsedIp');
     if (!user) throw new NotFoundError('User');
+    const nextApiEnabled = isApiEnabled ?? apiAccessEnabled;
 
     if (groupId !== undefined) {
         if (groupId !== null) {
@@ -191,13 +197,16 @@ const updateUser = async (id, { groupId, creditLimit, name, isApiEnabled }) => {
     }
 
     if (name !== undefined) user.name = name;
-    if (isApiEnabled !== undefined) {
-        user.isApiEnabled = isApiEnabled;
-        if (isApiEnabled === true) {
-            const hasApiToken = await User.exists({ _id: id, apiToken: { $nin: [null, ''] } });
-            if (!hasApiToken) {
-                user.apiToken = crypto.randomBytes(32).toString('hex');
+    if (nextApiEnabled !== undefined) {
+        if (nextApiEnabled === true) {
+            if (!hasActiveApiKey(user)) {
+                applyGeneratedApiKey(user);
+            } else {
+                user.isApiEnabled = true;
+                user.apiToken = null;
             }
+        } else {
+            revokeApiKey(user);
         }
     }
 
@@ -214,7 +223,7 @@ const updateUser = async (id, { groupId, creditLimit, name, isApiEnabled }) => {
  */
 const getMyProfile = async (userId) => {
     const user = await User.findById(userId)
-        .select('-password')
+        .select('-password +apiToken +apiKeyHash')
         .populate('groupId', GROUP_PROJECTION);
     if (!user) throw new NotFoundError('User');
     return user;
@@ -330,16 +339,27 @@ const updateMyAvatar = async (userId, avatar) => {
 };
 
 const regenerateMyApiToken = async (userId) => {
-    const user = await User.findById(userId);
+    const user = await User.findById(userId).select('+apiToken +apiKeyHash +apiKeyLastUsedIp');
     if (!user) throw new NotFoundError('User');
+    if (user.isApiEnabled !== true) {
+        throw new BusinessRuleError('API access is not enabled for this account.', 'API_ACCESS_DISABLED');
+    }
 
-    const apiToken = crypto.randomBytes(32).toString('hex');
-    user.apiToken = apiToken;
+    const apiKey = applyGeneratedApiKey(user);
     await user.save();
 
     return {
-        apiToken,
+        apiKey,
+        apiAccess: buildApiAccessMetadata(user),
         user: user.toSafeObject ? user.toSafeObject() : user.toObject(),
+    };
+};
+
+const getMyApiAccess = async (userId) => {
+    const user = await User.findById(userId).select('+apiToken +apiKeyHash +apiKeyLastUsedIp');
+    if (!user) throw new NotFoundError('User');
+    return {
+        apiAccess: buildApiAccessMetadata(user),
     };
 };
 
@@ -355,4 +375,5 @@ module.exports = {
     updateMyCurrency,
     updateMyAvatar,
     regenerateMyApiToken,
+    getMyApiAccess,
 };

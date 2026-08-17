@@ -8,7 +8,19 @@ const catchAsync = require('../../shared/utils/catchAsync');
 
 const getMyProfile = catchAsync(async (req, res) => {
     const user = await userService.getMyProfile(req.user._id);
-    sendSuccess(res, user, 'Profile retrieved successfully.');
+    const safeUser = user.toSafeObject ? user.toSafeObject() : user;
+    sendSuccess(res, {
+        ...safeUser,
+        apiAccess: safeUser.apiAccess || {
+            enabled: safeUser.isApiEnabled === true,
+            apiAccessEnabled: safeUser.isApiEnabled === true,
+            hasApiKey: Boolean(user.apiKeyHash && !user.apiKeyRevokedAt),
+            apiKeyPrefix: safeUser.apiKeyPrefix || null,
+            apiKeyLast4: safeUser.apiKeyLast4 || null,
+            apiKeyLastRotatedAt: safeUser.apiKeyLastRotatedAt || null,
+            apiKeyLastUsedAt: safeUser.apiKeyLastUsedAt || null,
+        },
+    }, 'Profile retrieved successfully.');
 });
 
 const updateMyProfile = catchAsync(async (req, res) => {
@@ -24,7 +36,12 @@ const updateMyAvatar = catchAsync(async (req, res) => {
 
 const regenerateMyApiToken = catchAsync(async (req, res) => {
     const result = await userService.regenerateMyApiToken(req.user._id);
-    sendSuccess(res, result, 'API token regenerated successfully.');
+    sendSuccess(res, result, 'API key regenerated successfully. Copy it now.');
+});
+
+const getMyApiAccess = catchAsync(async (req, res) => {
+    const result = await userService.getMyApiAccess(req.user._id);
+    sendSuccess(res, result, 'API access status retrieved.');
 });
 
 // ── Admin: Queries ────────────────────────────────────────────────────────────
@@ -76,6 +93,7 @@ module.exports = {
     updateMyProfile,
     updateMyAvatar,
     regenerateMyApiToken,
+    getMyApiAccess,
     listUsers,
     getUser,
     updateUser,

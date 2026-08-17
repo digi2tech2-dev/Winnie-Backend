@@ -10,6 +10,7 @@
 const { User } = require('../users/user.model');
 const { WalletTransaction } = require('../wallet/walletTransaction.model');
 const userService = require('../users/user.service');
+const { buildApiAccessMetadata } = require('../users/apiAccess.service');
 const orderService = require('../orders/order.service');
 const depositService = require('../deposits/deposit.service');
 const productService = require('../products/product.service');
@@ -196,10 +197,12 @@ const parseLimit = (v) => Math.min(100, Math.max(1, parseInt(v, 10) || 20));
  */
 const getProfile = catchAsync(async (req, res) => {
     const user = await User.findById(req.user._id)
-        .select('-password -__v')
+        .select('-password -__v +apiToken +apiKeyHash')
         .populate('groupId', 'name percentage isActive');
 
     if (!user) throw new NotFoundError('User');
+
+    const apiAccess = buildApiAccessMetadata(user);
 
     sendSuccess(res, {
         _id: user._id,
@@ -218,6 +221,14 @@ const getProfile = catchAsync(async (req, res) => {
         needsOnboarding: needsGoogleProfileCompletion(user),
         identityVerificationRequired: user.identityVerificationRequired === true,
         identityVerificationReason: user.identityVerificationReason || null,
+        isApiEnabled: apiAccess.enabled,
+        apiAccessEnabled: apiAccess.enabled,
+        hasApiKey: apiAccess.hasApiKey,
+        apiKeyPrefix: apiAccess.apiKeyPrefix,
+        apiKeyLast4: apiAccess.apiKeyLast4,
+        apiKeyLastRotatedAt: apiAccess.apiKeyLastRotatedAt,
+        apiKeyLastUsedAt: apiAccess.apiKeyLastUsedAt,
+        apiAccess,
         walletBalance: user.walletBalance,
         group: user.groupId,
         createdAt: user.createdAt,

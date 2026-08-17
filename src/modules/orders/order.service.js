@@ -522,6 +522,9 @@ const createOrder = async ({
     orderFieldsValues = null,   // â† new param
     provider = null,   // â† injected; null = auto-resolve from factory
     customerInput = null,
+    source = 'web',
+    apiKeyPrefix = null,
+    externalOrderId = null,
 }) => {
     const actionUser = await User.findById(userId).select('identityVerificationRequired');
     if (!actionUser) throw new NotFoundError('User');
@@ -599,6 +602,9 @@ const createOrder = async ({
         customerInput,
         provider: resolvedProvider,
         providerCode,
+        source,
+        apiKeyPrefix,
+        externalOrderId,
     });
 
 };
@@ -619,6 +625,9 @@ const _attemptCreateOrder = async (
         customerInput: validatedCustomerInput = null,
         provider,
         providerCode = null,
+        source = 'web',
+        apiKeyPrefix = null,
+        externalOrderId = null,
     },
     isRetry = false
 ) => {
@@ -842,6 +851,9 @@ const _attemptCreateOrder = async (
             rateType: 'purchase',
             usdAmount: usdTotalPrice,
             chargedAmount,
+            source,
+            apiKeyPrefix,
+            externalOrderId,
         };
         if (idempotencyKey) orderData.idempotencyKey = idempotencyKey;
 
@@ -893,6 +905,9 @@ const _attemptCreateOrder = async (
                 groupPercentageSnapshot: pricing.groupPercentage,
                 finalPriceCharged: pricing.customerUnitPriceUsd,
                 status: initialStatus,
+                source,
+                apiKeyPrefix,
+                externalOrderId,
             },
         });
 
@@ -918,6 +933,24 @@ const _attemptCreateOrder = async (
         // Always fires for AUTOMATIC products. executeOrder self-resolves the
         // provider adapter if none was pre-resolved, and handles all failures
         // (marks FAILED + refunds the wallet).
+        if (source === 'client_api') {
+            createAuditLog({
+                actorId, actorRole, ipAddress, userAgent,
+                action: ORDER_ACTIONS.CLIENT_API_CREATED,
+                entityType: ENTITY_TYPES.ORDER,
+                entityId: order._id,
+                metadata: {
+                    userId,
+                    productId: product._id,
+                    quantity: qty,
+                    idempotencyKey,
+                    externalOrderId,
+                    apiKeyPrefix,
+                    status: initialStatus,
+                },
+            });
+        }
+
         notifyOrderCreated(order, { manualReview: isManualOrder });
 
         if (isAutomatic) {
@@ -960,6 +993,9 @@ const _attemptCreateOrder = async (
                     customerInput: validatedCustomerInput,
                     provider,
                     providerCode,
+                    source,
+                    apiKeyPrefix,
+                    externalOrderId,
                 },
                 true
             );

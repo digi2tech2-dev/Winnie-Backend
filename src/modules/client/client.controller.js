@@ -26,6 +26,8 @@ const getAuditContext = (req) => ({
     actorRole: 'CUSTOMER',
     ipAddress: req.ip || null,
     userAgent: req.get('User-Agent') || null,
+    source: 'client_api',
+    apiKeyPrefix: req.clientApi?.keyPrefix || null,
 });
 
 const sendClientError = (err, res, next) => {
@@ -65,6 +67,8 @@ const createOrder = async (req, res, next) => {
         const { order, idempotent } = await clientService.createOrder({
             user: req.user,
             body: req.body,
+            idempotencyKey: req.get('Idempotency-Key') || null,
+            apiKeyPrefix: req.clientApi?.keyPrefix || null,
             auditContext: getAuditContext(req),
         });
 
