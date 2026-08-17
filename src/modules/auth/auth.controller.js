@@ -122,6 +122,11 @@ const completeGoogleProfile = catchAsync(async (req, res) => {
     sendSuccess(res, result, 'Google profile completed successfully.');
 });
 
+const exchangeGoogleCode = catchAsync(async (req, res) => {
+    const result = await authService.exchangeGoogleOAuthCode(req.body.code);
+    sendSuccess(res, result, 'Google login completed successfully.');
+});
+
 // ─── Google OAuth ─────────────────────────────────────────────────────────────
 
 /**
@@ -143,9 +148,8 @@ const googleCallback = catchAsync(async (req, res) => {
         return res.redirect(`${frontendBase}/auth?status=pending`);
     }
 
-    // Redirect with JWT in query param so the SPA can capture it.
-    // FE loginWithGoogle() reads ?token= from window.location.search.
-    res.redirect(`${frontendBase}/auth?token=${result.token}`);
+    const exchange = await authService.issueGoogleOAuthExchangeCode(req.user._id);
+    res.redirect(`${frontendBase}/auth?code=${encodeURIComponent(exchange.code)}`);
 });
 
 module.exports = {
@@ -158,5 +162,6 @@ module.exports = {
     verifyEmail,
     resendVerification,
     completeGoogleProfile,
+    exchangeGoogleCode,
     googleCallback,
 };

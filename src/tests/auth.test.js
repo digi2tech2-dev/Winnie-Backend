@@ -20,7 +20,16 @@ const {
     WalletTransaction,
     TRANSACTION_TYPES,
 } = require('../modules/wallet/walletTransaction.model');
-const { register, login, verifyEmail, resendVerification, completeGoogleProfile } = require('../modules/auth/auth.service');
+const {
+    register,
+    login,
+    verifyEmail,
+    resendVerification,
+    completeGoogleProfile,
+    issueGoogleOAuthExchangeCode,
+    exchangeGoogleOAuthCode,
+} = require('../modules/auth/auth.service');
+const { GoogleOAuthExchange } = require('../modules/auth/googleOAuthExchange.model');
 const { findOrCreateGoogleUser } = require('../config/google.strategy');
 const {
     connectTestDB,
@@ -486,6 +495,55 @@ describe('[4] Login gates', () => {
         const u = await User.findOne({ googleId: 'google-uid-123' });
 
         await expect(login({ email: u.email, password: 'any-pass' }))
+            .rejects.toMatchObject({ code: 'AUTHENTICATION_ERROR' });
+    });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [4.5] Google OAuth Exchange Code
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('[4.5] Google OAuth exchange code', () => {
+    it('stores only a hash and exchanges a code once', async () => {
+        const group = await createGroup({ name: 'GoogleExchange', percentage: 0 });
+        const user = await createCustomer({
+            groupId: group._id,
+            googleId: 'google-exchange-uid',
+            status: USER_STATUS.ACTIVE,
+            verified: true,
+        });
+
+        const issued = await issueGoogleOAuthExchangeCode(user._id);
+        expect(issued.code).toMatch(/^[a-f0-9]{64}$/);
+
+        const stored = await GoogleOAuthExchange.findOne({ userId: user._id });
+        expect(stored.codeHash).toMatch(/^[a-f0-9]{64}$/);
+        expect(stored.codeHash).not.toBe(issued.code);
+
+        const result = await exchangeGoogleOAuthCode(issued.code);
+        expect(result.token).toBeDefined();
+        expect(result.user.email).toBe(user.email);
+
+        await expect(exchangeGoogleOAuthCode(issued.code))
+            .rejects.toMatchObject({ code: 'AUTHENTICATION_ERROR' });
+    });
+
+    it('rejects expired exchange codes', async () => {
+        const group = await createGroup({ name: 'GoogleExpiredExchange', percentage: 0 });
+        const user = await createCustomer({
+            groupId: group._id,
+            googleId: 'google-expired-exchange-uid',
+            status: USER_STATUS.ACTIVE,
+            verified: true,
+        });
+
+        const issued = await issueGoogleOAuthExchangeCode(user._id);
+        await GoogleOAuthExchange.updateOne(
+            { userId: user._id },
+            { $set: { expiresAt: new Date(Date.now() - 1000) } }
+        );
+
+        await expect(exchangeGoogleOAuthCode(issued.code))
             .rejects.toMatchObject({ code: 'AUTHENTICATION_ERROR' });
     });
 });

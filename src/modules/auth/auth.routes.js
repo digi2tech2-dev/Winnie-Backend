@@ -70,6 +70,19 @@ router.patch(
     authController.completeGoogleProfile
 );
 
+router.post(
+    '/google/exchange-code',
+    authLimiter,
+    [
+        body('code')
+            .trim()
+            .notEmpty().withMessage('code is required')
+            .matches(/^[a-f0-9]{64}$/i).withMessage('code is invalid'),
+    ],
+    validate,
+    authController.exchangeGoogleCode
+);
+
 // ─── Email Verification ───────────────────────────────────────────────────────
 
 /**

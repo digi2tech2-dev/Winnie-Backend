@@ -26,6 +26,7 @@ const { needsGoogleProfileCompletion } = require('../users/googleOnboarding');
 const { Currency } = require('../currency/currency.model');
 const { WalletTransaction } = require('../wallet/walletTransaction.model');
 const { Payment } = require('../payments/payment.model');
+const { GoogleOAuthExchange } = require('./googleOAuthExchange.model');
 const { PAYMENT_STATUSES } = require('../payments/payment.constants');
 const { Order } = require('../orders/order.model');
 const { DepositRequest, DEPOSIT_STATUS } = require('../deposits/deposit.model');
@@ -52,6 +53,8 @@ const signToken = (userId, role) =>
         expiresIn: config.jwt.expiresIn,
     });
 
+const GOOGLE_OAUTH_EXCHANGE_TTL_MS = 2 * 60 * 1000;
+
 /**
  * Generate a cryptographically random token and its SHA-256 hash.
  *
@@ -69,6 +72,56 @@ const _generateVerificationToken = () => {
 /** Hash an incoming raw token for DB lookup. */
 const _hashToken = (raw) =>
     crypto.createHash('sha256').update(raw).digest('hex');
+
+const issueGoogleOAuthExchangeCode = async (userId) => {
+    const code = crypto.randomBytes(32).toString('hex');
+    await GoogleOAuthExchange.create({
+        codeHash: _hashToken(code),
+        userId,
+        expiresAt: new Date(Date.now() + GOOGLE_OAUTH_EXCHANGE_TTL_MS),
+    });
+    return {
+        code,
+        expiresIn: Math.floor(GOOGLE_OAUTH_EXCHANGE_TTL_MS / 1000),
+    };
+};
+
+const exchangeGoogleOAuthCode = async (code) => {
+    const rawCode = String(code || '').trim();
+    if (!rawCode) {
+        throw new AuthenticationError('Google login code is required.');
+    }
+
+    const exchange = await GoogleOAuthExchange.findOneAndUpdate(
+        {
+            codeHash: _hashToken(rawCode),
+            consumedAt: null,
+            expiresAt: { $gt: new Date() },
+        },
+        { $set: { consumedAt: new Date() } },
+        { new: true }
+    );
+
+    if (!exchange) {
+        throw new AuthenticationError('Google login code is invalid or expired.');
+    }
+
+    const user = await User.findById(exchange.userId);
+    if (!user || user.deletedAt) {
+        throw new AuthenticationError('This account is no longer available. Please contact support.');
+    }
+    if (user.blockedAt) {
+        throw new UserBlockedError();
+    }
+    if (user.status !== USER_STATUS.ACTIVE) {
+        throw new AuthenticationError('Your account is not active. Contact an administrator.');
+    }
+
+    return {
+        token: signToken(user._id, user.role),
+        user: user.toSafeObject(),
+    };
+};
 
 const TWO_FACTOR_PURPOSE = '2fa-pending';
 const TWO_FACTOR_TTL_MINUTES = 10;
@@ -856,6 +909,8 @@ module.exports = {
     resendVerification,
     completeGoogleProfile,
     loginWithGoogle,
+    issueGoogleOAuthExchangeCode,
+    exchangeGoogleOAuthCode,
     generate2FASecret,
     enable2FA,
     disable2FA,
