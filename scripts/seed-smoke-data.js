@@ -19,6 +19,7 @@ const SMOKE_GROUPS = [
   { key: 'subAgent', name: 'Sub Agent', percentage: 15 },
 ];
 
+// Development-only fallbacks; use SMOKE_*_PASSWORD in shared environments.
 const DEFAULT_ACCOUNTS = {
   admin: {
     email: 'smoke.admin@example.com',
@@ -78,6 +79,20 @@ function assertSafeEnvironment(env = process.env) {
 
 function buildSmokeSeedConfig(env = process.env) {
   const safety = assertSafeEnvironment(env);
+  if (safety.nodeEnv === 'production' && safety.allowProductionSeed) {
+    const missingPasswordKeys = [
+      'SMOKE_ADMIN_PASSWORD',
+      'SMOKE_CUSTOMER_PASSWORD',
+      'SMOKE_PENDING_CUSTOMER_PASSWORD',
+    ].filter((key) => !readEnv(env, key));
+
+    if (missingPasswordKeys.length) {
+      throw new Error(
+        `Production smoke seed requires explicit password env vars: ${missingPasswordKeys.join(', ')}`
+      );
+    }
+  }
+
   const allowedGateways = parseAllowedGateways(env);
   const paymentsEnabled = readEnv(env, 'PAYMENTS_ENABLED', 'true') !== 'false';
   const mockGatewayEnabled = paymentsEnabled && allowedGateways.includes('MOCK');
@@ -617,7 +632,7 @@ function printSummary(summary, seedConfig, logger = console) {
       writeLog(
         logger,
         'warn',
-        `[smoke-seed] DEV ONLY default password for ${label}: ${account.email} / ${account.password}`
+        `[smoke-seed] ${label} uses a development-only default password; password not printed: ${account.email}`
       );
     } else {
       writeLog(logger, 'log', `[smoke-seed] ${label} password came from env and was not printed: ${account.email}`);

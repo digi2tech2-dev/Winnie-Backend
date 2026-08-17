@@ -22,8 +22,31 @@ const { Order } = require('../modules/orders/order.model');
 
 const CLEAR_FLAG = process.argv.includes('--clear');
 
+const readBool = (value) => ['1', 'true', 'yes', 'on'].includes(String(value || '').trim().toLowerCase());
+
+const assertSafeSeedEnvironment = () => {
+    const nodeEnv = String(process.env.NODE_ENV || 'development').trim().toLowerCase();
+    if (nodeEnv === 'production' && !readBool(process.env.ALLOW_PRODUCTION_SEED)) {
+        throw new Error(
+            'Refusing to run seed in production. Set ALLOW_PRODUCTION_SEED=true only for an intentional, reviewed operation.'
+        );
+    }
+};
+
+const seedAccount = (prefix, defaults) => {
+    const email = process.env[`${prefix}_EMAIL`] || defaults.email;
+    const password = process.env[`${prefix}_PASSWORD`] || defaults.password;
+
+    return {
+        email,
+        password,
+        usingDefaultPassword: !process.env[`${prefix}_PASSWORD`],
+    };
+};
+
 const seed = async () => {
     try {
+        assertSafeSeedEnvironment();
         await mongoose.connect(config.db.uri);
         console.log('✅ Connected to MongoDB');
 
@@ -62,13 +85,18 @@ const seed = async () => {
 
         // ── 2. Create Admin User ───────────────────────────────────────────────────
         // Admins are assigned the Standard group (lowest markup) by convention.
-        const adminExists = await User.findOne({ email: 'admin@example.com' });
+        // Development-only fallback; use SEED_ADMIN_PASSWORD in shared environments.
+        const adminSeed = seedAccount('SEED_ADMIN', {
+            email: 'admin@example.com',
+            password: 'AdminExample123',
+        });
+        const adminExists = await User.findOne({ email: adminSeed.email });
         let admin;
         if (!adminExists) {
             admin = await User.create({
                 name: 'Admin User',
-                email: 'admin@example.com',
-                password: 'AdminExample123',
+                email: adminSeed.email,
+                password: adminSeed.password,
                 role: ROLES.ADMIN,
                 groupId: standardGroup._id,
                 walletBalance: 0,
@@ -77,20 +105,25 @@ const seed = async () => {
                 status: USER_STATUS.ACTIVE,
                 verified: true,
             });
-            console.log('Admin created: admin@example.com / AdminExample123');
+            console.log(`Admin created: ${adminSeed.email} (password not printed; ${adminSeed.usingDefaultPassword ? 'development-only default used' : 'password loaded from env'})`);
         } else {
             admin = adminExists;
             console.log(`ℹ️  Admin already exists (id: ${admin._id})`);
         }
 
         // ── 3. Create Customer User ────────────────────────────────────────────────
-        const customerExists = await User.findOne({ email: 'customer@example.com' });
+        // Development-only fallback; use SEED_CUSTOMER_PASSWORD in shared environments.
+        const customerSeed = seedAccount('SEED_CUSTOMER', {
+            email: 'customer@example.com',
+            password: 'CustomerExample123',
+        });
+        const customerExists = await User.findOne({ email: customerSeed.email });
         let customer;
         if (!customerExists) {
             customer = await User.create({
                 name: 'Customer User',
-                email: 'customer@example.com',
-                password: 'CustomerExample123',
+                email: customerSeed.email,
+                password: customerSeed.password,
                 role: ROLES.CUSTOMER,
                 groupId: standardGroup._id,  // Admin-overridden to Standard for testing
                 walletBalance: 500,           // Pre-loaded wallet for testing
@@ -99,7 +132,7 @@ const seed = async () => {
                 status: USER_STATUS.ACTIVE,
                 verified: true,
             });
-            console.log('Customer created: customer@example.com / CustomerExample123');
+            console.log(`Customer created: ${customerSeed.email} (password not printed; ${customerSeed.usingDefaultPassword ? 'development-only default used' : 'password loaded from env'})`);
             console.log(`   walletBalance: $500 | creditLimit: $200 | group: Standard`);
         } else {
             customer = customerExists;
@@ -126,9 +159,10 @@ const seed = async () => {
         // ── Summary ─────────────────────────────────────────────────────────────────
         console.log('');
         console.log('═══════════════════════════════════════════════════');
-        console.log('  Seed complete. Test credentials:');
-        console.log('  ADMIN    -> admin@example.com    / AdminExample123');
-        console.log('  CUSTOMER -> customer@example.com / CustomerExample123');
+        console.log('  Seed complete. Development account emails:');
+        console.log(`  ADMIN    -> ${adminSeed.email}`);
+        console.log(`  CUSTOMER -> ${customerSeed.email}`);
+        console.log('  Passwords were not printed. Override SEED_*_PASSWORD in shared environments.');
         console.log('═══════════════════════════════════════════════════');
 
         process.exit(0);

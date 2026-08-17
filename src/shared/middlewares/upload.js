@@ -40,11 +40,12 @@ const IMAGE_MIME_TYPES = new Set([
     'image/png',
     'image/webp',
     'image/gif',
-    'image/svg+xml',
     'image/bmp',
 ]);
 
-const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.svg', '.bmp']);
+const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp']);
+const BLOCKED_MIME_TYPES = new Set(['image/svg+xml']);
+const BLOCKED_EXTENSIONS = new Set(['.svg']);
 
 /** Deposits also accept PDFs */
 const DEPOSIT_MIME_TYPES = new Set([...IMAGE_MIME_TYPES, 'application/pdf']);
@@ -80,13 +81,22 @@ const createUpload = (category, options = {}) => {
     const allowedMimes = options.allowedMimes || (isDeposit ? DEPOSIT_MIME_TYPES : IMAGE_MIME_TYPES);
     const allowedExts = options.allowedExts || (isDeposit ? DEPOSIT_EXTENSIONS : IMAGE_EXTENSIONS);
     const acceptedLabel = options.acceptedLabel || (isDeposit
-        ? 'JPG, JPEG, PNG, WebP, GIF, SVG, BMP, and PDF'
-        : 'JPG, JPEG, PNG, WebP, GIF, SVG, and BMP');
+        ? 'JPG, JPEG, PNG, WebP, GIF, BMP, and PDF'
+        : 'JPG, JPEG, PNG, WebP, GIF, and BMP');
     const maxFileSize = options.maxFileSize || MAX_FILE_SIZE;
     const maxFiles = Math.max(parseInt(options.maxFiles, 10) || 1, 1);
 
     const fileFilter = (_req, file, cb) => {
         const ext = path.extname(file.originalname).toLowerCase();
+        if (BLOCKED_MIME_TYPES.has(file.mimetype) || BLOCKED_EXTENSIONS.has(ext)) {
+            return cb(
+                new BusinessRuleError(
+                    'SVG uploads are not accepted. Please upload JPG, JPEG, PNG, WebP, GIF, BMP, or PDF where allowed.',
+                    'INVALID_FILE_TYPE'
+                )
+            );
+        }
+
         const mimeOk = allowedMimes.has(file.mimetype);
         const extOk = allowedExts.has(ext);
 
