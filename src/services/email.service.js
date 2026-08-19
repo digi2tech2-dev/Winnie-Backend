@@ -16,7 +16,8 @@
  *   SMTP_USER   - Auth username
  *   SMTP_PASS   - Auth password / app password
  *   EMAIL_FROM  - Sender address (default: noreply@example.com)
- *   APP_URL     - Base URL for verification links (default: http://localhost:5000)
+ *   APP_URL     - Public base URL for verification links
+ *   FRONTEND_URL - Fallback public domain for verification links
  *
  * In NODE_ENV=test all sends are silently skipped (no real email sent).
  */
@@ -28,18 +29,39 @@ const config = require('../config/config');
 
 let _transporter = null;
 
+const _normalizeBaseUrl = (value) => String(value || '').trim().replace(/\/+$/, '');
+
+const _formatFromAddress = (from) => {
+    const value = String(from || '').trim();
+    if (!value) return 'noreply@example.com';
+    if (value.includes('<') || value.includes('>')) return value;
+    return `"Winnie" <${value}>`;
+};
+
+const _buildVerificationUrl = (rawToken) => {
+    const publicBaseUrl = _normalizeBaseUrl(config.email.appUrl || config.frontend.url);
+    const apiBaseUrl = publicBaseUrl.replace(/\/api$/i, '');
+    return `${apiBaseUrl}/api/auth/verify-email?token=${encodeURIComponent(rawToken)}`;
+};
+
 const _getTransporter = () => {
     if (_transporter) return _transporter;
 
-    _transporter = nodemailer.createTransport({
+    const transportOptions = {
         host: config.email.host,
         port: config.email.port,
-        secure: config.email.port === 465,   // true for port 465 (SSL), false for STARTTLS
-        auth: {
+        secure: config.email.secure,
+        requireTLS: config.email.requireTLS,
+    };
+
+    if (config.email.user || config.email.pass) {
+        transportOptions.auth = {
             user: config.email.user,
             pass: config.email.pass,
-        },
-    });
+        };
+    }
+
+    _transporter = nodemailer.createTransport(transportOptions);
 
     return _transporter;
 };
@@ -59,7 +81,7 @@ const sendEmail = async ({ to, subject, html, text }) => {
     const transporter = _getTransporter();
 
     await transporter.sendMail({
-        from: `"Platform" <${config.email.from}>`,
+        from: _formatFromAddress(config.email.from),
         to,
         subject,
         html,
@@ -226,13 +248,11 @@ const _twoFactorOtpTemplate = ({ name, otp, expiresMinutes }) => `
  * @returns {Promise<void>}
  */
 const sendVerificationEmail = async (user, rawToken) => {
-    const baseUrl = process.env.APP_URL || 'http://localhost:5000';
-    const verifyUrl =
-        `${baseUrl}/api/auth/verify-email?token=${encodeURIComponent(rawToken)}`;
+    const verifyUrl = _buildVerificationUrl(rawToken);
 
     await sendEmail({
         to: user.email,
-        subject: 'Verify your email address - Platform',
+        subject: 'Verify your email address - Winnie',
         html: _verificationTemplate({ name: user.name, verifyUrl }),
     });
 };
@@ -249,4 +269,11 @@ const sendTwoFactorOtpEmail = async (user, otp, { expiresMinutes = 10 } = {}) =>
     });
 };
 
-module.exports = { sendEmail, sendVerificationEmail, sendTwoFactorOtpEmail };
+module.exports = {
+    sendEmail,
+    sendVerificationEmail,
+    sendTwoFactorOtpEmail,
+    _buildVerificationUrl,
+    _formatFromAddress,
+    _getTransporter,
+};

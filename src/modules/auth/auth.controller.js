@@ -92,7 +92,7 @@ const verify2FA = catchAsync(async (req, res) => {
  * On failure  → JSON 422 error (invalid / expired token)
  */
 const verifyEmail = async (req, res) => {
-    const redirectUrl = process.env.FRONTEND_VERIFY_REDIRECT_URL || 'http://localhost:5173/email-verified';
+    const redirectUrl = config.frontend.verifyRedirectUrl;
     try {
         const { token } = req.query;
         if (!token) {

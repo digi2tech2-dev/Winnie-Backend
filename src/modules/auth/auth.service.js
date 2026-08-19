@@ -32,7 +32,7 @@ const { Order } = require('../orders/order.model');
 const { DepositRequest, DEPOSIT_STATUS } = require('../deposits/deposit.model');
 const { getHighestPercentageGroupOrNull } = require('../groups/group.service');
 const referralService = require('../referrals/referral.service');
-const { sendVerificationEmail, sendTwoFactorOtpEmail } = require('../../services/email.service');
+const emailService = require('../../services/email.service');
 const {
     AuthenticationError,
     ConflictError,
@@ -215,6 +215,43 @@ const maskEmail = (email = '') => {
     return `${name.slice(0, 2)}***@${domain}`;
 };
 
+const emailErrorCode = (err) => {
+    const code = err?.code || err?.responseCode || err?.command || err?.name || 'EMAIL_SEND_FAILED';
+    return String(code).slice(0, 80);
+};
+
+const logVerificationEmailEvent = ({ status, user, flow, err = null }) => {
+    const payload = {
+        flow,
+        messageType: 'email_verification',
+        status,
+        userId: user?._id ? user._id.toString() : null,
+        email: maskEmail(user?.email),
+    };
+
+    if (err) {
+        payload.errorCode = emailErrorCode(err);
+        console.error('[Auth.email]', payload);
+        return;
+    }
+
+    if (config.env === 'test') return;
+
+    console.info('[Auth.email]', payload);
+};
+
+const sendVerificationEmailSafely = async (user, rawToken, flow) => {
+    logVerificationEmailEvent({ status: 'start', user, flow });
+    try {
+        await emailService.sendVerificationEmail(user, rawToken);
+        logVerificationEmailEvent({ status: 'sent', user, flow });
+        return true;
+    } catch (err) {
+        logVerificationEmailEvent({ status: 'failed', user, flow, err });
+        return false;
+    }
+};
+
 const clearTwoFactorChallenge = async (user) => {
     user.twoFactorOtp = null;
     user.twoFactorOtpExpires = null;
@@ -235,7 +272,7 @@ const issueTwoFactorChallenge = async (user) => {
     user.twoFactorTempTokenExpires = expiresAt;
     await user.save();
 
-    await sendTwoFactorOtpEmail(user, otp, { expiresMinutes: TWO_FACTOR_TTL_MINUTES });
+    await emailService.sendTwoFactorOtpEmail(user, otp, { expiresMinutes: TWO_FACTOR_TTL_MINUTES });
 
     createAuditLog({
         actorId: user._id,
@@ -400,10 +437,8 @@ const register = async ({ name, email, password, currency, country, phone, usern
         metadata: { email: user.email, name: user.name, groupId: user.groupId },
     });
 
-    // ── 6. Send verification email (fire-and-forget — never block registration) ──
-    sendVerificationEmail(user, rawToken).catch((err) => {
-        console.error('[Auth] Failed to send verification email:', err.message);
-    });
+    // Send verification email. The account stays created if SMTP fails.
+    const verificationEmailSent = await sendVerificationEmailSafely(user, rawToken, 'registration');
 
     if (user.status === USER_STATUS.PENDING) {
         void safeCreateAdminActorNotifications({
@@ -425,7 +460,12 @@ const register = async ({ name, email, password, currency, country, phone, usern
 
     return {
         user: user.toSafeObject(),
-        message: 'Registration successful! Please check your email to verify and activate your account.',
+        emailDelivery: {
+            verification: verificationEmailSent ? 'sent' : 'failed',
+        },
+        message: verificationEmailSent
+            ? 'Registration successful! Please check your email to verify and activate your account.'
+            : 'Registration successful, but we could not send the verification email. Please request a new verification link or contact support.',
     };
 };
 
@@ -624,9 +664,7 @@ const resendVerification = async (email) => {
     user.emailVerificationExpires = expiresAt;
     await user.save();
 
-    sendVerificationEmail(user, rawToken).catch((err) => {
-        console.error('[Auth] Failed to resend verification email:', err.message);
-    });
+    await sendVerificationEmailSafely(user, rawToken, 'resend-verification');
 
     return { message: 'If that email exists, a verification link has been sent.' };
 };

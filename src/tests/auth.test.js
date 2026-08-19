@@ -16,6 +16,8 @@ const crypto = require('crypto');
 const { User, USER_STATUS } = require('../modules/users/user.model');
 const Group = require('../modules/groups/group.model');
 const { Currency } = require('../modules/currency/currency.model');
+const config = require('../config/config');
+const emailService = require('../services/email.service');
 const {
     WalletTransaction,
     TRANSACTION_TYPES,
@@ -51,6 +53,11 @@ afterAll(async () => {
 
 beforeEach(async () => {
     await clearCollections();
+    jest.spyOn(console, 'info').mockImplementation(() => {});
+});
+
+afterEach(() => {
+    jest.restoreAllMocks();
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -119,6 +126,69 @@ describe('[1] Registration', () => {
         expect(dbUser.status).toBe(USER_STATUS.PENDING);
         expect(dbUser.emailVerificationToken).not.toBeNull();
         expect(dbUser.emailVerificationExpires).not.toBeNull();
+    });
+
+    it('sends the account verification email during registration', async () => {
+        const emailSpy = jest.spyOn(emailService, 'sendVerificationEmail').mockResolvedValue();
+        const result = await register({
+            name: 'Mail User',
+            email: `mail-${Date.now()}@example.com`,
+            password: 'SecurePass@1',
+        });
+
+        expect(emailSpy).toHaveBeenCalledTimes(1);
+        const [emailUser, rawToken] = emailSpy.mock.calls[0];
+        expect(emailUser.email).toBe(result.user.email);
+        expect(rawToken).toMatch(/^[a-f0-9]{64}$/);
+        expect(result.emailDelivery.verification).toBe('sent');
+        expect(result.message).toMatch(/check your email/i);
+
+        const dbUser = await User.findById(result.user._id).select('+emailVerificationToken');
+        expect(dbUser.emailVerificationToken).not.toBe(rawToken);
+    });
+
+    it('builds verification links with the configured production frontend domain', () => {
+        const originalAppUrl = config.email.appUrl;
+        config.email.appUrl = 'https://winniehub.ae/';
+
+        try {
+            const url = emailService._buildVerificationUrl('raw token+value');
+            expect(url).toBe('https://winniehub.ae/api/auth/verify-email?token=raw%20token%2Bvalue');
+            expect(url).not.toContain('localhost');
+        } finally {
+            config.email.appUrl = originalAppUrl;
+        }
+    });
+
+    it('keeps registration pending and logs safely when verification email sending fails', async () => {
+        const smtpError = new Error('smtp rejected password=secret token=raw-token');
+        smtpError.code = 'EAUTH';
+        jest.spyOn(emailService, 'sendVerificationEmail').mockRejectedValue(smtpError);
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+        const result = await register({
+            name: 'Mail Failure',
+            email: `mail-fail-${Date.now()}@example.com`,
+            password: 'SecurePass@1',
+        });
+
+        expect(result.emailDelivery.verification).toBe('failed');
+        expect(result.message).toMatch(/could not send the verification email/i);
+
+        const dbUser = await User.findById(result.user._id)
+            .select('+emailVerificationToken +emailVerificationExpires +verified');
+        expect(dbUser.verified).toBe(false);
+        expect(dbUser.status).toBe(USER_STATUS.PENDING);
+        expect(dbUser.emailVerificationToken).toMatch(/^[a-f0-9]{64}$/);
+        expect(dbUser.emailVerificationExpires).toBeTruthy();
+
+        const logged = JSON.stringify(errorSpy.mock.calls);
+        expect(logged).toContain('EAUTH');
+        expect(logged).toContain('email_verification');
+        expect(logged).toContain('registration');
+        expect(logged).not.toContain('password=secret');
+        expect(logged).not.toContain('raw-token');
+        expect(logged).not.toContain('/api/auth/verify-email?token=');
     });
 
     it('stores a HASHED token (not raw) in the DB', async () => {
