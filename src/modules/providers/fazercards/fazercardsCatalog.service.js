@@ -1187,10 +1187,62 @@ const buildFamilyFilter = (familyKey) => {
     return { familyKey: normalized };
 };
 
+const buildProviderProductSearchFilter = (search) => {
+    const normalizedSearch = String(search || '').trim();
+    if (!normalizedSearch) return null;
+
+    const escaped = normalizedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, 'i');
+
+    return {
+        $or: [
+            { rawName: regex },
+            { name: regex },
+            { translatedName: regex },
+            { externalProductId: regex },
+            { category: regex },
+            { categoryName: regex },
+            { offerId: regex },
+            { offerName: regex },
+            { subCategory: regex },
+            { region: regex },
+            { platform: regex },
+            { familyKey: regex },
+            { fulfillmentMode: regex },
+            { supportLevel: regex },
+            { blockReason: regex },
+            { 'rawPayload.category.category_id': regex },
+            { 'rawPayload.category.id': regex },
+            { 'rawPayload.category.name': regex },
+            { 'rawPayload.offer.offer_id': regex },
+            { 'rawPayload.offer.card_id': regex },
+            { 'rawPayload.offer.key_id': regex },
+            { 'rawPayload.offer.product_id': regex },
+            { 'rawPayload.offer.manual_service_id': regex },
+            { 'rawPayload.offer.id': regex },
+            { 'rawPayload.offer.name': regex },
+            { 'rawPayload.offer.sku': regex },
+            { 'rawPayload.offer.code': regex },
+            { 'rawPayload.offer.reference': regex },
+            { 'rawPayload.game.game_id': regex },
+            { 'rawPayload.game.name': regex },
+            { 'rawPayload.game.platform': regex },
+            { 'rawPayload.game.region': regex },
+            { 'rawPayload.key.key_id': regex },
+            { 'rawPayload.key.name': regex },
+            { 'rawPayload.key.sku': regex },
+            { 'rawPayload.key.code': regex },
+            { 'rawPayload.key.reference': regex },
+        ],
+    };
+};
+
 const listProviderProducts = async ({
     page = 1,
     limit = 50,
     search,
+    q,
+    query: queryText,
     category,
     region,
     available,
@@ -1232,21 +1284,7 @@ const listProviderProducts = async ({
         query._id = importedFilter ? { $in: importedIds } : { $nin: importedIds };
     }
 
-    if (search) {
-        const escaped = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const regex = new RegExp(escaped, 'i');
-        addAndCondition(query, { $or: [
-            { rawName: regex },
-            { translatedName: regex },
-            { externalProductId: regex },
-            { category: regex },
-            { categoryName: regex },
-            { offerId: regex },
-            { offerName: regex },
-            { subCategory: regex },
-            { region: regex },
-        ] });
-    }
+    addAndCondition(query, buildProviderProductSearchFilter(search || q || queryText));
 
     const normalizedPage = Math.max(parseInt(page, 10) || 1, 1);
     const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);

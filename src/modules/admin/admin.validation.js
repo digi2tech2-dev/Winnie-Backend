@@ -653,6 +653,8 @@ const fazerCardsProductLaunchSchema = Joi.object({
 const listFazerCardsProviderProductsQuery = Joi.object({
     ...pagination,
     search: Joi.string().trim().max(200).allow('', null),
+    q: Joi.string().trim().max(200).allow('', null),
+    query: Joi.string().trim().max(200).allow('', null),
     category: Joi.string().trim().max(120).allow('', null),
     region: Joi.string().trim().max(120).allow('', null),
     available: Joi.boolean(),

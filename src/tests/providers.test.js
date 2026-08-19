@@ -1794,8 +1794,29 @@ describe('FazerCards catalog normalization and raw sync', () => {
             rawName: 'PUBG Global',
             rawPrice: '2',
             category: 'game-topups',
+            categoryName: 'Game Topups',
             region: 'GLOBAL',
             available: true,
+            familyKey: 'TOPUPS',
+            fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
+            isSupported: true,
+            isBlocked: false,
+            rawPayload: {
+                category: { category_id: 'game-topups', name: 'Game Topups' },
+                offer: { offer_id: 'pubg-global', name: 'PUBG Global UC', sku: 'PUBG-UC-GLOBAL' },
+            },
+        });
+        await ProviderProduct.create({
+            provider: provider._id,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            externalProductId: 'pubg-mobile',
+            rawName: 'PUBG Mobile Credits',
+            rawPrice: '3',
+            category: 'game-topups',
+            categoryName: 'Game Topups',
+            region: 'GLOBAL',
+            available: true,
+            familyKey: 'TOPUPS',
             fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
             isSupported: true,
             isBlocked: false,
@@ -1807,18 +1828,58 @@ describe('FazerCards catalog normalization and raw sync', () => {
             rawName: 'Steam RU',
             rawPrice: '2',
             category: 'gift-cards',
+            categoryName: 'Gift Cards',
             region: 'RU',
             available: true,
+            familyKey: 'GIFTCARDS',
             fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
             isSupported: false,
             isBlocked: true,
             blockReason: 'BLOCKED_REGION',
+            rawPayload: {
+                category: { category_id: 'gift-cards', name: 'Gift Cards' },
+                offer: { card_id: 'steam-ru', name: 'Steam RU', sku: 'STEAM-SKU-RU' },
+            },
+        });
+        const otherProvider = await Provider.create({
+            name: 'Other Provider',
+            slug: 'other-provider',
+            baseUrl: 'https://example.test/api',
+            isActive: true,
+            syncInterval: 0,
+        });
+        await ProviderProduct.create({
+            provider: otherProvider._id,
+            externalProductId: 'pubg-other-provider',
+            rawName: 'PUBG Other Provider',
+            rawPrice: '2',
+            category: 'game-topups',
         });
 
         const listed = await fazerCardsCatalogSvc.listProviderProducts({ blocked: 'true' });
+        const byName = await fazerCardsCatalogSvc.listProviderProducts({ search: 'pubg', page: 2, limit: 1 });
+        const byExternalId = await fazerCardsCatalogSvc.listProviderProducts({ search: 'steam-ru' });
+        const bySku = await fazerCardsCatalogSvc.listProviderProducts({ search: 'sku-ru' });
+        const byFamilyOrCategory = await fazerCardsCatalogSvc.listProviderProducts({ search: 'gift' });
+        const emptySearch = await fazerCardsCatalogSvc.listProviderProducts({ search: '' });
 
         expect(listed.products).toHaveLength(1);
         expect(listed.products[0].externalProductId).toBe('steam-ru');
+        expect(byName.products).toHaveLength(1);
+        expect(byName.pagination).toMatchObject({ page: 2, limit: 1, total: 2, pages: 2 });
+        expect(byName.products[0].rawName).toBe('PUBG Mobile Credits');
+        expect(byExternalId.products).toHaveLength(1);
+        expect(byExternalId.products[0].externalProductId).toBe('steam-ru');
+        expect(bySku.products).toHaveLength(1);
+        expect(bySku.products[0].externalProductId).toBe('steam-ru');
+        expect(byFamilyOrCategory.products).toHaveLength(1);
+        expect(byFamilyOrCategory.products[0].familyKey).toBe('GIFTCARDS');
+        expect(emptySearch.products).toHaveLength(3);
+        expect(emptySearch.products.map((product) => product.providerCode)).toEqual([
+            PROVIDER_CODES.FAZER_CARDS,
+            PROVIDER_CODES.FAZER_CARDS,
+            PROVIDER_CODES.FAZER_CARDS,
+        ]);
     });
 
     it('syncs manual service offer fields into ProviderProduct and imported Product order fields', async () => {
