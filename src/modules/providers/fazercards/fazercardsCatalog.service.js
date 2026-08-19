@@ -4,7 +4,14 @@ const mongoose = require('mongoose');
 const config = require('../../../config/config');
 const { Provider } = require('../provider.model');
 const { ProviderProduct, FULFILLMENT_MODES, SUPPORT_LEVELS } = require('../providerProduct.model');
-const { Product, PRICING_MODES, EXECUTION_TYPES, PRODUCT_STATUSES } = require('../../products/product.model');
+const {
+    Product,
+    PRICING_MODES,
+    MARKUP_TYPES,
+    EXECUTION_TYPES,
+    PRODUCT_STATUSES,
+    computeFinalPrice,
+} = require('../../products/product.model');
 const { Order, ORDER_STATUS } = require('../../orders/order.model');
 const { refundFailedOrder } = require('../../orders/orderFulfillment.service');
 const { Currency } = require('../../currency/currency.model');
@@ -1602,6 +1609,8 @@ const buildImportPreview = (providerProduct) => {
     const executionBlocked = shouldBlockImportedProductExecution(providerProduct);
     const blockReason = executionBlocked ? getFamilyBlockReason(providerProduct) : providerProduct.blockReason || null;
     const family = getFazerCardsFamily(familyKey);
+    const providerPrice = String(providerProduct.costPrice ?? providerProduct.rawPrice);
+    const calculatedLocalPrice = computeFinalPrice(providerPrice, MARKUP_TYPES.PERCENTAGE, 0);
     return {
         providerProductId: providerProduct._id.toString(),
         providerProductName: providerProduct.rawName,
@@ -1611,7 +1620,13 @@ const buildImportPreview = (providerProduct) => {
         supportLevel: providerProduct.supportLevel || null,
         executionBlocked: providerProduct.executionBlocked === true,
         blockReason,
-        costPrice: String(providerProduct.costPrice ?? providerProduct.rawPrice),
+        costPrice: providerPrice,
+        autoPriceSyncAvailable: Boolean(calculatedLocalPrice),
+        calculatedLocalPrice,
+        calculatedPriceSource: calculatedLocalPrice ? 'provider_cost' : null,
+        defaultPricingMode: calculatedLocalPrice ? PRICING_MODES.SYNC : PRICING_MODES.MANUAL,
+        defaultMarkupType: MARKUP_TYPES.PERCENTAGE,
+        defaultMarkupValue: 0,
         currency: providerProduct.currency || 'USD',
         requiredFields: providerProduct.requiredFields,
         stock: providerProduct.stock ?? null,
@@ -1633,6 +1648,57 @@ const getImportPreview = async (id) => {
     return buildImportPreview(providerProduct);
 };
 
+const hasExplicitSellPrice = (payload = {}) => (
+    payload.sellPrice !== undefined
+    && payload.sellPrice !== null
+    && payload.sellPrice !== ''
+);
+
+const resolveFazerCardsImportPricing = (providerProduct, payload = {}) => {
+    const providerPrice = String(providerProduct.costPrice ?? providerProduct.rawPrice);
+    const markupType = Object.values(MARKUP_TYPES).includes(payload.markupType)
+        ? payload.markupType
+        : MARKUP_TYPES.PERCENTAGE;
+    const markupValue = Number(payload.markupValue ?? 0);
+    if (!Number.isFinite(markupValue) || markupValue < 0) {
+        throw new BusinessRuleError('markupValue must be a non-negative number.', 'INVALID_MARKUP_VALUE');
+    }
+
+    if (hasExplicitSellPrice(payload)) {
+        const sellPrice = Number(payload.sellPrice);
+        if (!Number.isFinite(sellPrice) || sellPrice <= 0) {
+            throw new BusinessRuleError('sellPrice must be a positive number.', 'INVALID_SELL_PRICE');
+        }
+        return {
+            basePrice: String(sellPrice),
+            finalPrice: String(sellPrice),
+            markupType,
+            markupValue,
+            pricingMode: PRICING_MODES.MANUAL,
+            providerPrice,
+            syncPriceWithProvider: false,
+        };
+    }
+
+    const finalPrice = computeFinalPrice(providerPrice, markupType, markupValue);
+    if (!finalPrice) {
+        throw new BusinessRuleError(
+            'FazerCards provider product has no valid price to auto-sync. Enter a manual sell price.',
+            'FAZERCARDS_PROVIDER_PRODUCT_PRICE_REQUIRED'
+        );
+    }
+
+    return {
+        basePrice: finalPrice,
+        finalPrice,
+        markupType,
+        markupValue,
+        pricingMode: PRICING_MODES.SYNC,
+        providerPrice,
+        syncPriceWithProvider: true,
+    };
+};
+
 const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
     const providerProduct = await ProviderProduct.findById(id).populate('provider', 'name slug providerCode isActive');
     assertImportableProviderProduct(providerProduct);
@@ -1644,10 +1710,6 @@ const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
     }
 
     const currency = await normalizeImportCurrency(payload.currency || providerProduct.currency || 'USD');
-    const sellPrice = Number(payload.sellPrice);
-    if (!Number.isFinite(sellPrice) || sellPrice <= 0) {
-        throw new BusinessRuleError('sellPrice must be a positive number.', 'INVALID_SELL_PRICE');
-    }
 
     const productName = String(payload.name || providerProduct.translatedName || providerProduct.rawName || '').trim();
     if (productName.length < 2 || productName.length > 200) {
@@ -1663,7 +1725,7 @@ const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
         throw new ConflictError(`A product named '${productName}' already exists.`);
     }
 
-    const costPrice = String(providerProduct.costPrice ?? providerProduct.rawPrice);
+    const pricing = resolveFazerCardsImportPricing(providerProduct, payload);
     const familyKey = getProviderProductFamilyKey(providerProduct);
     const executionBlocked = shouldBlockImportedProductExecution(providerProduct);
     const blockReason = executionBlocked ? getFamilyBlockReason(providerProduct) : null;
@@ -1672,15 +1734,14 @@ const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
     const providerMapping = buildProviderMapping(orderFieldsWithProviderKeys);
     const orderFields = orderFieldsWithProviderKeys.map(({ providerKey, ...field }) => field);
     const dynamicFields = buildDynamicFieldsFromOrderFields(orderFields);
-    const syncPrice = payload.syncPriceFromProvider === true;
     const nowUpdate = {
         name: productName,
         description: payload.description ?? providerProduct.rawPayload?.category?.note ?? null,
         image: payload.image || null,
         category: payload.categoryId || payload.category || providerProduct.category || null,
-        basePrice: String(sellPrice),
-        providerPrice: costPrice,
-        finalPrice: String(sellPrice),
+        basePrice: pricing.basePrice,
+        providerPrice: pricing.providerPrice,
+        finalPrice: pricing.finalPrice,
         currency,
         minQty: providerProduct.minQty || 1,
         maxQty: providerProduct.maxQty || 9999,
@@ -1690,8 +1751,10 @@ const importProviderProduct = async (id, payload = {}, adminUserId = null) => {
         status: PRODUCT_STATUSES.UNAVAILABLE,
         executionType: EXECUTION_TYPES.MANUAL,
         customerPurchaseEnabled: false,
-        pricingMode: syncPrice ? PRICING_MODES.SYNC : PRICING_MODES.MANUAL,
-        syncPriceWithProvider: syncPrice,
+        pricingMode: pricing.pricingMode,
+        markupType: pricing.markupType,
+        markupValue: pricing.markupValue,
+        syncPriceWithProvider: pricing.syncPriceWithProvider,
         syncNameWithProvider: payload.syncNameFromProvider === true,
         syncAvailabilityWithProvider: payload.syncAvailabilityFromProvider !== false,
         providerExecutionEnabled: false,

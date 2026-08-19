@@ -14,7 +14,7 @@ const axios = require('axios');
 const config = require('../config/config');
 const { Provider } = require('../modules/providers/provider.model');
 const { ProviderProduct, FULFILLMENT_MODES } = require('../modules/providers/providerProduct.model');
-const { Product, EXECUTION_TYPES, PRODUCT_STATUSES } = require('../modules/products/product.model');
+const { Product, PRICING_MODES, MARKUP_TYPES, EXECUTION_TYPES, PRODUCT_STATUSES } = require('../modules/products/product.model');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('../modules/orders/order.model');
 const orderService = require('../modules/orders/order.service');
 const { executeOrder } = require('../modules/orders/orderFulfillment.service');
@@ -45,6 +45,7 @@ const {
     clearCollections,
     createCustomerWithGroup,
 } = require('./testHelpers');
+const { calculateUserPrice } = require('../modules/orders/pricing.service');
 
 const makeClient = () => ({
     request: jest.fn(),
@@ -1698,6 +1699,53 @@ describe('FazerCards catalog normalization and raw sync', () => {
         expect(axios.create).not.toHaveBeenCalled();
     });
 
+    it('auto-syncs FazerCards provider price during import when no manual sellPrice is provided', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct();
+
+        const preview = await fazerCardsCatalogSvc.getImportPreview(providerProduct._id);
+        const result = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            name: '8 Ball Auto Price',
+        });
+        const product = await Product.findById(result.product._id).lean();
+
+        expect(preview).toMatchObject({
+            autoPriceSyncAvailable: true,
+            calculatedLocalPrice: '0.7487',
+            defaultPricingMode: PRICING_MODES.SYNC,
+            defaultMarkupType: MARKUP_TYPES.PERCENTAGE,
+            defaultMarkupValue: 0,
+        });
+        expect(product).toMatchObject({
+            name: '8 Ball Auto Price',
+            providerPrice: '0.7487',
+            basePrice: '0.7487',
+            finalPrice: '0.7487',
+            pricingMode: PRICING_MODES.SYNC,
+            markupType: MARKUP_TYPES.PERCENTAGE,
+            markupValue: 0,
+            syncPriceWithProvider: true,
+        });
+        expect(await Product.countDocuments({ providerProduct: providerProduct._id })).toBe(1);
+        expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('uses existing product and group pricing rules after automatic FazerCards import', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct();
+        const { customer } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 20 });
+
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {});
+        const pricing = await calculateUserPrice(customer._id, product.finalPrice, null, {
+            baseUnitPriceUsd: product.providerPrice,
+        });
+
+        expect(product.basePrice).toBe('0.7487');
+        expect(pricing).toMatchObject({
+            basePrice: '0.7487',
+            markupPercentage: 20,
+            finalPrice: '0.89844',
+        });
+    });
+
     it('cannot duplicate import the same providerProduct unless updateExisting is explicit', async () => {
         const { providerProduct } = await createFazerTopupProviderProduct();
 
@@ -1722,6 +1770,24 @@ describe('FazerCards catalog normalization and raw sync', () => {
         expect(products[0].name).toBe('8 Ball Draft Updated');
         expect(products[0].isActive).toBe(false);
         expect(products[0].visibleInStore).toBe(false);
+    });
+
+    it('keeps manual FazerCards sellPrice overrides out of automatic price sync', async () => {
+        const { providerProduct } = await createFazerTopupProviderProduct();
+
+        const { product } = await fazerCardsCatalogSvc.importProviderProduct(providerProduct._id, {
+            name: '8 Ball Manual Price',
+            sellPrice: 1.49,
+            syncPriceFromProvider: true,
+        });
+
+        expect(product).toMatchObject({
+            providerPrice: '0.7487',
+            basePrice: '1.49',
+            finalPrice: '1.49',
+            pricingMode: PRICING_MODES.MANUAL,
+            syncPriceWithProvider: false,
+        });
     });
 
     it('lists FazerCards provider products with imported filters', async () => {
