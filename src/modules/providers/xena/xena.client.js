@@ -11,6 +11,9 @@ const XENA_ERROR_CODES = Object.freeze({
     CONNECTION_REQUIRED: 'XENA_CONNECTION_REQUIRED',
     REAUTHENTICATION_REQUIRED: 'XENA_REAUTHENTICATION_REQUIRED',
     PROVIDER_AUTH_FAILED: 'XENA_PROVIDER_AUTH_FAILED',
+    INVALID_CREDENTIALS: 'XENA_INVALID_CREDENTIALS',
+    OTP_INVALID: 'XENA_OTP_INVALID',
+    OTP_EXPIRED: 'XENA_OTP_EXPIRED',
     TARGET_INVALID: 'XENA_TARGET_INVALID',
     BALANCE_UNAVAILABLE: 'XENA_BALANCE_UNAVAILABLE',
     RATE_LIMITED: 'XENA_RATE_LIMITED',
@@ -44,6 +47,12 @@ const safeMessageForCode = (code) => {
             return 'Xena connection requires reauthentication.';
         case XENA_ERROR_CODES.PROVIDER_AUTH_FAILED:
             return 'Xena provider authentication failed.';
+        case XENA_ERROR_CODES.INVALID_CREDENTIALS:
+            return 'Xena username or password is invalid.';
+        case XENA_ERROR_CODES.OTP_INVALID:
+            return 'Xena verification code is invalid.';
+        case XENA_ERROR_CODES.OTP_EXPIRED:
+            return 'Xena verification code has expired. Please start a new login challenge.';
         case XENA_ERROR_CODES.TARGET_INVALID:
             return 'Xena target UID is invalid.';
         case XENA_ERROR_CODES.BALANCE_UNAVAILABLE:
@@ -81,6 +90,8 @@ const extractRequestId = (data, headers = {}) => (
 const mapXenaErrorCode = (err, context) => {
     const status = err.response?.status ?? err.statusCode ?? null;
     const providerCode = String(err.response?.data?.code || err.providerCode || '').toUpperCase();
+    const providerMessage = String(err.response?.data?.message || err.response?.data?.error || err.message || '').toUpperCase();
+    const providerSignal = `${providerCode} ${providerMessage}`;
     const isTimeout = err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '');
 
     if (status === 429 || providerCode.includes('RATE')) {
@@ -89,6 +100,30 @@ const mapXenaErrorCode = (err, context) => {
 
     if (context === 'targetVerification' && status === 404) {
         return XENA_ERROR_CODES.TARGET_INVALID;
+    }
+
+    if (context === 'challenge' && (status === 400 || status === 422)) {
+        return XENA_ERROR_CODES.INVALID_CREDENTIALS;
+    }
+
+    if (context === 'verify' && (status === 400 || status === 401 || status === 403 || status === 404 || status === 410 || status === 422)) {
+        if (status === 410 || providerSignal.includes('EXPIRED')) {
+            return XENA_ERROR_CODES.OTP_EXPIRED;
+        }
+
+        if (
+            providerSignal.includes('OTP')
+            || providerSignal.includes('CODE')
+            || providerSignal.includes('PIN')
+            || providerSignal.includes('VERIFY')
+            || providerSignal.includes('VERIFICATION')
+        ) {
+            return XENA_ERROR_CODES.OTP_INVALID;
+        }
+
+        return status === 404
+            ? XENA_ERROR_CODES.OTP_EXPIRED
+            : XENA_ERROR_CODES.OTP_INVALID;
     }
 
     if (context === 'rechargeStatus' && status === 404) {
@@ -180,9 +215,9 @@ class XenaClient {
         });
     }
 
-    async verifyConnection({ connectionId, code }) {
+    async verifyConnection({ challengeReference, code }) {
         return this.request('post', '/v1/connections/verify', {
-            data: { connectionId, code },
+            data: { connectionId: challengeReference, code },
             context: 'verify',
         });
     }

@@ -118,6 +118,30 @@ const extractConnectionId = (data = {}) => (
     || null
 );
 
+const extractChallengeReference = (data = {}) => (
+    data.challengeReference
+    || data.challengeRef
+    || data.challengeId
+    || data.sessionReference
+    || data.sessionRef
+    || data.sessionId
+    || data.temporaryReference
+    || data.tempReference
+    || data.verificationId
+    || data.otpSessionId
+    || data.data?.challengeReference
+    || data.data?.challengeRef
+    || data.data?.challengeId
+    || data.data?.sessionReference
+    || data.data?.sessionRef
+    || data.data?.sessionId
+    || data.data?.temporaryReference
+    || data.data?.tempReference
+    || data.data?.verificationId
+    || data.data?.otpSessionId
+    || null
+);
+
 const extractStatus = (data = {}, fallback) => normalizeXenaStatus(
     data.status
     || data.state
@@ -228,7 +252,7 @@ const loadProvider = async (providerOrId) => {
 };
 
 const loadState = (providerId) => (
-    XenaConnection.findOne({ provider: providerId }).select('+encryptedConnectionId')
+    XenaConnection.findOne({ provider: providerId }).select('+encryptedConnectionId +encryptedChallengeReference')
 );
 
 const getOrCreateState = async (provider) => {
@@ -251,6 +275,17 @@ const getConnectionIdOrThrow = (state) => {
         );
     }
     return connectionId;
+};
+
+const getChallengeReferenceOrThrow = (state) => {
+    const challengeReference = state?.getChallengeReference();
+    if (!challengeReference) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.CONNECTION_REQUIRED),
+            XENA_ERROR_CODES.CONNECTION_REQUIRED
+        );
+    }
+    return challengeReference;
 };
 
 const assertVerificationConnectionUsable = (state) => {
@@ -287,6 +322,25 @@ const recordError = async (state, err, { status } = {}) => {
         state.status = status;
     }
     await state.save();
+};
+
+const safeProviderId = (provider) => (
+    provider?._id ? provider._id.toString() : String(provider || '')
+);
+
+const logXenaAttempt = (event, { provider, status, errorCode, httpStatus } = {}) => {
+    const payload = {
+        providerId: safeProviderId(provider),
+        status: status || undefined,
+        errorCode: errorCode || undefined,
+        httpStatus: httpStatus || undefined,
+    };
+
+    if (errorCode) {
+        console.warn(event, payload);
+    } else {
+        console.info(event, payload);
+    }
 };
 
 const pickTargetUserPayload = (payload) => (
@@ -419,9 +473,14 @@ const sanitizeXenaPayload = (value) => {
                 || normalizedKey.includes('otp')
                 || normalizedKey.includes('secret')
                 || normalizedKey.includes('token')
+                || normalizedKey.includes('challenge')
+                || normalizedKey.includes('session')
+                || normalizedKey.includes('verificationid')
+                || normalizedKey.includes('otpsession')
                 || normalizedKey === 'headers'
                 || normalizedKey === 'connectionid'
                 || normalizedKey === 'encryptedconnectionid'
+                || normalizedKey === 'encryptedchallengereference'
             ) {
                 output[key] = '[REDACTED]';
                 continue;
@@ -487,34 +546,37 @@ const challengeConnection = async ({ provider: providerOrId, displayName, userna
     assertXenaRechargeEnabled();
     const provider = await loadProvider(providerOrId);
     const state = await getOrCreateState(provider);
-    const oldConnectionId = state.encryptedConnectionId ? state.getConnectionId() : null;
 
     try {
+        logXenaAttempt('[xena.connection.challenge.start]', { provider });
         const client = buildClient(provider);
         const result = await client.challengeConnection({
-            connectionId: oldConnectionId,
             displayName,
             username,
             password,
         });
 
-        const connectionId = extractConnectionId(result.data) || oldConnectionId;
-        if (!connectionId) {
+        const challengeReference = extractChallengeReference(result.data) || extractConnectionId(result.data);
+        if (!challengeReference) {
             throw new BusinessRuleError(
                 safeMessageForCode(XENA_ERROR_CODES.MALFORMED_RESPONSE),
                 XENA_ERROR_CODES.MALFORMED_RESPONSE
             );
         }
 
-        state.setConnectionId(connectionId);
+        state.setChallengeReference(challengeReference);
         state.displayName = displayName || state.displayName || null;
         state.maskedUsername = maskUsername(username);
-        state.status = extractStatus(result.data, XENA_CONNECTION_STATUSES.VERIFICATION_REQUIRED);
+        const upstreamStatus = extractStatus(result.data, XENA_CONNECTION_STATUSES.VERIFICATION_REQUIRED);
+        state.status = upstreamStatus === XENA_CONNECTION_STATUSES.CONNECTED
+            ? XENA_CONNECTION_STATUSES.VERIFICATION_REQUIRED
+            : upstreamStatus;
         state.tokenExpiresAt = toDateOrNull(extractExpiry(result.data));
         state.lastErrorCode = null;
         state.lastErrorMessage = null;
         state.lastCheckedAt = new Date();
         await state.save();
+        logXenaAttempt('[xena.connection.challenge.success]', { provider, status: state.status });
 
         return {
             status: state.status,
@@ -525,28 +587,100 @@ const challengeConnection = async ({ provider: providerOrId, displayName, userna
         };
     } catch (err) {
         await recordError(state, err);
+        logXenaAttempt('[xena.connection.challenge.failed]', {
+            provider,
+            errorCode: err.code || XENA_ERROR_CODES.INTEGRATION_UNAVAILABLE,
+            httpStatus: err.httpStatus || null,
+        });
         throw err;
     }
 };
 
-const reconnectConnection = (args) => challengeConnection(args);
+const reconnectConnection = async ({ provider: providerOrId, displayName, username, password }) => {
+    assertXenaRechargeEnabled();
+    const provider = await loadProvider(providerOrId);
+    const state = await getOrCreateState(provider);
+    const oldConnectionId = state.encryptedConnectionId ? state.getConnectionId() : null;
+
+    try {
+        logXenaAttempt('[xena.connection.reconnect.start]', { provider });
+        const client = buildClient(provider);
+        const result = await client.challengeConnection({
+            connectionId: oldConnectionId,
+            displayName,
+            username,
+            password,
+        });
+
+        const challengeReference = extractChallengeReference(result.data) || extractConnectionId(result.data) || oldConnectionId;
+        if (!challengeReference) {
+            throw new BusinessRuleError(
+                safeMessageForCode(XENA_ERROR_CODES.MALFORMED_RESPONSE),
+                XENA_ERROR_CODES.MALFORMED_RESPONSE
+            );
+        }
+
+        state.setChallengeReference(challengeReference);
+        state.displayName = displayName || state.displayName || null;
+        state.maskedUsername = maskUsername(username);
+        const upstreamStatus = extractStatus(result.data, XENA_CONNECTION_STATUSES.VERIFICATION_REQUIRED);
+        state.status = upstreamStatus === XENA_CONNECTION_STATUSES.CONNECTED
+            ? XENA_CONNECTION_STATUSES.VERIFICATION_REQUIRED
+            : upstreamStatus;
+        state.tokenExpiresAt = toDateOrNull(extractExpiry(result.data));
+        state.lastErrorCode = null;
+        state.lastErrorMessage = null;
+        state.lastCheckedAt = new Date();
+        await state.save();
+        logXenaAttempt('[xena.connection.reconnect.success]', { provider, status: state.status });
+
+        return {
+            status: state.status,
+            displayName: state.displayName,
+            maskedUsername: state.maskedUsername,
+            expiresAt: toIso(state.tokenExpiresAt),
+            lastCheckedAt: toIso(state.lastCheckedAt),
+        };
+    } catch (err) {
+        await recordError(state, err);
+        logXenaAttempt('[xena.connection.reconnect.failed]', {
+            provider,
+            errorCode: err.code || XENA_ERROR_CODES.INTEGRATION_UNAVAILABLE,
+            httpStatus: err.httpStatus || null,
+        });
+        throw err;
+    }
+};
 
 const verifyConnection = async ({ provider: providerOrId, code }) => {
     assertXenaRechargeEnabled();
     const provider = await loadProvider(providerOrId);
     const state = await getOrCreateState(provider);
-    const connectionId = getConnectionIdOrThrow(state);
+    const challengeReference = getChallengeReferenceOrThrow(state);
 
     try {
+        logXenaAttempt('[xena.connection.verify.start]', { provider });
         const client = buildClient(provider);
-        const result = await client.verifyConnection({ connectionId, code });
+        const result = await client.verifyConnection({ challengeReference, code });
+        const connectionId = extractConnectionId(result.data) || challengeReference;
+        const verifiedStatus = extractStatus(result.data, XENA_CONNECTION_STATUSES.CONNECTED);
 
-        state.status = extractStatus(result.data, XENA_CONNECTION_STATUSES.CONNECTED);
+        if (verifiedStatus !== XENA_CONNECTION_STATUSES.CONNECTED) {
+            throw new BusinessRuleError(
+                safeMessageForCode(XENA_ERROR_CODES.MALFORMED_RESPONSE),
+                XENA_ERROR_CODES.MALFORMED_RESPONSE
+            );
+        }
+
+        state.setConnectionId(connectionId);
+        state.clearChallengeReference();
+        state.status = verifiedStatus;
         state.tokenExpiresAt = toDateOrNull(extractExpiry(result.data)) || state.tokenExpiresAt;
         state.lastErrorCode = null;
         state.lastErrorMessage = null;
         state.lastCheckedAt = new Date();
         await state.save();
+        logXenaAttempt('[xena.connection.verify.success]', { provider, status: state.status });
 
         return {
             status: state.status,
@@ -558,6 +692,11 @@ const verifyConnection = async ({ provider: providerOrId, code }) => {
             ? XENA_CONNECTION_STATUSES.REAUTHENTICATION_REQUIRED
             : undefined;
         await recordError(state, err, { status });
+        logXenaAttempt('[xena.connection.verify.failed]', {
+            provider,
+            errorCode: err.code || XENA_ERROR_CODES.INTEGRATION_UNAVAILABLE,
+            httpStatus: err.httpStatus || null,
+        });
         throw err;
     }
 };
@@ -583,7 +722,13 @@ const getConnectionStatus = async ({ provider: providerOrId }) => {
     }
 
     if (!state.encryptedConnectionId) {
-        return safeStatusResponse({ provider, state, statusOverride: XENA_CONNECTION_STATUSES.CONNECTION_REQUIRED });
+        const pendingStatus = [
+            XENA_CONNECTION_STATUSES.VERIFICATION_REQUIRED,
+            XENA_CONNECTION_STATUSES.PENDING,
+        ].includes(state.status)
+            ? state.status
+            : XENA_CONNECTION_STATUSES.CONNECTION_REQUIRED;
+        return safeStatusResponse({ provider, state, statusOverride: pendingStatus });
     }
 
     try {
@@ -611,6 +756,7 @@ const refreshBalance = async ({ provider: providerOrId }) => {
     assertXenaRechargeEnabled();
     const provider = await loadProvider(providerOrId);
     const state = await getOrCreateState(provider);
+    assertVerificationConnectionUsable(state);
     const connectionId = getConnectionIdOrThrow(state);
 
     try {

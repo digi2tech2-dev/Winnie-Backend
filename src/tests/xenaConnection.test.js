@@ -93,13 +93,13 @@ describe('Xena provider credentials and adapter registration', () => {
 });
 
 describe('Xena challenge and verify flow', () => {
-    it('challenge without existing connectionId does not send connectionId and stores the returned id encrypted', async () => {
+    it('challenge without existing connectionId does not send connectionId and stores only the pending reference encrypted', async () => {
         const provider = await createXenaProvider();
         const client = makeClient();
         axios.create.mockReturnValue(client);
         client.request.mockResolvedValueOnce({
             data: {
-                connectionId: 'con_first',
+                challengeId: 'challenge_first',
                 status: 'verification_required',
                 expiresAt: '2026-07-25T10:00:00.000Z',
             },
@@ -119,19 +119,25 @@ describe('Xena challenge and verify flow', () => {
             url: '/v1/connections/challenge',
             data: expect.not.objectContaining({ connectionId: expect.anything() }),
         }));
+        expect(axios.create).toHaveBeenCalledWith(expect.objectContaining({
+            headers: expect.objectContaining({
+                Authorization: 'Bearer digiteech-client-key',
+            }),
+        }));
         expect(result).toMatchObject({
             status: 'verification_required',
             displayName: 'Main Agency',
             maskedUsername: 'ag***@example.com',
         });
-        expect(responseJson(result)).not.toContain('con_first');
+        expect(responseJson(result)).not.toContain('challenge_first');
         expect(responseJson(result)).not.toContain('agency-password');
 
-        const state = await XenaConnection.findOne({ provider: provider._id }).select('+encryptedConnectionId');
-        expect(state.encryptedConnectionId).toMatch(/^enc:v1:/);
-        expect(state.encryptedConnectionId).not.toContain('con_first');
-        expect(decryptSecret(state.encryptedConnectionId)).toBe('con_first');
-        expect(responseJson(state.toJSON())).not.toContain('con_first');
+        const state = await XenaConnection.findOne({ provider: provider._id }).select('+encryptedConnectionId +encryptedChallengeReference');
+        expect(state.encryptedConnectionId).toBeNull();
+        expect(state.encryptedChallengeReference).toMatch(/^enc:v1:/);
+        expect(state.encryptedChallengeReference).not.toContain('challenge_first');
+        expect(decryptSecret(state.encryptedChallengeReference)).toBe('challenge_first');
+        expect(responseJson(state.toJSON())).not.toContain('challenge_first');
         expect(responseJson(state.toJSON())).not.toContain('enc:v1:');
     });
 
@@ -149,7 +155,7 @@ describe('Xena challenge and verify flow', () => {
         const client = makeClient();
         axios.create.mockReturnValue(client);
         client.request.mockResolvedValueOnce({
-            data: { connectionId: 'con_existing', status: 'verification_required' },
+            data: { challengeId: 'challenge_reconnect', status: 'verification_required' },
             status: 200,
             headers: {},
         });
@@ -165,7 +171,13 @@ describe('Xena challenge and verify flow', () => {
             data: expect.objectContaining({ connectionId: 'con_existing' }),
         }));
         expect(responseJson(result)).not.toContain('con_existing');
+        expect(responseJson(result)).not.toContain('challenge_reconnect');
         expect(responseJson(result)).not.toContain('new-password');
+
+        const after = await XenaConnection.findOne({ provider: provider._id }).select('+encryptedConnectionId +encryptedChallengeReference');
+        expect(decryptSecret(after.encryptedConnectionId)).toBe('con_existing');
+        expect(decryptSecret(after.encryptedChallengeReference)).toBe('challenge_reconnect');
+        expect(after.status).toBe('verification_required');
     });
 
     it('failed reconnect records a safe error without erasing the old connected connectionId', async () => {
@@ -203,7 +215,7 @@ describe('Xena challenge and verify flow', () => {
         expect(after.lastErrorMessage).not.toContain('Bearer');
     });
 
-    it('verify uses the stored connectionId internally and returns a safe connected response', async () => {
+    it('verify uses the stored challenge reference internally, stores the verified connection id, and returns a safe connected response', async () => {
         const provider = await createXenaProvider();
         const state = await XenaConnection.create({
             provider: provider._id,
@@ -211,13 +223,13 @@ describe('Xena challenge and verify flow', () => {
             displayName: 'Main Agency',
             maskedUsername: 'ag***@example.com',
         });
-        state.setConnectionId('con_verify');
+        state.setChallengeReference('challenge_verify');
         await state.save();
 
         const client = makeClient();
         axios.create.mockReturnValue(client);
         client.request.mockResolvedValueOnce({
-            data: { status: 'connected' },
+            data: { connectionId: 'con_verified', status: 'connected' },
             status: 200,
             headers: { 'x-request-id': 'req-verify' },
         });
@@ -230,15 +242,82 @@ describe('Xena challenge and verify flow', () => {
         expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
             method: 'post',
             url: '/v1/connections/verify',
-            data: { connectionId: 'con_verify', code: '1234' },
+            data: { connectionId: 'challenge_verify', code: '1234' },
         }));
         expect(result.status).toBe('connected');
-        expect(responseJson(result)).not.toContain('con_verify');
+        expect(responseJson(result)).not.toContain('challenge_verify');
+        expect(responseJson(result)).not.toContain('con_verified');
         expect(responseJson(result)).not.toContain('1234');
 
-        const after = await XenaConnection.findOne({ provider: provider._id }).select('+encryptedConnectionId');
+        const after = await XenaConnection.findOne({ provider: provider._id }).select('+encryptedConnectionId +encryptedChallengeReference');
         expect(after.status).toBe('connected');
+        expect(decryptSecret(after.encryptedConnectionId)).toBe('con_verified');
+        expect(after.encryptedChallengeReference).toBeNull();
         expect(Object.keys(after.toJSON())).not.toContain('encryptedConnectionId');
+        expect(Object.keys(after.toJSON())).not.toContain('encryptedChallengeReference');
+    });
+
+    it('failed OTP verification does not mark the provider connected or store a durable connection id', async () => {
+        const provider = await createXenaProvider();
+        const state = await XenaConnection.create({
+            provider: provider._id,
+            status: 'verification_required',
+            displayName: 'Main Agency',
+        });
+        state.setChallengeReference('challenge_wrong_otp');
+        await state.save();
+
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockRejectedValueOnce({
+            response: {
+                status: 422,
+                data: { code: 'OTP_INVALID', message: 'Invalid verification code' },
+                headers: {},
+            },
+            message: 'invalid verification code',
+        });
+
+        await expect(xenaService.verifyConnection({
+            provider: provider._id,
+            code: '0000',
+        })).rejects.toMatchObject({ code: 'XENA_OTP_INVALID' });
+
+        const after = await XenaConnection.findOne({ provider: provider._id }).select('+encryptedConnectionId +encryptedChallengeReference');
+        expect(after.status).toBe('verification_required');
+        expect(after.encryptedConnectionId).toBeNull();
+        expect(decryptSecret(after.encryptedChallengeReference)).toBe('challenge_wrong_otp');
+        expect(after.lastErrorCode).toBe('XENA_OTP_INVALID');
+    });
+
+    it('verify does not mark connected when Xena returns a non-connected success state', async () => {
+        const provider = await createXenaProvider();
+        const state = await XenaConnection.create({
+            provider: provider._id,
+            status: 'verification_required',
+            displayName: 'Main Agency',
+        });
+        state.setChallengeReference('challenge_pending_verify');
+        await state.save();
+
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            data: { connectionId: 'con_pending', status: 'pending' },
+            status: 200,
+            headers: {},
+        });
+
+        await expect(xenaService.verifyConnection({
+            provider: provider._id,
+            code: '1234',
+        })).rejects.toMatchObject({ code: 'XENA_MALFORMED_RESPONSE' });
+
+        const after = await XenaConnection.findOne({ provider: provider._id }).select('+encryptedConnectionId +encryptedChallengeReference');
+        expect(after.status).toBe('verification_required');
+        expect(after.encryptedConnectionId).toBeNull();
+        expect(decryptSecret(after.encryptedChallengeReference)).toBe('challenge_pending_verify');
+        expect(after.lastErrorCode).toBe('XENA_MALFORMED_RESPONSE');
     });
 
     it('does not store password or OTP in connection state', async () => {
@@ -246,8 +325,8 @@ describe('Xena challenge and verify flow', () => {
         const client = makeClient();
         axios.create.mockReturnValue(client);
         client.request
-            .mockResolvedValueOnce({ data: { connectionId: 'con_secret', status: 'verification_required' }, status: 200, headers: {} })
-            .mockResolvedValueOnce({ data: { status: 'connected' }, status: 200, headers: {} });
+            .mockResolvedValueOnce({ data: { challengeId: 'challenge_secret', status: 'verification_required' }, status: 200, headers: {} })
+            .mockResolvedValueOnce({ data: { connectionId: 'con_secret', status: 'connected' }, status: 200, headers: {} });
 
         await xenaService.challengeConnection({
             provider: provider._id,
@@ -257,7 +336,7 @@ describe('Xena challenge and verify flow', () => {
         });
         await xenaService.verifyConnection({ provider: provider._id, code: '9876' });
 
-        const state = await XenaConnection.findOne({ provider: provider._id }).select('+encryptedConnectionId').lean();
+        const state = await XenaConnection.findOne({ provider: provider._id }).select('+encryptedConnectionId +encryptedChallengeReference').lean();
         const storedJson = responseJson(state);
         expect(storedJson).not.toContain('do-not-store-password');
         expect(storedJson).not.toContain('9876');
@@ -265,6 +344,30 @@ describe('Xena challenge and verify flow', () => {
 });
 
 describe('Xena status and balance', () => {
+    it('status response reports verification_required while an OTP challenge is pending and does not call Xena without a verified connection', async () => {
+        const provider = await createXenaProvider();
+        const state = await XenaConnection.create({
+            provider: provider._id,
+            status: 'verification_required',
+            displayName: 'Main Agency',
+            maskedUsername: 'ag***@example.com',
+        });
+        state.setChallengeReference('challenge_status');
+        await state.save();
+
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const result = await xenaService.getConnectionStatus({ provider: provider._id });
+
+        expect(result.status).toBe('verification_required');
+        expect(result.needsReconnect).toBe(true);
+        expect(result.readinessBlockers).toContain('XENA_CONNECTION_REQUIRED');
+        expect(responseJson(result)).not.toContain('challenge_status');
+        expect(responseJson(result)).not.toContain('digiteech-client-key');
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
     it('status response is safe and does not expose connectionId or provider secrets', async () => {
         const provider = await createXenaProvider();
         const state = await XenaConnection.create({
@@ -400,6 +503,35 @@ describe('Xena error mapping', () => {
         expect(state.lastErrorMessage).not.toContain('Bearer');
     });
 
+    it('maps invalid Xena username/password challenge errors without marking the provider connected', async () => {
+        const provider = await createXenaProvider();
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockRejectedValueOnce({
+            response: {
+                status: 422,
+                data: { code: 'INVALID_CREDENTIALS', message: 'Invalid username or password' },
+                headers: {},
+            },
+            message: 'invalid username or password',
+        });
+
+        await expect(xenaService.challengeConnection({
+            provider: provider._id,
+            displayName: 'Main Agency',
+            username: 'agency@example.com',
+            password: 'agency-password',
+        })).rejects.toMatchObject({ code: 'XENA_INVALID_CREDENTIALS' });
+
+        const state = await XenaConnection.findOne({ provider: provider._id }).select('+encryptedConnectionId +encryptedChallengeReference');
+        expect(state.status).toBe('connection_required');
+        expect(state.encryptedConnectionId).toBeNull();
+        expect(state.encryptedChallengeReference).toBeNull();
+        expect(state.lastErrorCode).toBe('XENA_INVALID_CREDENTIALS');
+        expect(responseJson(state)).not.toContain('agency-password');
+        expect(responseJson(state)).not.toContain('digiteech-client-key');
+    });
+
     it('maps 429 to XENA_RATE_LIMITED', async () => {
         const provider = await createXenaProvider();
         const state = await XenaConnection.create({ provider: provider._id, status: 'connected' });
@@ -439,11 +571,18 @@ describe('Xena error mapping', () => {
             .rejects.toMatchObject({ code: 'XENA_BALANCE_UNAVAILABLE' });
     });
 
-    it('requires an encrypted connection before verify or balance', async () => {
+    it('requires a pending challenge before verify and a connected provider before balance', async () => {
         const provider = await createXenaProvider();
 
         await expect(xenaService.verifyConnection({ provider: provider._id, code: '1234' }))
             .rejects.toMatchObject({ code: 'XENA_CONNECTION_REQUIRED' });
+        await expect(xenaService.refreshBalance({ provider: provider._id }))
+            .rejects.toMatchObject({ code: 'XENA_CONNECTION_REQUIRED' });
+
+        const state = await XenaConnection.create({ provider: provider._id, status: 'verification_required' });
+        state.setChallengeReference('challenge_only');
+        await state.save();
+
         await expect(xenaService.refreshBalance({ provider: provider._id }))
             .rejects.toMatchObject({ code: 'XENA_CONNECTION_REQUIRED' });
     });

@@ -40,6 +40,11 @@ const xenaConnectionSchema = new mongoose.Schema(
             default: null,
             select: false,
         },
+        encryptedChallengeReference: {
+            type: String,
+            default: null,
+            select: false,
+        },
         displayName: {
             type: String,
             trim: true,
@@ -155,20 +160,40 @@ xenaConnectionSchema.methods.getConnectionId = function getConnectionId() {
     return getProviderCredential(this.encryptedConnectionId || null);
 };
 
-xenaConnectionSchema.pre('save', function encryptConnectionId(next) {
-    if (!this.isModified('encryptedConnectionId')) return next();
+xenaConnectionSchema.methods.setChallengeReference = function setChallengeReference(challengeReference) {
+    this.encryptedChallengeReference = hasSecretValue(challengeReference)
+        ? encryptSecret(String(challengeReference).trim())
+        : null;
+};
 
-    if (!hasSecretValue(this.encryptedConnectionId)) {
-        this.encryptedConnectionId = null;
-        return next();
+xenaConnectionSchema.methods.getChallengeReference = function getChallengeReference() {
+    return getProviderCredential(this.encryptedChallengeReference || null);
+};
+
+xenaConnectionSchema.methods.clearChallengeReference = function clearChallengeReference() {
+    this.encryptedChallengeReference = null;
+};
+
+xenaConnectionSchema.pre('save', function encryptConnectionId(next) {
+    const secretFields = ['encryptedConnectionId', 'encryptedChallengeReference'];
+
+    for (const field of secretFields) {
+        if (!this.isModified(field)) continue;
+
+        if (!hasSecretValue(this[field])) {
+            this[field] = null;
+            continue;
+        }
+
+        this[field] = encryptSecret(String(this[field]).trim());
     }
 
-    this.encryptedConnectionId = encryptSecret(String(this.encryptedConnectionId).trim());
     return next();
 });
 
 const hideSecrets = (_doc, ret) => {
     delete ret.encryptedConnectionId;
+    delete ret.encryptedChallengeReference;
     return ret;
 };
 
