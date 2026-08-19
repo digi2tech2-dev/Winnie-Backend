@@ -25,6 +25,7 @@ const adminWhatsAppRecipientSchema = new mongoose.Schema(
         eventPreferences: {
             successfulPayment: { type: Boolean, default: ADMIN_DEFAULT_EVENT_PREFERENCES.successfulPayment },
             manualDepositPending: { type: Boolean, default: ADMIN_DEFAULT_EVENT_PREFERENCES.manualDepositPending },
+            manualOrderIntervention: { type: Boolean, default: ADMIN_DEFAULT_EVENT_PREFERENCES.manualOrderIntervention },
             providerOrderFailed: { type: Boolean, default: ADMIN_DEFAULT_EVENT_PREFERENCES.providerOrderFailed },
             paymentWebhookError: { type: Boolean, default: ADMIN_DEFAULT_EVENT_PREFERENCES.paymentWebhookError },
             financialDayClosed: { type: Boolean, default: ADMIN_DEFAULT_EVENT_PREFERENCES.financialDayClosed },

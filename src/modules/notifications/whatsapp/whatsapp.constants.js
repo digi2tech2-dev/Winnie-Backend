@@ -34,6 +34,7 @@ const CUSTOMER_EVENT_PREFERENCE_BY_TYPE = Object.freeze({
 const ADMIN_DEFAULT_EVENT_PREFERENCES = Object.freeze({
     successfulPayment: true,
     manualDepositPending: true,
+    manualOrderIntervention: true,
     providerOrderFailed: true,
     paymentWebhookError: true,
     financialDayClosed: true,
@@ -44,6 +45,7 @@ const ADMIN_DEFAULT_EVENT_PREFERENCES = Object.freeze({
 const ADMIN_EVENT_PREFERENCE_BY_TYPE = Object.freeze({
     successful_payment: 'successfulPayment',
     manual_deposit_pending: 'manualDepositPending',
+    manual_order_intervention: 'manualOrderIntervention',
     provider_order_failed: 'providerOrderFailed',
     payment_webhook_error: 'paymentWebhookError',
     financial_day_closed: 'financialDayClosed',

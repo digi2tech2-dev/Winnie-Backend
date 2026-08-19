@@ -153,6 +153,55 @@ const adminTopupNotification = (deposit, eventType, payload = {}) => safeCreateA
     },
 });
 
+const getOrderProductName = (order) => order?.productId?.name || order?.productName || order?.product || null;
+const getOrderCustomer = (order) => {
+    const user = order?.userId && typeof order.userId === 'object' ? order.userId : {};
+    return {
+        name: user.name || order?.customerName || null,
+        email: user.email || order?.customerEmail || null,
+        phone: user.phone || user.whatsappNotifications?.phone || order?.customerPhone || null,
+    };
+};
+const getOrderAmount = (order) => order?.chargedAmount ?? order?.totalPrice ?? order?.usdAmount ?? null;
+const getOrderCurrency = (order) => order?.currency || 'USD';
+const getManualInterventionStatus = (order) => order?.status || (order?.executionType === 'manual' ? 'PENDING' : 'MANUAL_REVIEW');
+
+const safeQueueManualOrderIntervention = (order, {
+    reason = 'MANUAL_ORDER',
+    source = 'order_notification',
+} = {}) => {
+    const orderId = orderIdOf(order);
+    if (!orderId) return;
+
+    const customer = getOrderCustomer(order);
+    const status = getManualInterventionStatus(order);
+    safeQueueWhatsApp(whatsappService.queueAdminEvent({
+        eventType: 'manual_order_intervention',
+        relatedEntityType: 'order',
+        relatedEntityId: toId(order?._id || order?.id),
+        idempotencyScope: status,
+        payload: {
+            orderId,
+            orderNumber: orderNumberOf(order),
+            productName: getOrderProductName(order),
+            customerName: customer.name,
+            customerEmail: customer.email,
+            customerPhone: customer.phone,
+            userId: userIdOf(order),
+            quantity: order?.quantity,
+            amount: getOrderAmount(order),
+            currency: getOrderCurrency(order),
+            status,
+            reason,
+            source,
+        },
+    }).catch((error) => {
+        const msg = error.message || 'Unknown WhatsApp queue error';
+        console.error(`[WhatsAppNotifications] Failed to queue manual order alert for order ${orderId} (${reason}): ${msg}`);
+        return null;
+    }));
+};
+
 const userDepositNotification = (deposit, eventType, payload = {}) => safeCreateNotification({
     userId: toId(deposit?.userId),
     title: payload.title,
@@ -190,6 +239,10 @@ const notifyOrderCreated = (order, { manualReview = false } = {}) => {
             message: `الطلب رقم ${orderNumberOf(order)} يحتاج إلى تنفيذ أو مراجعة يدوية.`,
             priority: NOTIFICATION_PRIORITIES.HIGH,
             metadata: { reason: 'MANUAL_ORDER' },
+        });
+        safeQueueManualOrderIntervention(order, {
+            reason: order?.status === 'MANUAL_REVIEW' ? 'MANUAL_REVIEW' : 'MANUAL_ORDER',
+            source: 'order_created',
         });
     }
 
@@ -354,13 +407,14 @@ const notifyOrderRefunded = (order, {
     }
 };
 
-const notifyOrderManualReview = (order, { reason = 'MANUAL_REVIEW' } = {}) => {
+const notifyOrderManualReview = (order, { reason = 'MANUAL_REVIEW', source = 'manual_review' } = {}) => {
     void adminOrderNotification(order, 'manual_review', {
         title: 'طلب انتقل إلى المراجعة اليدوية',
         message: `الطلب رقم ${orderNumberOf(order)} انتقل إلى المراجعة اليدوية ويحتاج إلى تدخل الإدارة.`,
         priority: NOTIFICATION_PRIORITIES.HIGH,
-        metadata: { reason },
+        metadata: { reason, source },
     });
+    safeQueueManualOrderIntervention(order, { reason, source });
 };
 
 const notifyManualWalletAdjustment = ({

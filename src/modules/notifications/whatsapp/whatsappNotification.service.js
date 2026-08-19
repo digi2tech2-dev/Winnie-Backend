@@ -497,6 +497,7 @@ const buildIdempotencyKey = ({
     recipientType,
     recipientUserId,
     adminRecipientId,
+    idempotencyScope = null,
 }) => {
     if (!relatedEntityType || !relatedEntityId) return null;
     const recipientId = recipientType === RECIPIENT_TYPES.CUSTOMER
@@ -505,11 +506,12 @@ const buildIdempotencyKey = ({
     if (!recipientId) return null;
     return [
         eventType,
+        idempotencyScope,
         relatedEntityType,
         String(relatedEntityId),
         recipientType,
         String(recipientId),
-    ].join(':');
+    ].filter((part) => part !== undefined && part !== null && part !== '').join(':');
 };
 
 const queueWhatsAppNotification = async ({
@@ -525,6 +527,7 @@ const queueWhatsAppNotification = async ({
     payload = {},
     metadata = {},
     idempotencyKey,
+    idempotencyScope = null,
     reason = null,
     status = LOG_STATUSES.PENDING,
 }) => {
@@ -555,7 +558,15 @@ const queueWhatsAppNotification = async ({
 
     const template = renderTemplate(eventType, { ...payload, relatedEntityId });
     const resolvedIdempotencyKey = idempotencyKey === undefined
-        ? buildIdempotencyKey({ eventType, relatedEntityType, relatedEntityId, recipientType, recipientUserId, adminRecipientId })
+        ? buildIdempotencyKey({
+            eventType,
+            relatedEntityType,
+            relatedEntityId,
+            recipientType,
+            recipientUserId,
+            adminRecipientId,
+            idempotencyScope,
+        })
         : idempotencyKey;
 
     try {
@@ -631,7 +642,13 @@ const queueCustomerEvent = async ({ userId, eventType, relatedEntityType = null,
     });
 };
 
-const queueAdminEvent = async ({ eventType, relatedEntityType = null, relatedEntityId = null, payload = {} }) => {
+const queueAdminEvent = async ({
+    eventType,
+    relatedEntityType = null,
+    relatedEntityId = null,
+    payload = {},
+    idempotencyScope = null,
+} = {}) => {
     const runtime = getRuntimeOpenWaConfig();
     const preferenceKey = ADMIN_EVENT_PREFERENCE_BY_TYPE[eventType];
     const recipients = await AdminWhatsAppRecipient.find({ enabled: true });
@@ -652,6 +669,7 @@ const queueAdminEvent = async ({ eventType, relatedEntityType = null, relatedEnt
             relatedEntityType,
             relatedEntityId,
             payload,
+            idempotencyScope,
             status: skipReason ? LOG_STATUSES.SKIPPED : LOG_STATUSES.PENDING,
             reason: skipReason,
         });

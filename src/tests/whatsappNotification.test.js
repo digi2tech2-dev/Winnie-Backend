@@ -11,14 +11,20 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const app = require('../app');
 const config = require('../config/config');
+const orderService = require('../modules/orders/order.service');
 const whatsappService = require('../modules/notifications/whatsapp/whatsappNotification.service');
 const queueLockService = require('../modules/notifications/whatsapp/whatsappQueueLock.service');
-const { notifyDepositRequested } = require('../modules/notifications/notification.events');
+const {
+    notifyDepositRequested,
+    notifyOrderCreated,
+    notifyOrderManualReview,
+} = require('../modules/notifications/notification.events');
 const { WhatsAppNotificationLog } = require('../modules/notifications/whatsapp/whatsappNotificationLog.model');
 const { WhatsAppQueueLock } = require('../modules/notifications/whatsapp/whatsappQueueLock.model');
 const { AdminWhatsAppRecipient } = require('../modules/notifications/whatsapp/adminWhatsAppRecipient.model');
 const { normalizePhoneNumber } = require('../modules/notifications/whatsapp/phoneNormalizer');
 const { User } = require('../modules/users/user.model');
+const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('../modules/orders/order.model');
 const {
     connectTestDB,
     disconnectTestDB,
@@ -26,6 +32,7 @@ const {
     createAdmin,
     createCustomer,
     createGroup,
+    createProduct,
 } = require('./testHelpers');
 
 let server;
@@ -81,10 +88,10 @@ afterEach(() => {
 
 const tokenFor = (user) => jwt.sign({ id: user._id, role: user.role }, config.jwt.secret, { expiresIn: '1h' });
 
-const setup = async () => {
-    const group = await createGroup({ name: `WhatsApp-${Date.now()}-${Math.random()}` });
-    const admin = await createAdmin({ groupId: group._id });
-    const customer = await createCustomer({ groupId: group._id });
+const setup = async ({ groupOverrides = {}, adminOverrides = {}, customerOverrides = {} } = {}) => {
+    const group = await createGroup({ name: `WhatsApp-${Date.now()}-${Math.random()}`, ...groupOverrides });
+    const admin = await createAdmin({ groupId: group._id, ...adminOverrides });
+    const customer = await createCustomer({ groupId: group._id, ...customerOverrides });
     return { group, admin, customer };
 };
 
@@ -422,6 +429,170 @@ describe('WhatsApp notifications', () => {
         const sent = await WhatsAppNotificationLog.findById(logs[0]._id).lean();
         expect(sent.status).toBe('sent');
         expect(sent.sentAt).toBeInstanceOf(Date);
+    });
+
+    it('queues an urgent admin WhatsApp alert when a manual order is created', async () => {
+        const { customer } = await setup({
+            customerOverrides: { walletBalance: 500, currency: 'USD' },
+            groupOverrides: { percentage: 0 },
+        });
+        await AdminWhatsAppRecipient.create({
+            name: 'Ops',
+            phone: '201011111111',
+            enabled: true,
+        });
+        const product = await createProduct({
+            name: 'Manual Gift Card',
+            basePrice: 25,
+            executionType: ORDER_EXECUTION_TYPES.MANUAL,
+        });
+
+        const { order } = await orderService.createOrder({
+            userId: customer._id,
+            productId: product._id,
+            quantity: 2,
+        });
+
+        await waitFor(async () => (
+            await WhatsAppNotificationLog.countDocuments({
+                eventType: 'manual_order_intervention',
+                relatedEntityId: order._id,
+            })
+        ) === 1);
+
+        const log = await WhatsAppNotificationLog.findOne({
+            eventType: 'manual_order_intervention',
+            relatedEntityId: order._id,
+        }).lean();
+        expect(log.recipientType).toBe('admin');
+        expect(log.idempotencyKey).toContain(`manual_order_intervention:${ORDER_STATUS.PENDING}:order:${order._id}`);
+        expect(log.message).toContain('Manual Order Requires Action');
+        expect(log.message).toContain(`Order: ${order.orderNumber}`);
+        expect(log.message).toContain('Product: Manual Gift Card');
+        expect(log.message).toContain('Quantity: 2');
+        expect(log.message).toContain(`Status: ${ORDER_STATUS.PENDING}`);
+        expect(log.message).toContain('Reason: MANUAL_ORDER');
+        expect(log.message).not.toContain(process.env.OPENWA_API_KEY);
+    });
+
+    it('queues an urgent admin WhatsApp alert when an order moves to manual review', async () => {
+        const { customer } = await setup();
+        await AdminWhatsAppRecipient.create({
+            name: 'Ops',
+            phone: '201011111111',
+            enabled: true,
+        });
+        const product = await createProduct({
+            name: 'Provider Fulfillment Product',
+            executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        });
+        const order = await Order.create({
+            userId: customer._id,
+            productId: product._id,
+            orderNumber: 70001,
+            quantity: 1,
+            basePriceSnapshot: 20,
+            markupPercentageSnapshot: 0,
+            finalPriceCharged: 20,
+            unitPrice: 20,
+            totalPrice: '20',
+            walletDeducted: 20,
+            chargedAmount: 20,
+            usdAmount: 20,
+            currency: 'USD',
+            status: ORDER_STATUS.MANUAL_REVIEW,
+            executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        });
+        await order.populate([
+            { path: 'productId', select: 'name' },
+            { path: 'userId', select: 'name email' },
+        ]);
+
+        notifyOrderManualReview(order, { reason: 'PROVIDER_OFFLINE_OR_STUCK', source: 'test' });
+
+        await waitFor(async () => (
+            await WhatsAppNotificationLog.countDocuments({
+                eventType: 'manual_order_intervention',
+                relatedEntityId: order._id,
+            })
+        ) === 1);
+
+        const log = await WhatsAppNotificationLog.findOne({
+            eventType: 'manual_order_intervention',
+            relatedEntityId: order._id,
+        }).lean();
+        expect(log.message).toContain('Manual Order Requires Action');
+        expect(log.message).toContain(`Status: ${ORDER_STATUS.MANUAL_REVIEW}`);
+        expect(log.message).toContain('Reason: PROVIDER_OFFLINE_OR_STUCK');
+    });
+
+    it('does not duplicate manual WhatsApp alerts for the same order and status', async () => {
+        const { customer } = await setup();
+        await AdminWhatsAppRecipient.create({
+            name: 'Ops',
+            phone: '201011111111',
+            enabled: true,
+        });
+        const product = await createProduct({ name: 'Manual Review Product' });
+        const order = await Order.create({
+            userId: customer._id,
+            productId: product._id,
+            orderNumber: 70002,
+            quantity: 1,
+            basePriceSnapshot: 10,
+            markupPercentageSnapshot: 0,
+            finalPriceCharged: 10,
+            unitPrice: 10,
+            totalPrice: '10',
+            walletDeducted: 10,
+            chargedAmount: 10,
+            usdAmount: 10,
+            currency: 'USD',
+            status: ORDER_STATUS.MANUAL_REVIEW,
+            executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        });
+        await order.populate([{ path: 'productId', select: 'name' }]);
+
+        notifyOrderManualReview(order, { reason: 'FIRST_REASON' });
+        await waitFor(async () => (
+            await WhatsAppNotificationLog.countDocuments({
+                eventType: 'manual_order_intervention',
+                relatedEntityId: order._id,
+            })
+        ) === 1);
+
+        notifyOrderManualReview(order, { reason: 'SECOND_REASON' });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        expect(await WhatsAppNotificationLog.countDocuments({
+            eventType: 'manual_order_intervention',
+            relatedEntityId: order._id,
+        })).toBe(1);
+    });
+
+    it('does not queue manual intervention alerts for normal automatic order notifications', async () => {
+        await AdminWhatsAppRecipient.create({
+            name: 'Ops',
+            phone: '201011111111',
+            enabled: true,
+        });
+        const order = {
+            _id: new mongoose.Types.ObjectId(),
+            userId: new mongoose.Types.ObjectId(),
+            orderNumber: 70003,
+            quantity: 1,
+            status: ORDER_STATUS.PROCESSING,
+            executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+            productId: { name: 'Automatic Product' },
+        };
+
+        notifyOrderCreated(order, { manualReview: false });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        expect(await WhatsAppNotificationLog.countDocuments({
+            eventType: 'manual_order_intervention',
+            relatedEntityId: order._id,
+        })).toBe(0);
     });
 
     it('does not double-send the same pending log under concurrent processing', async () => {

@@ -15,6 +15,11 @@ const renderTemplate = (eventType, payload = {}) => {
     const amount = money(payload.amount ?? payload.walletCreditAmount ?? payload.requestedAmount, payload.currency ?? payload.walletCurrency);
     const gatewayAmount = money(payload.gatewayAmount, payload.gatewayCurrency);
     const product = payload.productName || payload.product || payload.itemName;
+    const customerDetails = [
+        payload.customerName,
+        payload.customerEmail,
+        payload.customerPhone,
+    ].filter(Boolean).join(' / ');
 
     const templates = {
         wallet_topup_completed: {
@@ -114,6 +119,21 @@ const renderTemplate = (eventType, payload = {}) => {
                 line('العميل', payload.customerName || payload.userName || payload.email),
                 line('المبلغ', amount),
                 payload.paymentMethod ? line('طريقة التحويل', payload.paymentMethod) : null,
+                'Winnie',
+            ],
+        },
+        manual_order_intervention: {
+            title: 'Manual Order Requires Action',
+            message: [
+                '⚠️ Manual Order Requires Action / طلب يحتاج تدخل يدوي',
+                line('Order', orderId),
+                product ? line('Product', product) : null,
+                line('Customer', customerDetails || payload.userId),
+                payload.quantity ? line('Quantity', payload.quantity) : null,
+                amount ? line('Amount', amount) : null,
+                payload.status ? line('Status', payload.status) : null,
+                payload.reason ? line('Reason', payload.reason) : null,
+                'Action: Open the admin dashboard and fulfill or review this order manually.',
                 'Winnie',
             ],
         },

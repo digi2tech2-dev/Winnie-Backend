@@ -34,7 +34,7 @@ const {
 } = require('./fazercardsDelivery.service');
 const { createAuditLog } = require('../../audit/audit.service');
 const { ORDER_ACTIONS, PRODUCT_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../../audit/audit.constants');
-const { notifyOrderCompleted, notifyOrderFailed } = require('../../notifications/notification.events');
+const { notifyOrderCompleted, notifyOrderFailed, notifyOrderManualReview } = require('../../notifications/notification.events');
 
 const FAZERCARDS_SLUG = 'fazer-cards';
 const SYNC_ALL_DEFAULT_FAMILIES = Object.freeze([
@@ -3184,6 +3184,10 @@ const updateOrderFromFazerCardsStatus = async (order, result, { source = 'fazerc
                 }),
             },
         }, { new: true });
+        notifyOrderManualReview(updated, {
+            reason: result.providerErrorCode || result.providerErrorMessage || 'FAZERCARDS_STATUS_MANUAL_REVIEW',
+            source,
+        });
         return { order: updated, action: 'manualReview', refunded: false };
     }
 
@@ -3252,6 +3256,10 @@ const updateOrderFromFazerCardsStatus = async (order, result, { source = 'fazerc
                     }),
                 },
             }, { new: true });
+            notifyOrderManualReview(updated, {
+                reason: result.providerErrorCode || 'FAZERCARDS_CODE_DELIVERY_CODE_MISSING',
+                source,
+            });
             return { order: updated, action: 'manualReview', refunded: false, deliveredCodeCount: 0 };
         }
     }
