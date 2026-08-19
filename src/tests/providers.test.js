@@ -24,6 +24,10 @@ const productService = require('../modules/products/product.service');
 const fazerCardsCatalogSvc = require('../modules/providers/fazercards/fazercardsCatalog.service');
 const fazerCardsWebhookSvc = require('../modules/providers/fazercards/fazercards.webhook.service');
 const fazerCardsContracts = require('../modules/providers/fazercards/fazercardsContracts');
+const {
+    NORMALIZED_STATUSES,
+    normalizeFazerCardsProviderStatus,
+} = require('../modules/providers/fazercards/fazercardsStatus.service');
 const { FazerCardsClient } = require('../modules/providers/fazercards/fazercards.client');
 const { ProviderDeliveredCode } = require('../modules/providers/fazercards/providerDeliveredCode.model');
 const { ProviderPilotOrder } = require('../modules/providers/fazercards/providerPilotOrder.model');
@@ -4380,6 +4384,31 @@ describe('FazerCards signed webhooks', () => {
         },
     }, { new: true });
 
+    it('normalizes FazerCards terminal and in-flight status aliases', () => {
+        for (const status of ['completed', 'complete', 'success', 'succeeded', 'done', 'fulfilled']) {
+            expect(normalizeFazerCardsProviderStatus(status)).toMatchObject({
+                normalizedStatus: NORMALIZED_STATUSES.COMPLETED,
+                providerStatus: 'Completed',
+                terminalFailure: false,
+            });
+        }
+
+        for (const status of ['pending', 'processing', 'in_progress']) {
+            expect(normalizeFazerCardsProviderStatus(status)).toMatchObject({
+                normalizedStatus: NORMALIZED_STATUSES.PROCESSING,
+                providerStatus: 'Pending',
+            });
+        }
+
+        for (const status of ['failed', 'rejected', 'canceled', 'cancelled', 'error']) {
+            expect(normalizeFazerCardsProviderStatus(status)).toMatchObject({
+                normalizedStatus: NORMALIZED_STATUSES.FAILED,
+                providerStatus: 'Cancelled',
+                terminalFailure: true,
+            });
+        }
+    });
+
     it('accepts valid signatures and logs unmatched events safely', async () => {
         enableWebhook();
         const payload = {
@@ -4456,6 +4485,59 @@ describe('FazerCards signed webhooks', () => {
         expect(result).toMatchObject({ processed: true, action: 'completed' });
         expect(updated.status).toBe(ORDER_STATUS.COMPLETED);
         expect(updated.providerStatus).toBe('Completed');
+    });
+
+    it('completed webhook can match by local order reference when provider order id is absent', async () => {
+        enableWebhook();
+        const { order } = await createFazerTopupOrder();
+        await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                status: ORDER_STATUS.MANUAL_REVIEW,
+                providerOrderId: null,
+                providerStatus: 'Pending',
+                providerIdempotencyKey: `fazercards:topup:${order._id.toString()}`,
+            },
+        });
+
+        const result = await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+            event: 'order.completed',
+            event_id: 'evt_completed_local_ref',
+            data: {
+                local_order_id: order._id.toString(),
+                status: 'done',
+            },
+        }));
+        const updated = await Order.findById(order._id).lean();
+
+        expect(result).toMatchObject({ processed: true, action: 'completed' });
+        expect(updated.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(updated.providerStatus).toBe('Completed');
+        expect(updated.refunded).toBe(false);
+    });
+
+    it('repeated completed webhooks with new event ids do not re-apply completion history', async () => {
+        enableWebhook();
+        const { order } = await createFazerTopupOrder();
+        await markSent(order, 'fc_completed_again');
+
+        const first = await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+            event: 'order.completed',
+            event_id: 'evt_completed_again_1',
+            data: { order_id: 'fc_completed_again', status: 'completed' },
+        }));
+        const second = await fazerCardsWebhookSvc.processWebhook(signedWebhook({
+            event: 'order.status_changed',
+            event_id: 'evt_completed_again_2',
+            data: { order_id: 'fc_completed_again', status: 'fulfilled' },
+        }));
+        const updated = await Order.findById(order._id).lean();
+        const completedHistory = updated.statusHistory.filter((item) => item.status === ORDER_STATUS.COMPLETED);
+
+        expect(first).toMatchObject({ processed: true, action: 'completed' });
+        expect(second).toMatchObject({ processed: true, action: 'completed' });
+        expect(updated.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(completedHistory).toHaveLength(1);
+        expect(await FazerCardsWebhookEvent.countDocuments({ localOrder: order._id })).toBe(2);
     });
 
     it('completed and failed webhooks update Telegram orders through generic status handling', async () => {

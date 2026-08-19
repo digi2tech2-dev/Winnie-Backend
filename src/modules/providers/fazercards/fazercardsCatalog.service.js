@@ -3146,6 +3146,27 @@ const updateOrderFromFazerCardsStatus = async (order, result, { source = 'fazerc
         return { order: updated, action: 'ignoredTerminal', refunded: updated?.refunded === true };
     }
 
+    if (order.status === ORDER_STATUS.COMPLETED && normalizedStatus === NORMALIZED_STATUSES.COMPLETED) {
+        let deliveredCodeCount = 0;
+        if (isCodeDeliveryFazerCardsOrder(order)) {
+            await storeDeliveredCodesFromProviderPayload(order, result.rawProviderPayload || result.rawResponse);
+            deliveredCodeCount = await getExistingDeliveredCodeCount(order._id);
+        }
+        const updated = await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                ...update,
+                lastCheckedAt: now,
+            },
+        }, { new: true });
+        return {
+            order: updated,
+            action: 'completed',
+            idempotent: true,
+            refunded: updated?.refunded === true,
+            deliveredCodeCount,
+        };
+    }
+
     if (normalizedStatus === NORMALIZED_STATUSES.UNKNOWN || result.manualReview === true) {
         const updated = await Order.findByIdAndUpdate(order._id, {
             $set: {
@@ -3314,7 +3335,9 @@ const applyProviderStatusPayloadToOrder = async (orderId, payload = {}, {
     source = 'fazercards_webhook',
     providerOrderId = null,
     providerRequestId = null,
+    providerIdempotencyKey = null,
     fallbackStatus = null,
+    requireProviderOrderId = true,
 } = {}) => {
     const order = await loadOrderForFazerCardsReconcile(orderId);
     assertFazerCardsOrder(order);
@@ -3322,8 +3345,9 @@ const applyProviderStatusPayloadToOrder = async (orderId, payload = {}, {
     const parsed = parseFazerCardsOrderPayload(payload, {
         fallbackProviderOrderId: providerOrderId || order.providerOrderId,
         requestId: providerRequestId,
-        providerIdempotencyKey: order.providerIdempotencyKey,
+        providerIdempotencyKey: providerIdempotencyKey || order.providerIdempotencyKey,
         fallbackStatus,
+        requireProviderOrderId,
     });
     const applied = await updateOrderFromFazerCardsStatus(order, parsed, { source });
     const finalDeliveredCodeCount = isCodeDeliveryFazerCardsOrder(order)

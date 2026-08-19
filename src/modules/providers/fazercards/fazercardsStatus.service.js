@@ -19,7 +19,7 @@ const PROVIDER_STATUS_LABELS = Object.freeze({
     UNKNOWN: 'Unknown',
 });
 
-const COMPLETED_VALUES = new Set(['completed', 'complete', 'succeeded', 'success', 'fulfilled']);
+const COMPLETED_VALUES = new Set(['completed', 'complete', 'succeeded', 'success', 'done', 'fulfilled']);
 const PROCESSING_VALUES = new Set(['processing', 'pending', 'in_progress', 'in progress', 'inprogress', 'created', 'accepted']);
 const FAILED_VALUES = new Set(['failed', 'error', 'cancelled', 'canceled', 'rejected']);
 const REFUNDED_VALUES = new Set(['refunded']);
@@ -120,6 +120,7 @@ const parseFazerCardsOrderPayload = (payload = {}, {
     requestId = null,
     providerIdempotencyKey = null,
     fallbackStatus = null,
+    requireProviderOrderId = true,
 } = {}) => {
     const providerOrderId = asString(extractFazerCardsOrderId(payload), asString(fallbackProviderOrderId, null));
     const rawStatus = firstValue(extractFazerCardsStatus(payload), fallbackStatus);
@@ -129,7 +130,8 @@ const parseFazerCardsOrderPayload = (payload = {}, {
     return {
         success: mapped.normalizedStatus === NORMALIZED_STATUSES.COMPLETED
             || mapped.normalizedStatus === NORMALIZED_STATUSES.PROCESSING,
-        manualReview: mapped.normalizedStatus === NORMALIZED_STATUSES.UNKNOWN || !providerOrderId,
+        manualReview: mapped.normalizedStatus === NORMALIZED_STATUSES.UNKNOWN
+            || (requireProviderOrderId && !providerOrderId),
         normalizedStatus: mapped.normalizedStatus,
         providerOrderId,
         providerStatus: mapped.providerStatus,

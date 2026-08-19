@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 const config = require('../../../config/config');
 const { AppError } = require('../../../shared/errors/AppError');
 const { Order } = require('../../orders/order.model');
@@ -100,19 +101,86 @@ const eventStatusFromName = (event) => {
     return null;
 };
 
+const WEBHOOK_TERMINAL_STATUS_VALUES = new Set([
+    'completed',
+    'complete',
+    'success',
+    'succeeded',
+    'done',
+    'fulfilled',
+    'failed',
+    'error',
+    'cancelled',
+    'canceled',
+    'rejected',
+    'refunded',
+]);
+
 const extractWebhookEventInfo = (payload = {}, rawBody) => {
     const event = asString(payload.event || payload.type || payload.eventType || 'unknown').toLowerCase();
     const eventId = asString(firstValue(payload.event_id, payload.eventId, payload.id), `sha256:${hashRawBody(rawBody)}`);
     const providerOrderId = asString(firstValue(
         getPath(payload, 'data.order_id'),
         getPath(payload, 'data.orderId'),
+        getPath(payload, 'data.provider_order_id'),
+        getPath(payload, 'data.providerOrderId'),
         getPath(payload, 'data.id'),
         getPath(payload, 'order.id'),
         getPath(payload, 'order.order_id'),
         getPath(payload, 'order.orderId'),
+        getPath(payload, 'order.provider_order_id'),
+        getPath(payload, 'order.providerOrderId'),
         payload.order_id,
         payload.orderId,
+        payload.provider_order_id,
+        payload.providerOrderId,
         event.startsWith('order.') ? payload.id : null
+    ), null);
+    const localOrderId = asString(firstValue(
+        getPath(payload, 'data.local_order_id'),
+        getPath(payload, 'data.localOrderId'),
+        getPath(payload, 'data.local_order_uuid'),
+        getPath(payload, 'data.localOrderUuid'),
+        getPath(payload, 'data.order_uuid'),
+        getPath(payload, 'data.orderUuid'),
+        getPath(payload, 'data.reference_id'),
+        getPath(payload, 'data.referenceId'),
+        getPath(payload, 'data.client_reference'),
+        getPath(payload, 'data.clientReference'),
+        getPath(payload, 'data.metadata.local_order_id'),
+        getPath(payload, 'data.metadata.localOrderId'),
+        getPath(payload, 'data.metadata.order_id'),
+        getPath(payload, 'data.metadata.orderId'),
+        getPath(payload, 'order.local_order_id'),
+        getPath(payload, 'order.localOrderId'),
+        getPath(payload, 'order.order_uuid'),
+        getPath(payload, 'order.orderUuid'),
+        payload.local_order_id,
+        payload.localOrderId,
+        payload.order_uuid,
+        payload.orderUuid,
+        payload.reference_id,
+        payload.referenceId,
+        payload.client_reference,
+        payload.clientReference
+    ), null);
+    const externalOrderId = asString(firstValue(
+        getPath(payload, 'data.external_order_id'),
+        getPath(payload, 'data.externalOrderId'),
+        getPath(payload, 'order.external_order_id'),
+        getPath(payload, 'order.externalOrderId'),
+        payload.external_order_id,
+        payload.externalOrderId
+    ), null);
+    const providerIdempotencyKey = asString(firstValue(
+        getPath(payload, 'data.idempotency_key'),
+        getPath(payload, 'data.idempotencyKey'),
+        getPath(payload, 'data.provider_idempotency_key'),
+        getPath(payload, 'data.providerIdempotencyKey'),
+        getPath(payload, 'order.idempotency_key'),
+        getPath(payload, 'order.idempotencyKey'),
+        payload.idempotency_key,
+        payload.idempotencyKey
     ), null);
     const status = firstValue(
         getPath(payload, 'data.status'),
@@ -128,6 +196,9 @@ const extractWebhookEventInfo = (payload = {}, rawBody) => {
         event,
         eventId,
         providerOrderId,
+        localOrderId,
+        externalOrderId,
+        providerIdempotencyKey,
         status,
         timestamp: firstValue(payload.timestamp, payload.created_at, payload.createdAt, null),
         acceptedEvent: ACCEPTED_EVENTS.has(event),
@@ -136,21 +207,48 @@ const extractWebhookEventInfo = (payload = {}, rawBody) => {
 
 const sanitizeWebhookPayload = (payload = {}) => sanitizeProviderCodePayload(sanitizePayload(payload));
 
-const findLocalOrderByProviderReference = async (providerOrderId) => {
+const findLocalOrderByProviderReference = async ({
+    providerOrderId = null,
+    localOrderId = null,
+    externalOrderId = null,
+    providerIdempotencyKey = null,
+} = {}) => {
     const id = asString(providerOrderId);
-    if (!id) return null;
-    return Order.findOne({
-        $or: [
+    const localId = asString(localOrderId);
+    const externalId = asString(externalOrderId);
+    const idemKey = asString(providerIdempotencyKey);
+    const clauses = [];
+    if (id) {
+        clauses.push(
             { providerOrderId: id },
             { providerRequestId: id },
             { 'providerRawResponse.order.id': id },
             { 'providerRawResponse.order.order_id': id },
             { 'providerRawResponse.order.orderId': id },
+            { 'providerRawResponse.order.provider_order_id': id },
+            { 'providerRawResponse.order.providerOrderId': id },
             { 'providerRawResponse.data.id': id },
             { 'providerRawResponse.data.order_id': id },
             { 'providerRawResponse.data.orderId': id },
-        ],
-    }).select('_id status providerOrderId providerRequestId').lean();
+            { 'providerRawResponse.data.provider_order_id': id },
+            { 'providerRawResponse.data.providerOrderId': id }
+        );
+    }
+    if (localId && mongoose.Types.ObjectId.isValid(localId)) clauses.push({ _id: localId });
+    if (localId) {
+        clauses.push(
+            { externalOrderId: localId },
+            { idempotencyKey: localId },
+            { providerIdempotencyKey: localId }
+        );
+    }
+    if (externalId) clauses.push({ externalOrderId: externalId });
+    if (idemKey) clauses.push({ providerIdempotencyKey: idemKey });
+    if (!clauses.length) return null;
+
+    return Order.findOne({ $or: clauses })
+        .select('_id status providerOrderId providerRequestId externalOrderId providerIdempotencyKey')
+        .lean();
 };
 
 const appendManualServiceChatNote = async (orderId, payload = {}, event = '') => {
@@ -255,7 +353,12 @@ const processWebhook = async ({ headers = {}, rawBody, payload: parsedPayload = 
         return { success: true, ignored: true, processed: false, delivery: buildDeliverySummary(ignored) };
     }
 
-    const localOrder = await findLocalOrderByProviderReference(info.providerOrderId);
+    const localOrder = await findLocalOrderByProviderReference({
+        providerOrderId: info.providerOrderId,
+        localOrderId: info.localOrderId,
+        externalOrderId: info.externalOrderId,
+        providerIdempotencyKey: info.providerIdempotencyKey,
+    });
     if (!localOrder) {
         const unmatched = await markEvent(eventDoc, {
             matched: false,
@@ -279,9 +382,12 @@ const processWebhook = async ({ headers = {}, rawBody, payload: parsedPayload = 
             return { success: true, processed: true, action: 'chatNote', delivery: buildDeliverySummary(chatEvent) };
         }
 
+        const webhookStatusIsTerminal = WEBHOOK_TERMINAL_STATUS_VALUES.has(asString(info.status).toLowerCase());
         const result = await fazerCardsCatalogSvc.applyProviderStatusPayloadToOrder(localOrder._id, payload, {
             source: 'fazercards_webhook',
             providerOrderId: info.providerOrderId,
+            providerIdempotencyKey: info.providerIdempotencyKey,
+            requireProviderOrderId: Boolean(info.providerOrderId || localOrder.providerOrderId || !webhookStatusIsTerminal),
             fallbackStatus: info.status,
         });
         const updated = await markEvent(eventDoc, {

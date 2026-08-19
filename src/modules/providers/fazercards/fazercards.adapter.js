@@ -150,7 +150,7 @@ const buildTopupFields = (params = {}, requiredFields = []) => {
 
 const normalizeTopupOrderStatus = (rawStatus) => {
     const normalized = String(rawStatus || '').trim().toLowerCase();
-    if (['completed', 'complete', 'success', 'succeeded'].includes(normalized)) return { status: 'Completed', known: true, terminalFailure: false };
+    if (['completed', 'complete', 'success', 'succeeded', 'done', 'fulfilled'].includes(normalized)) return { status: 'Completed', known: true, terminalFailure: false };
     if (['processing', 'pending', 'in_progress', 'in progress', 'inprogress'].includes(normalized)) return { status: 'Pending', known: true, terminalFailure: false };
     if (['failed', 'error', 'cancelled', 'canceled', 'refunded'].includes(normalized)) return { status: 'Cancelled', known: true, terminalFailure: true };
     return { status: rawStatus ? String(rawStatus) : 'Unknown', known: false, terminalFailure: false };

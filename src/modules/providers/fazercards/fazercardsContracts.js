@@ -745,7 +745,7 @@ const buildUnconfirmedPayload = ({ contract } = {}) => buildContractError(
 
 const mapProviderStatus = (rawStatus) => {
     const normalized = asString(rawStatus).toLowerCase();
-    if (['completed', 'complete', 'success', 'succeeded', 'fulfilled'].includes(normalized)) {
+    if (['completed', 'complete', 'success', 'succeeded', 'done', 'fulfilled'].includes(normalized)) {
         return { status: PARSED_STATUSES.COMPLETED, providerStatus: 'Completed', known: true, terminalFailure: false };
     }
     if (['processing', 'pending', 'in_progress', 'in progress', 'inprogress', 'created', 'accepted'].includes(normalized)) {
