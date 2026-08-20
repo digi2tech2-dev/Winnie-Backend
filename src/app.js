@@ -31,6 +31,7 @@ const whatsappCustomerRoutes = require('./modules/notifications/whatsapp/whatsap
 const whatsappAdminRoutes = require('./modules/notifications/whatsapp/whatsappAdmin.routes');
 const providerRoutes = require('./modules/providers/provider.routes');
 const clientRoutes = require('./modules/client/client.routes');
+const reviewRoutes = require('./modules/reviews/review.routes');
 const adminCatalogRoutes = require('./modules/admin/admin.catalog.routes');
 const adminRoutes = require('./modules/admin/admin.routes');    // ← dashboard router
 const meRoutes = require('./modules/me/me.routes');          // ← user panel
@@ -149,6 +150,8 @@ app.use(`${API_PREFIX}/me/notifications`, notificationRoutes);
 app.use(`${API_PREFIX}/me/whatsapp-notifications`, whatsappCustomerRoutes);
 app.use(`${API_PREFIX}/providers`, providerRoutes);
 app.use(`${API_PREFIX}/client`, clientRoutes);
+app.use(`${API_PREFIX}/public`, reviewRoutes.publicRouter);
+app.use(`${API_PREFIX}/reviews`, reviewRoutes.customerRouter);
 
 // ── User Panel ─────────────────────────────────────────────────────────────────
 app.use(`${API_PREFIX}/me`, meRoutes);
@@ -249,6 +252,7 @@ app.get(`${API_PREFIX}/public/catalog`, async (req, res) => {
 
 // ── Admin Routes ──────────────────────────────────────────────────────────────
 app.use(`${API_PREFIX}/admin/whatsapp`, whatsappAdminRoutes);
+app.use(`${API_PREFIX}/admin`, reviewRoutes.adminRouter);
 app.use(`${API_PREFIX}/admin`, adminRoutes);
 app.use(`${API_PREFIX}/admin`, adminCatalogRoutes);
 app.use(`${API_PREFIX}/admin/currencies`, currencyRoutes);

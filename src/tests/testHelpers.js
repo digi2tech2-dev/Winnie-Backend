@@ -20,6 +20,7 @@ require('../modules/providers/providerProduct.model');
 require('../modules/currency/currency.model');
 require('../modules/referrals/referral.model');
 require('../modules/groupRequests/groupRequest.model');
+require('../modules/reviews/review.model');
 
 // ─── DB Lifecycle ─────────────────────────────────────────────────────────────
 
