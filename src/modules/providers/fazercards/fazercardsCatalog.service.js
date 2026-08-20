@@ -1412,6 +1412,18 @@ const sortFazerCardsSearchResults = (products = [], searchText = '') => (
         .map(({ product }) => product)
 );
 
+const buildFazerCardsProviderProductScope = async () => {
+    const provider = await findFazerCardsProvider();
+    if (!provider?._id) return { providerCode: PROVIDER_CODES.FAZER_CARDS };
+
+    return {
+        $or: [
+            { providerCode: PROVIDER_CODES.FAZER_CARDS },
+            { provider: provider._id },
+        ],
+    };
+};
+
 const listProviderProducts = async ({
     page = 1,
     limit = 50,
@@ -1431,7 +1443,7 @@ const listProviderProducts = async ({
     supportLevel,
     blockReason,
 } = {}) => {
-    const query = { providerCode: PROVIDER_CODES.FAZER_CARDS };
+    const query = await buildFazerCardsProviderProductScope();
     const searchText = search || q || queryText;
     const hasSearch = String(searchText || '').trim().length > 0;
     const shouldApplyFamilyFilter = !hasSearch
