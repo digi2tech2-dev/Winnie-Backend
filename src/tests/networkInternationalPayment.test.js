@@ -390,6 +390,47 @@ describe('Network International hosted payment gateway', () => {
         expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(0);
     });
 
+    it('allows an AED Network payment method for an EGP wallet top-up', async () => {
+        enableNetworkGateway();
+        const customer = await createNetworkCustomer({ walletBalance: 500, currency: 'EGP' });
+        await savePaymentMethod({ fee: 2, currency: 'AED' });
+        const client = makeHttpClient();
+        mockCreateOrder(client);
+
+        const result = await createNetworkIntent(customer, {
+            amount: 100,
+            currency: 'EGP',
+            paymentMethodId: 'pm-network-fee',
+        });
+
+        expect(client.post).toHaveBeenNthCalledWith(
+            2,
+            '/transactions/outlets/outlet-123/orders',
+            expect.objectContaining({
+                amount: { currencyCode: 'AED', value: 749 },
+                merchantOrderReference: result.payment._id.toString(),
+            }),
+            expect.any(Object)
+        );
+        expect(result.payment.amount).toBe(100);
+        expect(result.payment.currency).toBe('EGP');
+        expect(result.payment.metadata.paymentMethod).toMatchObject({
+            id: 'pm-network-fee',
+            gateway: PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL,
+        });
+        expect(result.payment.metadata.gatewayCurrencyConversion).toMatchObject({
+            requestedAmount: 100,
+            requestedCurrency: 'EGP',
+            payableAmount: 102,
+            payableCurrency: 'EGP',
+            gatewayAmount: 7.49,
+            gatewayCurrency: 'AED',
+            requestedAmountUsd: 2.04,
+            requestedCurrencyRate: 50,
+            gatewayCurrencyRate: 3.67,
+        });
+    });
+
     it('charges Network from fee-inclusive payable amount while preserving wallet credit amount', async () => {
         enableNetworkGateway();
         const customer = await createNetworkCustomer({ walletBalance: 500, currency: 'EGP' });

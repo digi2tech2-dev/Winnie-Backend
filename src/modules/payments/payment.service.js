@@ -190,6 +190,13 @@ const getPaymentoFiatCurrency = () =>
 const getZiinaGatewayCurrency = () =>
     normalizeCurrency(process.env.ZIINA_CURRENCY || config.payments.ziina?.currency || 'AED');
 
+const getConfiguredGatewaySettlementCurrency = (gateway) => {
+    if (gateway === PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL) return getNetworkGatewayCurrency();
+    if (gateway === PAYMENT_GATEWAYS.PAYMENTO) return getPaymentoFiatCurrency();
+    if (gateway === PAYMENT_GATEWAYS.ZIINA) return getZiinaGatewayCurrency();
+    return null;
+};
+
 const convertToConfiguredGatewayCurrency = async ({
     requestedAmount,
     requestedCurrency,
@@ -311,7 +318,7 @@ const getPaymentMethodGateway = (method) => (
     ''
 ).toString().trim().toUpperCase();
 
-const assertPaymentMethodUsable = (method, group, { gateway, currency }) => {
+const assertPaymentMethodUsable = (method, group, { gateway, currency, settlementCurrency = null }) => {
     if (group?.isActive === false || group?.active === false || method?.isActive === false || method?.active === false) {
         throw new BusinessRuleError('Selected payment method is not active.', 'PAYMENT_METHOD_INACTIVE');
     }
@@ -322,15 +329,16 @@ const assertPaymentMethodUsable = (method, group, { gateway, currency }) => {
     }
 
     const currencies = getPaymentMethodCurrencies(method, group);
-    if (currencies.length && !currencies.includes(currency)) {
-        if (gateway === PAYMENT_GATEWAYS.ZIINA && currencies.includes(getZiinaGatewayCurrency())) {
-            return;
-        }
+    const acceptedCurrencies = [
+        currency,
+        settlementCurrency,
+    ].filter(Boolean).map((value) => normalizeCurrency(value));
+    if (currencies.length && !acceptedCurrencies.some((acceptedCurrency) => currencies.includes(acceptedCurrency))) {
         throw new BusinessRuleError('Selected payment method does not support this currency.', 'PAYMENT_METHOD_CURRENCY_MISMATCH');
     }
 };
 
-const findConfiguredPaymentMethod = async (paymentMethodId, { gateway, currency } = {}) => {
+const findConfiguredPaymentMethod = async (paymentMethodId, { gateway, currency, settlementCurrency = null } = {}) => {
     const normalizedPaymentMethodId = normalizeOptionalPaymentMethodId(paymentMethodId);
     if (!normalizedPaymentMethodId) return null;
 
@@ -342,7 +350,7 @@ const findConfiguredPaymentMethod = async (paymentMethodId, { gateway, currency 
         const method = methods.find((candidate) => String(candidate?.id || candidate?._id || '') === normalizedPaymentMethodId);
         if (!method) continue;
 
-        assertPaymentMethodUsable(method, group, { gateway, currency });
+        assertPaymentMethodUsable(method, group, { gateway, currency, settlementCurrency });
         return { ...method, paymentMethodId: normalizedPaymentMethodId, group };
     }
 
@@ -639,9 +647,11 @@ const createPaymentIntent = async ({
     const normalizedCurrency = normalizeCurrency(currency);
     await assertCurrencySupported(normalizedCurrency);
 
+    const gatewaySettlementCurrency = getConfiguredGatewaySettlementCurrency(normalizedGateway);
     const selectedPaymentMethod = await findConfiguredPaymentMethod(paymentMethodId, {
         gateway: normalizedGateway,
         currency: normalizedCurrency,
+        settlementCurrency: gatewaySettlementCurrency,
     });
     assertPaymentMethodAmountAllowed(parsedAmount, selectedPaymentMethod);
     const validatedCustomFields = normalizeSubmittedCustomFields({

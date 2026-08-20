@@ -444,6 +444,51 @@ describe('Paymento USDT hosted payment gateway', () => {
         });
     });
 
+    it('allows a USD Paymento payment method for an EGP wallet top-up', async () => {
+        enablePaymentoGateway();
+        const customer = await createPaymentoCustomer({ currency: 'EGP', walletBalance: 500 });
+        await savePaymentMethod({ fee: 2, currency: 'USD' });
+        const client = makeHttpClient();
+        mockCreatePaymentoPayment(client);
+
+        const result = await createPaymentoIntent(customer, {
+            amount: 250,
+            currency: 'EGP',
+            paymentMethodId: 'pm-paymento-fee',
+        });
+
+        const [, createPayload] = client.post.mock.calls[0];
+        expect(createPayload).toMatchObject({
+            fiatAmount: '5.10',
+            fiatCurrency: 'USD',
+            additionalData: expect.arrayContaining([
+                { key: 'requestedAmount', value: '250' },
+                { key: 'requestedCurrency', value: 'EGP' },
+                { key: 'feePercent', value: '2' },
+                { key: 'feeAmount', value: '5' },
+                { key: 'payableAmount', value: '255' },
+                { key: 'payableCurrency', value: 'EGP' },
+            ]),
+        });
+        expect(result.payment.amount).toBe(250);
+        expect(result.payment.currency).toBe('EGP');
+        expect(result.payment.metadata.paymentMethod).toMatchObject({
+            id: 'pm-paymento-fee',
+            gateway: PAYMENT_GATEWAYS.PAYMENTO,
+        });
+        expect(result.payment.metadata.gatewayCurrencyConversion).toMatchObject({
+            requestedAmount: 250,
+            requestedCurrency: 'EGP',
+            payableAmount: 255,
+            payableCurrency: 'EGP',
+            gatewayAmount: 5.1,
+            gatewayCurrency: 'USD',
+            requestedAmountUsd: 5.1,
+            requestedCurrencyRate: 50,
+            gatewayCurrencyRate: 1,
+        });
+    });
+
     it('does not expose Paymento API keys, IPN secrets, or raw auth headers in serialized responses', async () => {
         enablePaymentoGateway({ PAYMENTO_IPN_SECRET: 'paymento-ipn-secret' });
         const customer = await createPaymentoCustomer();
