@@ -104,6 +104,13 @@ const createAedCurrency = () => createCurrency({
     platformRate: 3.67,
 });
 
+const createUsdCurrency = () => createCurrency({
+    code: 'USD',
+    name: 'US Dollar',
+    symbol: 'USD',
+    platformRate: 1,
+});
+
 const createEgpCurrency = () => createCurrency({
     code: 'EGP',
     name: 'Egyptian Pound',
@@ -422,14 +429,94 @@ describe('Ziina wallet top-up gateway', () => {
         });
     });
 
+    it('allows a legacy USD Ziina payment method for an EGP wallet and converts to AED', async () => {
+        enableZiinaGateway();
+        const customer = await createZiinaCustomer({ currency: 'EGP', walletBalance: 500 });
+        await savePaymentMethod({ fee: 2, currency: 'USD' });
+        const client = makeHttpClient();
+        mockCreateZiinaPayment(client, { amount: 720 });
+
+        const result = await createZiinaIntent(customer, {
+            amount: 100,
+            currency: 'EGP',
+            paymentMethodId: 'pm-ziina-fee',
+        });
+
+        expect(client.post).toHaveBeenCalledWith(
+            '/payment_intent',
+            expect.objectContaining({
+                amount: 720,
+                currency_code: 'AED',
+            }),
+            expect.any(Object)
+        );
+        expect(result.payment.amount).toBe(100);
+        expect(result.payment.currency).toBe('EGP');
+        expect(result.payment.metadata.paymentMethod).toMatchObject({
+            id: 'pm-ziina-fee',
+            gateway: PAYMENT_GATEWAYS.ZIINA,
+        });
+        expect(result.payment.metadata.gatewayCurrencyConversion).toMatchObject({
+            requestedAmount: 100,
+            requestedCurrency: 'EGP',
+            feePercent: 2,
+            feeAmount: 2,
+            payableAmount: 102,
+            payableCurrency: 'EGP',
+            gatewayAmount: 7.2,
+            gatewayCurrency: 'AED',
+            requestedCurrencyRate: 52,
+            gatewayCurrencyRate: 3.67,
+        });
+    });
+
+    it('allows a legacy USD Ziina payment method for a USD wallet and converts to AED', async () => {
+        enableZiinaGateway();
+        await createUsdCurrency();
+        const customer = await createZiinaCustomer({ currency: 'USD', walletBalance: 500 });
+        await savePaymentMethod({ fee: 0, currency: 'USD' });
+        const client = makeHttpClient();
+        mockCreateZiinaPayment(client, { amount: 36700 });
+
+        const result = await createZiinaIntent(customer, {
+            amount: 100,
+            currency: 'USD',
+            paymentMethodId: 'pm-ziina-fee',
+        });
+
+        expect(client.post).toHaveBeenCalledWith(
+            '/payment_intent',
+            expect.objectContaining({
+                amount: 36700,
+                currency_code: 'AED',
+            }),
+            expect.any(Object)
+        );
+        expect(result.payment.amount).toBe(100);
+        expect(result.payment.currency).toBe('USD');
+        expect(result.payment.metadata.gatewayCurrencyConversion).toMatchObject({
+            requestedAmount: 100,
+            requestedCurrency: 'USD',
+            payableAmount: 100,
+            payableCurrency: 'USD',
+            gatewayAmount: 367,
+            gatewayCurrency: 'AED',
+            requestedAmountUsd: 100,
+            requestedCurrencyRate: 1,
+            gatewayCurrencyRate: 3.67,
+        });
+    });
+
     it('returns a clear conversion error when the AED gateway rate is missing', async () => {
         enableZiinaGateway();
         const customer = await createZiinaCustomer({ currency: 'EGP', walletBalance: 500, createAed: false });
+        await savePaymentMethod({ fee: 0, currency: 'USD' });
         const client = makeHttpClient();
 
         await expect(createZiinaIntent(customer, {
             amount: 100,
             currency: 'EGP',
+            paymentMethodId: 'pm-ziina-fee',
         })).rejects.toMatchObject({ code: 'PAYMENT_CURRENCY_CONVERSION_UNAVAILABLE' });
 
         expect(client.post).not.toHaveBeenCalled();

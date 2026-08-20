@@ -197,6 +197,12 @@ const getConfiguredGatewaySettlementCurrency = (gateway) => {
     return null;
 };
 
+const isConvertedOnlineGateway = (gateway) => [
+    PAYMENT_GATEWAYS.NETWORK_INTERNATIONAL,
+    PAYMENT_GATEWAYS.PAYMENTO,
+    PAYMENT_GATEWAYS.ZIINA,
+].includes(gateway);
+
 const convertToConfiguredGatewayCurrency = async ({
     requestedAmount,
     requestedCurrency,
@@ -326,6 +332,10 @@ const assertPaymentMethodUsable = (method, group, { gateway, currency, settlemen
     const methodGateway = getPaymentMethodGateway(method);
     if (methodGateway && methodGateway !== gateway) {
         throw new BusinessRuleError('Selected payment method does not match the requested gateway.', 'PAYMENT_METHOD_GATEWAY_MISMATCH');
+    }
+
+    if (isConvertedOnlineGateway(gateway) && settlementCurrency) {
+        return;
     }
 
     const currencies = getPaymentMethodCurrencies(method, group);

@@ -175,6 +175,23 @@ describe('Payments base module', () => {
         });
     });
 
+    it('keeps strict payment method currency validation for non-converted gateways', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        await savePaymentMethod({ currency: 'AED', gateway: PAYMENT_GATEWAYS.MOCK });
+
+        await expect(paymentService.createPaymentIntent({
+            userId: customer._id,
+            amount: 100,
+            currency: 'USD',
+            gateway: PAYMENT_GATEWAYS.MOCK,
+            paymentMethodId: 'pm-mock-fee',
+            antiScamConfirmed: true,
+            termsAccepted: true,
+        })).rejects.toMatchObject({ code: 'PAYMENT_METHOD_CURRENCY_MISMATCH' });
+
+        expect(await Payment.countDocuments({ userId: customer._id })).toBe(0);
+    });
+
     it('uses 0% when a selected payment method has no usable fee value', async () => {
         const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
         await savePaymentMethod({ fee: 'not-a-number' });
