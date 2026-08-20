@@ -1948,6 +1948,140 @@ describe('FazerCards catalog normalization and raw sync', () => {
         ]);
     });
 
+    it('searches FazerCards cached products globally with aliases unless family is explicit', async () => {
+        const provider = await Provider.create({
+            name: 'FazerCards',
+            slug: 'fazer-cards',
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            baseUrl: 'https://api.fzr.cards/api/v2',
+            isActive: true,
+            syncInterval: 0,
+        });
+        const shared = {
+            provider: provider._id,
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            rawPrice: '1',
+            available: true,
+            isSupported: true,
+            isBlocked: false,
+        };
+        await ProviderProduct.create([
+            {
+                ...shared,
+                externalProductId: 'FAZER_TOPUP:pubg_mobile:uc_60',
+                rawName: 'PUBG Mobile - 60 UC',
+                category: 'pubg_mobile',
+                categoryName: 'PUBG Mobile',
+                offerId: 'uc_60',
+                offerName: '60 UC',
+                familyKey: 'TOPUPS',
+                fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
+                rawPayload: {
+                    category: { category_id: 'pubg_mobile', name: 'PUBG Mobile' },
+                    offer: { offer_id: 'uc_60', name: '60 UC', sku: 'SKU-7760' },
+                },
+            },
+            {
+                ...shared,
+                externalProductId: 'FAZER_GAMEKEY:playerunknown:pack_1',
+                rawName: 'PlayerUnknown Battlegrounds Pack',
+                category: 'playerunknown',
+                categoryName: 'PlayerUnknown Battlegrounds',
+                offerId: 'pack_1',
+                offerName: 'Starter Pack',
+                familyKey: 'GAME_KEYS',
+                fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+                rawPayload: {
+                    family: 'GAME_KEYS',
+                    game: { game_id: 'playerunknown', name: 'PlayerUnknown Battlegrounds', platform: 'Mobile' },
+                    key: { key_id: 'pack_1', name: 'Starter Pack', code: 'KEY-CODE-99' },
+                },
+            },
+            {
+                ...shared,
+                externalProductId: 'FAZER_GIFTCARD:pubgm:wallet',
+                rawName: 'PUBGM Wallet Voucher',
+                category: 'pubgm',
+                categoryName: 'PUBGM',
+                offerId: 'wallet',
+                offerName: 'Wallet Voucher',
+                familyKey: 'GIFTCARDS',
+                fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+                rawPayload: {
+                    family: 'GIFTCARDS',
+                    category: { category_id: 'pubgm', name: 'PUBGM' },
+                    offer: { card_id: 'wallet', name: 'Wallet Voucher', reference: 'PUBGM-WALLET' },
+                },
+            },
+            {
+                ...shared,
+                externalProductId: 'FAZER_MANUAL:regex_pubg',
+                rawName: 'Regex Literal.*[Token] PUBG',
+                category: 'manual',
+                categoryName: 'Manual Services',
+                offerId: 'regex_pubg',
+                offerName: 'Regex Literal',
+                familyKey: 'MANUAL_SERVICES',
+                fulfillmentMode: FULFILLMENT_MODES.MANUAL_SERVICE,
+                rawPayload: {
+                    family: 'MANUAL_SERVICES',
+                    offer: { manual_service_id: 'regex_pubg', name: 'Regex Literal.*[Token] PUBG' },
+                },
+            },
+        ]);
+        const otherProvider = await Provider.create({
+            name: 'Other Provider',
+            slug: 'other-provider',
+            baseUrl: 'https://example.test/api',
+            isActive: true,
+            syncInterval: 0,
+        });
+        await ProviderProduct.create({
+            provider: otherProvider._id,
+            externalProductId: 'other-pubg',
+            rawName: 'PUBG Other Provider',
+            rawPrice: '2',
+            category: 'game-topups',
+        });
+
+        const globalDefault = await fazerCardsCatalogSvc.listProviderProducts({ search: 'PUBG', familyKey: 'TOPUPS' });
+        const explicitTopups = await fazerCardsCatalogSvc.listProviderProducts({ search: 'PUBG', familyKey: 'TOPUPS', familyKeyExplicit: true });
+        const pubgmAlias = await fazerCardsCatalogSvc.listProviderProducts({ search: 'PUBGM' });
+        const arabicAlias = await fazerCardsCatalogSvc.listProviderProducts({ search: 'ببجي' });
+        const providerCode = await fazerCardsCatalogSvc.listProviderProducts({ search: 'key-code' });
+        const sku = await fazerCardsCatalogSvc.listProviderProducts({ search: 'sku-7760' });
+        const regexSafe = await fazerCardsCatalogSvc.listProviderProducts({ search: 'Literal.*[Token]' });
+        const paged = await fazerCardsCatalogSvc.listProviderProducts({ search: 'pubg', page: 2, limit: 2 });
+        const emptySearchBrowsing = await fazerCardsCatalogSvc.listProviderProducts({ search: '', familyKey: 'TOPUPS' });
+
+        expect(globalDefault.products.map((product) => product.familyKey).sort()).toEqual([
+            'GAME_KEYS',
+            'GIFTCARDS',
+            'MANUAL_SERVICES',
+            'TOPUPS',
+        ]);
+        expect(explicitTopups.products).toHaveLength(1);
+        expect(explicitTopups.products[0]).toMatchObject({ familyKey: 'TOPUPS', externalProductId: 'FAZER_TOPUP:pubg_mobile:uc_60' });
+        expect(pubgmAlias.products.map((product) => product.externalProductId)).toEqual(expect.arrayContaining([
+            'FAZER_TOPUP:pubg_mobile:uc_60',
+            'FAZER_GIFTCARD:pubgm:wallet',
+        ]));
+        expect(arabicAlias.products.map((product) => product.externalProductId)).toEqual(expect.arrayContaining([
+            'FAZER_TOPUP:pubg_mobile:uc_60',
+            'FAZER_GAMEKEY:playerunknown:pack_1',
+        ]));
+        expect(providerCode.products).toHaveLength(1);
+        expect(providerCode.products[0].externalProductId).toBe('FAZER_GAMEKEY:playerunknown:pack_1');
+        expect(sku.products).toHaveLength(1);
+        expect(sku.products[0].externalProductId).toBe('FAZER_TOPUP:pubg_mobile:uc_60');
+        expect(regexSafe.products).toHaveLength(1);
+        expect(regexSafe.products[0].externalProductId).toBe('FAZER_MANUAL:regex_pubg');
+        expect(paged.pagination).toMatchObject({ page: 2, limit: 2, total: 4, pages: 2 });
+        expect(paged.products).toHaveLength(2);
+        expect(emptySearchBrowsing.products).toHaveLength(1);
+        expect(globalDefault.products.map((product) => product.externalProductId)).not.toContain('other-pubg');
+    });
+
     it('syncs manual service offer fields into ProviderProduct and imported Product order fields', async () => {
         const client = makeClient();
         axios.create.mockReturnValue(client);

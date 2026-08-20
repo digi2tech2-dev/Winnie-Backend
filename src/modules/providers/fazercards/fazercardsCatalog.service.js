@@ -31,6 +31,7 @@ const {
 } = require('./fazercardsStatus.service');
 const { getFazerCardsFamily, listFazerCardsFamilies } = require('./fazercardsFamilies');
 const fazerCardsContracts = require('./fazercardsContracts');
+const { expandFazerCardsSearchTerms } = require('./fazercardsSearchAliases');
 const { ProviderDeliveredCode, DELIVERY_STATUSES } = require('./providerDeliveredCode.model');
 const { ProviderPilotOrder } = require('./providerPilotOrder.model');
 const { FazerCardsSteamGiftGameIndex } = require('./fazerCardsSteamGiftGameIndex.model');
@@ -1163,8 +1164,18 @@ const buildFamilyFilter = (familyKey) => {
                 { externalProductId: /^FAZER_TOPUP:/ },
                 { fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS },
                 {
-                    'rawPayload.category': { $exists: true },
-                    'rawPayload.offer': { $exists: true },
+                    $and: [
+                        {
+                            $or: [
+                                { familyKey: { $exists: false } },
+                                { familyKey: null },
+                                { familyKey: '' },
+                                { familyKey: 'UNKNOWN' },
+                            ],
+                        },
+                        { 'rawPayload.category': { $exists: true } },
+                        { 'rawPayload.offer': { $exists: true } },
+                    ],
                 },
             ],
         };
@@ -1194,54 +1205,102 @@ const buildFamilyFilter = (familyKey) => {
     return { familyKey: normalized };
 };
 
+const PROVIDER_PRODUCT_SEARCH_FIELDS = Object.freeze([
+    'rawName',
+    'name',
+    'translatedName',
+    'externalProductId',
+    'category',
+    'categoryName',
+    'familyKey',
+    'subCategory',
+    'offerId',
+    'offerName',
+    'region',
+    'platform',
+    'sku',
+    'code',
+    'reference',
+    'fulfillmentMode',
+    'supportLevel',
+    'blockReason',
+    'rawPayload.family',
+    'rawPayload.kind',
+    'rawPayload.sku',
+    'rawPayload.code',
+    'rawPayload.reference',
+    'rawPayload.category.category_id',
+    'rawPayload.category.categoryId',
+    'rawPayload.category.id',
+    'rawPayload.category.name',
+    'rawPayload.category.title',
+    'rawPayload.category.sku',
+    'rawPayload.category.code',
+    'rawPayload.category.reference',
+    'rawPayload.offer.offer_id',
+    'rawPayload.offer.offerId',
+    'rawPayload.offer.card_id',
+    'rawPayload.offer.cardId',
+    'rawPayload.offer.key_id',
+    'rawPayload.offer.keyId',
+    'rawPayload.offer.product_id',
+    'rawPayload.offer.productId',
+    'rawPayload.offer.manual_service_id',
+    'rawPayload.offer.manualServiceId',
+    'rawPayload.offer.id',
+    'rawPayload.offer.name',
+    'rawPayload.offer.title',
+    'rawPayload.offer.sku',
+    'rawPayload.offer.code',
+    'rawPayload.offer.reference',
+    'rawPayload.game.game_id',
+    'rawPayload.game.gameId',
+    'rawPayload.game.id',
+    'rawPayload.game.name',
+    'rawPayload.game.GameName',
+    'rawPayload.game.title',
+    'rawPayload.game.platform',
+    'rawPayload.game.region',
+    'rawPayload.game.sku',
+    'rawPayload.game.code',
+    'rawPayload.key.key_id',
+    'rawPayload.key.keyId',
+    'rawPayload.key.id',
+    'rawPayload.key.name',
+    'rawPayload.key.title',
+    'rawPayload.key.sku',
+    'rawPayload.key.code',
+    'rawPayload.key.reference',
+    'rawPayload.response.product_id',
+    'rawPayload.response.productId',
+    'rawPayload.response.offer_id',
+    'rawPayload.response.offerId',
+    'rawPayload.response.card_id',
+    'rawPayload.response.cardId',
+    'rawPayload.response.key_id',
+    'rawPayload.response.keyId',
+    'rawPayload.response.manual_service_id',
+    'rawPayload.response.manualServiceId',
+    'rawPayload.response.name',
+    'rawPayload.response.title',
+    'rawPayload.response.sku',
+    'rawPayload.response.code',
+    'rawPayload.response.reference',
+]);
+
 const buildProviderProductSearchFilter = (search) => {
-    const normalizedSearch = String(search || '').trim();
-    if (!normalizedSearch) return null;
+    const searchTerms = expandFazerCardsSearchTerms(search);
+    if (searchTerms.length === 0) return null;
 
-    const escaped = normalizedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(escaped, 'i');
+    const clauses = [];
+    for (const term of searchTerms) {
+        const regex = new RegExp(escapeRegex(term), 'i');
+        for (const field of PROVIDER_PRODUCT_SEARCH_FIELDS) {
+            clauses.push({ [field]: regex });
+        }
+    }
 
-    return {
-        $or: [
-            { rawName: regex },
-            { name: regex },
-            { translatedName: regex },
-            { externalProductId: regex },
-            { category: regex },
-            { categoryName: regex },
-            { offerId: regex },
-            { offerName: regex },
-            { subCategory: regex },
-            { region: regex },
-            { platform: regex },
-            { familyKey: regex },
-            { fulfillmentMode: regex },
-            { supportLevel: regex },
-            { blockReason: regex },
-            { 'rawPayload.category.category_id': regex },
-            { 'rawPayload.category.id': regex },
-            { 'rawPayload.category.name': regex },
-            { 'rawPayload.offer.offer_id': regex },
-            { 'rawPayload.offer.card_id': regex },
-            { 'rawPayload.offer.key_id': regex },
-            { 'rawPayload.offer.product_id': regex },
-            { 'rawPayload.offer.manual_service_id': regex },
-            { 'rawPayload.offer.id': regex },
-            { 'rawPayload.offer.name': regex },
-            { 'rawPayload.offer.sku': regex },
-            { 'rawPayload.offer.code': regex },
-            { 'rawPayload.offer.reference': regex },
-            { 'rawPayload.game.game_id': regex },
-            { 'rawPayload.game.name': regex },
-            { 'rawPayload.game.platform': regex },
-            { 'rawPayload.game.region': regex },
-            { 'rawPayload.key.key_id': regex },
-            { 'rawPayload.key.name': regex },
-            { 'rawPayload.key.sku': regex },
-            { 'rawPayload.key.code': regex },
-            { 'rawPayload.key.reference': regex },
-        ],
-    };
+    return { $or: clauses };
 };
 
 const listProviderProducts = async ({
@@ -1258,14 +1317,23 @@ const listProviderProducts = async ({
     imported,
     fulfillmentMode,
     familyKey,
+    familyKeyExplicit,
+    explicitFamily,
     supportLevel,
     blockReason,
 } = {}) => {
     const query = { providerCode: PROVIDER_CODES.FAZER_CARDS };
+    const searchText = search || q || queryText;
+    const hasSearch = String(searchText || '').trim().length > 0;
+    const shouldApplyFamilyFilter = !hasSearch
+        || familyKeyExplicit === true
+        || familyKeyExplicit === 'true'
+        || explicitFamily === true
+        || explicitFamily === 'true';
     if (category) query.category = String(category).trim();
     if (region) query.region = String(region).trim();
     if (fulfillmentMode) query.fulfillmentMode = String(fulfillmentMode).trim().toUpperCase();
-    addAndCondition(query, buildFamilyFilter(familyKey));
+    if (shouldApplyFamilyFilter) addAndCondition(query, buildFamilyFilter(familyKey));
     if (supportLevel) query.supportLevel = String(supportLevel).trim().toUpperCase();
     if (blockReason) query.blockReason = String(blockReason).trim().toUpperCase();
 
@@ -1291,7 +1359,7 @@ const listProviderProducts = async ({
         query._id = importedFilter ? { $in: importedIds } : { $nin: importedIds };
     }
 
-    addAndCondition(query, buildProviderProductSearchFilter(search || q || queryText));
+    addAndCondition(query, buildProviderProductSearchFilter(searchText));
 
     const normalizedPage = Math.max(parseInt(page, 10) || 1, 1);
     const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);

@@ -672,6 +672,8 @@ const listFazerCardsProviderProductsQuery = Joi.object({
         'UNKNOWN'
     ),
     familyKey: Joi.string().trim().uppercase().max(80),
+    familyKeyExplicit: Joi.boolean(),
+    explicitFamily: Joi.boolean(),
     supportLevel: Joi.string().trim().uppercase().max(80),
     blockReason: Joi.string().trim().uppercase().max(120),
 });
