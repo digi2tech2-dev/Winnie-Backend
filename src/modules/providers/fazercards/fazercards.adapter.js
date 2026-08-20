@@ -324,7 +324,15 @@ const normalizeTopupOffersResponse = (data = {}) => {
 const normalizeTopupOfferProduct = ({ category = {}, offer = {}, fields = [] } = {}, options = {}) => {
     const categoryId = asString(firstValue(category.category_id, category.categoryId, category.id));
     const categoryName = asString(firstValue(category.name, category.title, category.display_name), categoryId || 'Unknown FazerCards category');
-    const offerId = asString(firstValue(offer.offer_id, offer.offerId, offer.id, offer.sku_id, offer.skuId));
+    const offerId = asString(firstValue(
+        offer.offer_id,
+        offer.offerId,
+        offer.id,
+        offer.product_id,
+        offer.productId,
+        offer.sku_id,
+        offer.skuId
+    ));
     const offerName = asString(firstValue(offer.name, offer.title, offer.display_name), offerId || 'Unknown FazerCards offer');
     const name = `${categoryName} - ${offerName}`;
     const priceSource = firstValue(offer.price_usd, offer.priceUsd, offer.cost_usd, offer.costUsd);

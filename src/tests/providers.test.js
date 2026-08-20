@@ -1420,7 +1420,7 @@ describe('FazerCards catalog normalization and raw sync', () => {
                         note: '8 Ball Pool top-up',
                     },
                 ],
-                meta: { total: 317, limit: 100, next_cursor: 'cursor-2', has_more: true },
+                meta: { total: 1, limit: 100, next_cursor: null, has_more: false },
             },
         });
         client.request.mockResolvedValueOnce({
@@ -1461,8 +1461,8 @@ describe('FazerCards catalog normalization and raw sync', () => {
             providerProductsUpdated: 0,
             blocked: 0,
             unsupported: 0,
-            nextCursor: 'cursor-2',
-            hasMore: true,
+            nextCursor: null,
+            hasMore: false,
             deleted: 0,
             deactivated: 0,
             requestId: 'req-topups',
@@ -2284,6 +2284,105 @@ describe('FazerCards multi-family catalog discovery', () => {
         await expect(fazerCardsCatalogSvc.syncCatalogFamily({ family: 'NOPE' }))
             .rejects.toMatchObject({ code: 'FAZERCARDS_UNKNOWN_FAMILY' });
         expect(axios.create).not.toHaveBeenCalled();
+    });
+
+    it('walks paginated top-up catalog pages so later FazerCards products are cached and searchable', async () => {
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: { 'x-request-id': 'req-topups-page-1' },
+                data: {
+                    ok: true,
+                    kind: 'topup',
+                    items: [{ category_id: 'age_magic', name: 'Age of Magic' }],
+                    meta: { total: 2, limit: 1, next_cursor: 'page-2', has_more: true },
+                },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: { 'x-request-id': 'req-topups-page-2' },
+                data: {
+                    ok: true,
+                    kind: 'topup',
+                    items: [{ category_id: 'pubg_mobile', name: 'Pubg Mobile' }],
+                    meta: { total: 2, limit: 1, next_cursor: null, has_more: false },
+                },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: {
+                    ok: true,
+                    kind: 'topup',
+                    category_id: 'age_magic',
+                    name: 'Age of Magic',
+                    offers: [{ offer_id: 'lucky_shards', name: 'Lucky Shards', price_usd: '1.00' }],
+                    fields: [{ key: 'user_id', label: 'User ID', type: 'text' }],
+                },
+            })
+            .mockResolvedValueOnce({
+                status: 200,
+                headers: {},
+                data: {
+                    ok: true,
+                    kind: 'topup',
+                    category_id: 'pubg_mobile',
+                    name: 'Pubg Mobile',
+                    offers: [
+                        { offer_id: 'uc_60', name: '60 UC', price_usd: '0.99' },
+                        { offer_id: 'uc_325', name: '325 UC', price_usd: '4.99' },
+                    ],
+                    fields: [{ key: 'player_id', label: 'Player ID', type: 'text' }],
+                },
+            });
+
+        const result = await fazerCardsCatalogSvc.syncCatalogFamily({ family: 'TOPUPS', limit: 1 });
+        const pubgSearch = await fazerCardsCatalogSvc.listProviderProducts({ search: 'PUBG', page: 1, limit: 30 });
+        const ucSearch = await fazerCardsCatalogSvc.listProviderProducts({ search: 'UC', page: 1, limit: 30 });
+        const storedPubg = await ProviderProduct.findOne({
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            externalProductId: 'FAZER_TOPUP:pubg_mobile:uc_60',
+        }).lean();
+
+        expect(result).toMatchObject({
+            categoriesFetched: 2,
+            pagesFetched: 2,
+            offersFetched: 3,
+            providerProductsCreated: 3,
+            productsSkipped: 0,
+            hasMore: false,
+            requestId: 'req-topups-page-1',
+            requestIds: ['req-topups-page-1', 'req-topups-page-2'],
+        });
+        expect(storedPubg).toMatchObject({
+            providerCode: PROVIDER_CODES.FAZER_CARDS,
+            familyKey: 'TOPUPS',
+            rawName: 'Pubg Mobile - 60 UC',
+            category: 'pubg_mobile',
+            offerId: 'uc_60',
+            isSupported: true,
+            isBlocked: false,
+        });
+        expect(pubgSearch.pagination.total).toBe(2);
+        expect(pubgSearch.products.map((product) => product.rawName)).toEqual(expect.arrayContaining([
+            'Pubg Mobile - 60 UC',
+            'Pubg Mobile - 325 UC',
+        ]));
+        expect(pubgSearch.products.map((product) => product.rawName)).not.toContain('Age of Magic - Lucky Shards');
+        expect(ucSearch.products.map((product) => product.rawName)).toEqual(expect.arrayContaining([
+            'Pubg Mobile - 60 UC',
+            'Pubg Mobile - 325 UC',
+        ]));
+        expect(ucSearch.products.map((product) => product.rawName)).not.toContain('Age of Magic - Lucky Shards');
+        expect(client.request.mock.calls.map(([call]) => call.url)).toEqual([
+            '/topups',
+            '/topups',
+            '/topups/offers',
+            '/topups/offers',
+        ]);
+        expect(client.request.mock.calls[1][0].params).toMatchObject({ cursor: 'page-2', limit: 1 });
     });
 
     it('syncs gift cards as supported gated ProviderProducts without creating Products, Orders, or wallet transactions', async () => {

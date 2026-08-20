@@ -89,6 +89,7 @@ let lastSyncAllSummary = null;
 let steamGiftIndexRefreshInProgress = false;
 
 const STEAM_GIFT_INDEX_RATE_LIMIT_MS = 3 * 60 * 1000;
+const FAZERCARDS_CATALOG_SYNC_MAX_PAGES = 1000;
 
 const buildCustomerVisibilityStatus = (product = {}) => {
     const status = String(product?.status || '').trim().toLowerCase();
@@ -289,30 +290,66 @@ const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOp
         throw new BusinessRuleError('FazerCards provider is inactive.', 'PROVIDER_INACTIVE');
     }
 
-    const page = await adapter.fetchTopupCategoriesPage({ limit: normalizedLimit, cursor });
     const now = new Date();
     let providerProductsCreated = 0;
     let providerProductsUpdated = 0;
     let offersFetched = 0;
     let blocked = 0;
     let unsupported = 0;
+    let productsSkipped = 0;
+    let pagesFetched = 0;
+    let nextCursor = cursor || null;
+    let hasMore = true;
+    let paginationIncomplete = false;
+    let lastMeta = {};
+    const requestIds = [];
     const errors = [];
+    const skipReasons = {};
     const categoryFilter = String(category || '').trim();
-    const categories = categoryFilter
-        ? page.items.filter((item) => getCategoryId(item) === categoryFilter)
-        : page.items;
+    const allCategories = [];
 
-    if (page.malformed) {
-        blocked++;
-        unsupported++;
-        errors.push('FazerCards top-up category response has an unknown shape');
+    while (hasMore && pagesFetched < FAZERCARDS_CATALOG_SYNC_MAX_PAGES) {
+        const page = await adapter.fetchTopupCategoriesPage({ limit: normalizedLimit, cursor: nextCursor });
+        pagesFetched++;
+        if (page.requestId) requestIds.push(page.requestId);
+        lastMeta = page.meta || {};
+        if (page.malformed) {
+            blocked++;
+            unsupported++;
+            productsSkipped++;
+            incrementReason(skipReasons, 'MALFORMED_TOPUP_CATEGORY_PAGE');
+            errors.push('FazerCards top-up category response has an unknown shape');
+        }
+        allCategories.push(...page.items);
+
+        const previousCursor = nextCursor;
+        nextCursor = page.meta?.next_cursor || null;
+        hasMore = Boolean(page.meta?.has_more && nextCursor && nextCursor !== previousCursor);
+        if (page.meta?.has_more && !hasMore) {
+            paginationIncomplete = true;
+            incrementReason(skipReasons, 'PAGINATION_CURSOR_MISSING');
+            errors.push('FazerCards top-up sync could not continue because the response did not include a usable next cursor.');
+        }
     }
+
+    if (pagesFetched >= FAZERCARDS_CATALOG_SYNC_MAX_PAGES && lastMeta?.has_more) {
+        hasMore = true;
+        paginationIncomplete = true;
+        incrementReason(skipReasons, 'MAX_CATALOG_PAGES_REACHED');
+        errors.push('FazerCards top-up sync stopped after the maximum page limit.');
+    }
+
+    const categories = categoryFilter
+        ? allCategories.filter((item) => getCategoryId(item) === categoryFilter)
+        : allCategories;
 
     for (const categoryItem of categories) {
         const categoryId = getCategoryId(categoryItem);
         if (!categoryId) {
             blocked++;
             unsupported++;
+            productsSkipped++;
+            incrementReason(skipReasons, 'MISSING_CATEGORY_ID');
             errors.push('FazerCards top-up category is missing category_id');
             continue;
         }
@@ -321,6 +358,8 @@ const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOp
         try {
             offerPage = await adapter.fetchTopupOffers(categoryId);
         } catch (err) {
+            productsSkipped++;
+            incrementReason(skipReasons, 'TOPUP_OFFERS_FETCH_FAILED');
             errors.push(err.message || `Failed to fetch FazerCards offers for ${categoryId}`);
             continue;
         }
@@ -328,6 +367,7 @@ const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOp
         if (offerPage.malformed) {
             blocked++;
             unsupported++;
+            incrementReason(skipReasons, 'MALFORMED_TOPUP_OFFERS_RESPONSE');
             errors.push(`FazerCards offers response for ${categoryId} has an unknown shape`);
         }
 
@@ -349,6 +389,8 @@ const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOp
             } catch (err) {
                 blocked++;
                 unsupported++;
+                productsSkipped++;
+                incrementReason(skipReasons, 'TOPUP_OFFER_NORMALIZATION_FAILED');
                 errors.push(err.message || 'Failed to normalize FazerCards top-up offer');
             }
         }
@@ -359,18 +401,29 @@ const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOp
         provider: provider.name,
         endpoints: ['GET /topups', 'GET /topups/offers'],
         categoriesFetched: categories.length,
+        pagesFetched,
         offersFetched,
         providerProductsCreated,
         providerProductsUpdated,
         blocked,
         unsupported,
-        nextCursor: page.meta?.next_cursor ?? null,
-        hasMore: Boolean(page.meta?.has_more),
+        productsSkipped,
+        skipReasons,
+        nextCursor: hasMore ? nextCursor : null,
+        hasMore: Boolean(hasMore || paginationIncomplete),
         deleted: 0,
         deactivated: 0,
         errors,
-        meta: page.meta,
-        requestId: page.requestId,
+        meta: mergePagedMeta({
+            meta: lastMeta,
+            limit: normalizedLimit,
+            pagesFetched,
+            itemsFetched: allCategories.length,
+            hasMore: hasMore || paginationIncomplete,
+            nextCursor,
+        }),
+        requestId: requestIds[0] || null,
+        requestIds,
         syncedAt: now,
     };
 };
@@ -398,6 +451,88 @@ const normalizeMeta = (data = {}, params = {}) => ({
     next_cursor: data?.meta?.next_cursor ?? data?.meta?.nextCursor ?? data?.next_cursor ?? data?.nextCursor ?? null,
     has_more: Boolean(data?.meta?.has_more ?? data?.meta?.hasMore ?? data?.has_more ?? data?.hasMore ?? false),
 });
+
+const incrementReason = (target, reason) => {
+    const key = String(reason || 'UNKNOWN_SKIP_REASON');
+    target[key] = (target[key] || 0) + 1;
+};
+
+const extractCatalogItems = (data = {}, keys = ['items']) => {
+    if (Array.isArray(data)) return data;
+    for (const key of keys) {
+        if (Array.isArray(data?.[key])) return data[key];
+        if (Array.isArray(data?.data?.[key])) return data.data[key];
+    }
+    return [];
+};
+
+const mergePagedMeta = ({ meta = {}, limit, pagesFetched, itemsFetched, hasMore, nextCursor }) => ({
+    ...meta,
+    limit: meta.limit ?? limit ?? null,
+    pages_fetched: pagesFetched,
+    items_fetched: itemsFetched,
+    next_cursor: hasMore ? nextCursor : null,
+    has_more: Boolean(hasMore),
+});
+
+const fetchCatalogPathPages = async (adapter, path, {
+    limit,
+    cursor,
+    context,
+    params = {},
+    itemKeys = ['items'],
+    maxPages = FAZERCARDS_CATALOG_SYNC_MAX_PAGES,
+} = {}) => {
+    const items = [];
+    const requestIds = [];
+    let pagesFetched = 0;
+    let nextCursor = cursor || null;
+    let hasMore = true;
+    let paginationIncomplete = false;
+    let lastMeta = {};
+
+    while (hasMore && pagesFetched < maxPages) {
+        const pageParams = {
+            ...params,
+            limit,
+            ...(nextCursor ? { cursor: nextCursor } : {}),
+        };
+        const page = await adapter.fetchCatalogPath(path, pageParams, context);
+        pagesFetched++;
+        if (page.requestId) requestIds.push(page.requestId);
+
+        const pageItems = extractCatalogItems(page.data, itemKeys);
+        items.push(...pageItems);
+        lastMeta = normalizeMeta(page.data, pageParams);
+
+        const previousCursor = nextCursor;
+        nextCursor = lastMeta.next_cursor || null;
+        hasMore = Boolean(lastMeta.has_more && nextCursor && nextCursor !== previousCursor);
+        if (lastMeta.has_more && !hasMore) {
+            paginationIncomplete = true;
+        }
+    }
+
+    const maxPagesReached = pagesFetched >= maxPages && Boolean(lastMeta.has_more);
+    paginationIncomplete = paginationIncomplete || maxPagesReached;
+
+    return {
+        items,
+        pagesFetched,
+        requestIds,
+        requestId: requestIds[0] || null,
+        meta: mergePagedMeta({
+            meta: lastMeta,
+            limit,
+            pagesFetched,
+            itemsFetched: items.length,
+            hasMore: paginationIncomplete,
+            nextCursor,
+        }),
+        maxPagesReached,
+        paginationIncomplete,
+    };
+};
 
 const listFamilies = () => ({
     families: listFazerCardsFamilies().map((family) => ({
@@ -439,7 +574,7 @@ const makeBlockedFamilyProduct = (family, overrides = {}) => ({
 const normalizeGiftCardProduct = (category = {}, offer = {}) => {
     const family = getFazerCardsFamily('GIFTCARDS');
     const categoryId = String(firstValue(category.category_id, category.categoryId, category.id, 'unknown_category'));
-    const cardId = String(firstValue(offer.card_id, offer.cardId, offer.id, 'unknown_card'));
+    const cardId = String(firstValue(offer.card_id, offer.cardId, offer.id, offer.product_id, offer.productId, 'unknown_card'));
     const categoryName = String(firstValue(category.name, category.title, categoryId));
     const offerName = String(firstValue(offer.name, offer.title, cardId));
     const costPrice = parseNumber(firstValue(offer.price_usd, offer.priceUsd, offer.cost_usd), null);
@@ -467,7 +602,7 @@ const normalizeGiftCardProduct = (category = {}, offer = {}) => {
 const normalizeGameKeyProduct = (game = {}, key = {}) => {
     const family = getFazerCardsFamily('GAME_KEYS');
     const gameId = String(firstValue(game.game_id, game.gameId, game.id, 'unknown_game'));
-    const keyId = String(firstValue(key.key_id, key.keyId, key.id, 'unknown_key'));
+    const keyId = String(firstValue(key.key_id, key.keyId, key.id, key.product_id, key.productId, 'unknown_key'));
     const gameName = String(firstValue(game.GameName, game.name, game.title, gameId));
     const keyName = String(firstValue(key.name, key.title, keyId));
     const costPrice = parseNumber(firstValue(key.price_usd, key.priceUsd, key.cost_usd), null);
@@ -677,32 +812,92 @@ const normalizeManualServiceProduct = (category = {}, offer = {}) => {
 const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName } = {}) => {
     const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
     if (family.familyKey === 'GIFTCARDS') {
-        const page = await adapter.fetchCatalogPath('/giftcards', { limit: normalizedLimit, cursor }, 'giftcards');
-        const categories = Array.isArray(page.data?.items) ? page.data.items : [];
+        const page = await fetchCatalogPathPages(adapter, '/giftcards', {
+            limit: normalizedLimit,
+            cursor,
+            context: 'giftcards',
+            itemKeys: ['items', 'categories'],
+        });
+        const categories = page.items;
         const products = [];
+        let productsSkipped = 0;
+        const skipReasons = {};
+        const errors = [];
         for (const category of categories) {
             const categoryId = getCategoryId(category);
-            if (!categoryId) continue;
+            if (!categoryId) {
+                productsSkipped++;
+                incrementReason(skipReasons, 'MISSING_CATEGORY_ID');
+                continue;
+            }
             const cards = await adapter.fetchCatalogPath('/giftcards/cards', { category_id: categoryId }, 'giftcards_cards');
-            const offers = Array.isArray(cards.data?.offers) ? cards.data.offers : [];
+            const offers = extractCatalogItems(cards.data, ['offers', 'cards', 'items']);
             for (const offer of offers) products.push(normalizeGiftCardProduct({ ...category, ...cards.data }, offer));
         }
-        return { products, categoriesFetched: categories.length, offersFetched: products.length, meta: normalizeMeta(page.data, { limit: normalizedLimit }), requestId: page.requestId };
+        if (page.maxPagesReached) {
+            incrementReason(skipReasons, 'MAX_CATALOG_PAGES_REACHED');
+            errors.push('FazerCards Gift Cards sync stopped after the maximum page limit.');
+        } else if (page.paginationIncomplete) {
+            incrementReason(skipReasons, 'PAGINATION_CURSOR_MISSING');
+            errors.push('FazerCards Gift Cards sync could not continue because the response did not include a usable next cursor.');
+        }
+        return {
+            products,
+            categoriesFetched: categories.length,
+            pagesFetched: page.pagesFetched,
+            offersFetched: products.length,
+            productsSkipped,
+            skipReasons,
+            errors,
+            meta: page.meta,
+            requestId: page.requestId,
+            requestIds: page.requestIds,
+        };
     }
 
     if (family.familyKey === 'GAME_KEYS') {
-        const page = await adapter.fetchCatalogPath('/gamekeys', { limit: normalizedLimit, cursor }, 'gamekeys');
-        const games = Array.isArray(page.data?.items) ? page.data.items : [];
+        const page = await fetchCatalogPathPages(adapter, '/gamekeys', {
+            limit: normalizedLimit,
+            cursor,
+            context: 'gamekeys',
+            itemKeys: ['items', 'games'],
+        });
+        const games = page.items;
         const products = [];
+        let productsSkipped = 0;
+        const skipReasons = {};
+        const errors = [];
         for (const game of games) {
             const gameId = String(firstValue(game.game_id, game.gameId, game.id, '')).trim();
-            if (!gameId) continue;
+            if (!gameId) {
+                productsSkipped++;
+                incrementReason(skipReasons, 'MISSING_GAME_ID');
+                continue;
+            }
             const keys = await adapter.fetchCatalogPath('/gamekeys/keys', { game_id: gameId }, 'gamekeys_keys');
-            const keyItems = Array.isArray(keys.data?.keys) ? keys.data.keys : [];
+            const keyItems = extractCatalogItems(keys.data, ['keys', 'items', 'offers']);
             const mergedGame = { ...game, ...keys.data };
             for (const key of keyItems) products.push(normalizeGameKeyProduct(mergedGame, key));
         }
-        return { products, categoriesFetched: games.length, offersFetched: products.length, meta: normalizeMeta(page.data, { limit: normalizedLimit }), requestId: page.requestId };
+        if (page.maxPagesReached) {
+            incrementReason(skipReasons, 'MAX_CATALOG_PAGES_REACHED');
+            errors.push('FazerCards Game Keys sync stopped after the maximum page limit.');
+        } else if (page.paginationIncomplete) {
+            incrementReason(skipReasons, 'PAGINATION_CURSOR_MISSING');
+            errors.push('FazerCards Game Keys sync could not continue because the response did not include a usable next cursor.');
+        }
+        return {
+            products,
+            categoriesFetched: games.length,
+            pagesFetched: page.pagesFetched,
+            offersFetched: products.length,
+            productsSkipped,
+            skipReasons,
+            errors,
+            meta: page.meta,
+            requestId: page.requestId,
+            requestIds: page.requestIds,
+        };
     }
 
     if (family.familyKey === 'STEAM_GIFTS') {
@@ -741,14 +936,26 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName 
     }
 
     if (family.familyKey === 'MANUAL_SERVICES') {
-        const page = await adapter.fetchCatalogPath('/manual-services', {}, 'manual_services');
-        const categories = Array.isArray(page.data?.items) ? page.data.items.slice(0, normalizedLimit) : [];
+        const page = await fetchCatalogPathPages(adapter, '/manual-services', {
+            limit: normalizedLimit,
+            cursor,
+            context: 'manual_services',
+            itemKeys: ['items', 'services'],
+        });
+        const categories = page.items;
         const products = [];
+        let productsSkipped = 0;
+        const skipReasons = {};
+        const errors = [];
         for (const category of categories) {
             const serviceId = String(firstValue(category.id, category.manual_service_id, '')).trim();
-            if (!serviceId) continue;
+            if (!serviceId) {
+                productsSkipped++;
+                incrementReason(skipReasons, 'MISSING_MANUAL_SERVICE_ID');
+                continue;
+            }
             const offers = await adapter.fetchCatalogPath(`/manual-services/${encodeURIComponent(serviceId)}/offers`, {}, 'manual_service_offers');
-            const offerItems = Array.isArray(offers.data?.items) ? offers.data.items : [];
+            const offerItems = extractCatalogItems(offers.data, ['items', 'offers', 'products']);
             const mergedCategory = {
                 ...category,
                 ...(offers.data?.category || {}),
@@ -756,7 +963,25 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName 
             };
             for (const offer of offerItems) products.push(normalizeManualServiceProduct(mergedCategory, offer));
         }
-        return { products, categoriesFetched: categories.length, offersFetched: products.length, meta: {}, requestId: page.requestId };
+        if (page.maxPagesReached) {
+            incrementReason(skipReasons, 'MAX_CATALOG_PAGES_REACHED');
+            errors.push('FazerCards Manual Services sync stopped after the maximum page limit.');
+        } else if (page.paginationIncomplete) {
+            incrementReason(skipReasons, 'PAGINATION_CURSOR_MISSING');
+            errors.push('FazerCards Manual Services sync could not continue because the response did not include a usable next cursor.');
+        }
+        return {
+            products,
+            categoriesFetched: categories.length,
+            pagesFetched: page.pagesFetched,
+            offersFetched: products.length,
+            productsSkipped,
+            skipReasons,
+            errors,
+            meta: page.meta,
+            requestId: page.requestId,
+            requestIds: page.requestIds,
+        };
     }
 
     throw new BusinessRuleError(`FazerCards family '${family.familyKey}' is not syncable yet.`, 'FAZERCARDS_FAMILY_DISCOVERY_UNCONFIRMED');
@@ -777,7 +1002,18 @@ const syncCatalogFamily = async ({ family, limit = 20, cursor, appid, gameName }
     }
 
     const now = new Date();
-    const { products, categoriesFetched, offersFetched, meta, requestId } = await syncFamilyDtos(registryEntry, adapter, { limit, cursor, appid, gameName });
+    const {
+        products,
+        categoriesFetched,
+        pagesFetched = 1,
+        offersFetched,
+        productsSkipped = 0,
+        skipReasons = {},
+        errors = [],
+        meta,
+        requestId,
+        requestIds = requestId ? [requestId] : [],
+    } = await syncFamilyDtos(registryEntry, adapter, { limit, cursor, appid, gameName });
     let providerProductsCreated = 0;
     let providerProductsUpdated = 0;
     for (const dto of products) {
@@ -793,18 +1029,22 @@ const syncCatalogFamily = async ({ family, limit = 20, cursor, appid, gameName }
         displayName: registryEntry.displayName,
         endpoints: registryEntry.catalogEndpoints,
         categoriesFetched,
+        pagesFetched,
         offersFetched,
         providerProductsCreated,
         providerProductsUpdated,
         blocked: products.filter((product) => product.isBlocked).length,
         unsupported: products.filter((product) => !product.isSupported).length,
+        productsSkipped,
+        skipReasons,
         nextCursor: meta?.next_cursor ?? null,
         hasMore: Boolean(meta?.has_more),
         deleted: 0,
         deactivated: 0,
-        errors: [],
+        errors,
         meta,
         requestId,
+        requestIds,
         syncedAt: now,
         catalogOnly: registryEntry.executionAvailable !== true,
     };
@@ -857,11 +1097,14 @@ const emptySyncFamilyResult = (familyKey, overrides = {}) => {
         displayName: family?.displayName || familyKey,
         endpoints: family?.catalogEndpoints || [],
         categoriesFetched: 0,
+        pagesFetched: 0,
         offersFetched: 0,
         providerProductsCreated: 0,
         providerProductsUpdated: 0,
         blocked: 0,
         unsupported: 0,
+        productsSkipped: 0,
+        skipReasons: {},
         nextCursor: null,
         hasMore: false,
         errors: [],
@@ -1080,18 +1323,22 @@ const syncAllCatalogFamilies = async (options = {}, adapterOptions = {}) => {
 
         const totals = Object.values(results).reduce((sum, item) => ({
             categoriesFetched: sum.categoriesFetched + (Number(item.categoriesFetched) || 0),
+            pagesFetched: sum.pagesFetched + (Number(item.pagesFetched) || 0),
             offersFetched: sum.offersFetched + (Number(item.offersFetched) || 0),
             providerProductsCreated: sum.providerProductsCreated + (Number(item.providerProductsCreated) || 0),
             providerProductsUpdated: sum.providerProductsUpdated + (Number(item.providerProductsUpdated) || 0),
             blocked: sum.blocked + (Number(item.blocked) || 0),
             unsupported: sum.unsupported + (Number(item.unsupported) || 0),
+            productsSkipped: sum.productsSkipped + (Number(item.productsSkipped) || 0),
         }), {
             categoriesFetched: 0,
+            pagesFetched: 0,
             offersFetched: 0,
             providerProductsCreated: 0,
             providerProductsUpdated: 0,
             blocked: 0,
             unsupported: 0,
+            productsSkipped: 0,
         });
 
         const summary = {
