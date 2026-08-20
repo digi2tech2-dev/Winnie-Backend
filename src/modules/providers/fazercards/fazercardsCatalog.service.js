@@ -31,7 +31,10 @@ const {
 } = require('./fazercardsStatus.service');
 const { getFazerCardsFamily, listFazerCardsFamilies } = require('./fazercardsFamilies');
 const fazerCardsContracts = require('./fazercardsContracts');
-const { expandFazerCardsSearchTerms } = require('./fazercardsSearchAliases');
+const {
+    buildFazerCardsSearchTermSpecs,
+    normalizeSearchTerm,
+} = require('./fazercardsSearchAliases');
 const { ProviderDeliveredCode, DELIVERY_STATUSES } = require('./providerDeliveredCode.model');
 const { ProviderPilotOrder } = require('./providerPilotOrder.model');
 const { FazerCardsSteamGiftGameIndex } = require('./fazerCardsSteamGiftGameIndex.model');
@@ -1205,27 +1208,46 @@ const buildFamilyFilter = (familyKey) => {
     return { familyKey: normalized };
 };
 
-const PROVIDER_PRODUCT_SEARCH_FIELDS = Object.freeze([
+const PROVIDER_PRODUCT_PRIMARY_SEARCH_FIELDS = Object.freeze([
     'rawName',
     'name',
     'translatedName',
-    'externalProductId',
+]);
+
+const PROVIDER_PRODUCT_MEDIUM_SEARCH_FIELDS = Object.freeze([
     'category',
     'categoryName',
     'familyKey',
     'subCategory',
-    'offerId',
     'offerName',
     'region',
     'platform',
-    'sku',
-    'code',
-    'reference',
     'fulfillmentMode',
     'supportLevel',
     'blockReason',
     'rawPayload.family',
     'rawPayload.kind',
+    'rawPayload.category.name',
+    'rawPayload.category.title',
+    'rawPayload.offer.name',
+    'rawPayload.offer.title',
+    'rawPayload.game.name',
+    'rawPayload.game.GameName',
+    'rawPayload.game.title',
+    'rawPayload.game.platform',
+    'rawPayload.game.region',
+    'rawPayload.key.name',
+    'rawPayload.key.title',
+    'rawPayload.response.name',
+    'rawPayload.response.title',
+]);
+
+const PROVIDER_PRODUCT_LOW_SEARCH_FIELDS = Object.freeze([
+    'externalProductId',
+    'offerId',
+    'sku',
+    'code',
+    'reference',
     'rawPayload.sku',
     'rawPayload.code',
     'rawPayload.reference',
@@ -1288,13 +1310,28 @@ const PROVIDER_PRODUCT_SEARCH_FIELDS = Object.freeze([
     'rawPayload.response.reference',
 ]);
 
+const PROVIDER_PRODUCT_SEARCH_FIELDS = Object.freeze([
+    ...PROVIDER_PRODUCT_PRIMARY_SEARCH_FIELDS,
+    ...PROVIDER_PRODUCT_MEDIUM_SEARCH_FIELDS,
+    ...PROVIDER_PRODUCT_LOW_SEARCH_FIELDS,
+]);
+
+const buildSearchRegex = (termSpec) => {
+    const escaped = escapeRegex(termSpec.pattern || termSpec.term);
+    if (termSpec.short) {
+        return new RegExp(`(^|[^A-Za-z0-9])${escaped}(?=$|[^A-Za-z0-9])`, 'i');
+    }
+    return new RegExp(escaped, 'i');
+};
+
 const buildProviderProductSearchFilter = (search) => {
-    const searchTerms = expandFazerCardsSearchTerms(search);
+    const searchTerms = buildFazerCardsSearchTermSpecs(search)
+        .filter((termSpec) => !termSpec.supportingOnly);
     if (searchTerms.length === 0) return null;
 
     const clauses = [];
-    for (const term of searchTerms) {
-        const regex = new RegExp(escapeRegex(term), 'i');
+    for (const termSpec of searchTerms) {
+        const regex = buildSearchRegex(termSpec);
         for (const field of PROVIDER_PRODUCT_SEARCH_FIELDS) {
             clauses.push({ [field]: regex });
         }
@@ -1302,6 +1339,78 @@ const buildProviderProductSearchFilter = (search) => {
 
     return { $or: clauses };
 };
+
+const getPathValue = (source = {}, path = '') => {
+    if (!source || !path) return undefined;
+    return path.split('.').reduce((value, key) => (
+        value && typeof value === 'object' ? value[key] : undefined
+    ), source);
+};
+
+const getSearchFieldValues = (product = {}, fields = []) => fields
+    .flatMap((field) => {
+        const value = getPathValue(product, field);
+        if (Array.isArray(value)) return value;
+        return [value];
+    })
+    .filter((value) => value !== undefined && value !== null && value !== '')
+    .map((value) => String(value));
+
+const valueMatchesTermSpec = (value, termSpec) => {
+    const normalizedValue = normalizeSearchTerm(value);
+    if (!normalizedValue) return false;
+    if (termSpec.short) {
+        const tokenRegex = new RegExp(`(^|[^A-Za-z0-9])${escapeRegex(termSpec.pattern || termSpec.term)}(?=$|[^A-Za-z0-9])`, 'i');
+        return tokenRegex.test(String(value || ''));
+    }
+    return normalizedValue.includes(termSpec.term);
+};
+
+const anyFieldMatchesTermSpec = (product, fields, termSpec) => (
+    getSearchFieldValues(product, fields).some((value) => valueMatchesTermSpec(value, termSpec))
+);
+
+const scoreFazerCardsSearchResult = (product = {}, searchText = '') => {
+    const termSpecs = buildFazerCardsSearchTermSpecs(searchText);
+    const directTerms = termSpecs.filter((termSpec) => termSpec.direct);
+    const strongAliasTerms = termSpecs.filter((termSpec) => !termSpec.direct && !termSpec.supportingOnly);
+    const supportingTerms = termSpecs.filter((termSpec) => termSpec.supportingOnly);
+    let score = 0;
+
+    for (const termSpec of directTerms) {
+        if (anyFieldMatchesTermSpec(product, PROVIDER_PRODUCT_PRIMARY_SEARCH_FIELDS, termSpec)) score = Math.max(score, 1000);
+        else if (anyFieldMatchesTermSpec(product, PROVIDER_PRODUCT_MEDIUM_SEARCH_FIELDS, termSpec)) score = Math.max(score, 550);
+        else if (anyFieldMatchesTermSpec(product, PROVIDER_PRODUCT_LOW_SEARCH_FIELDS, termSpec)) score = Math.max(score, 250);
+    }
+
+    for (const termSpec of strongAliasTerms) {
+        if (anyFieldMatchesTermSpec(product, PROVIDER_PRODUCT_PRIMARY_SEARCH_FIELDS, termSpec)) score = Math.max(score, 800);
+        else if (anyFieldMatchesTermSpec(product, PROVIDER_PRODUCT_MEDIUM_SEARCH_FIELDS, termSpec)) score = Math.max(score, 450);
+        else if (anyFieldMatchesTermSpec(product, PROVIDER_PRODUCT_LOW_SEARCH_FIELDS, termSpec)) score = Math.max(score, 175);
+    }
+
+    if (score > 0) {
+        for (const termSpec of supportingTerms) {
+            if (anyFieldMatchesTermSpec(product, PROVIDER_PRODUCT_SEARCH_FIELDS, termSpec)) score += 25;
+        }
+    }
+
+    return score;
+};
+
+const sortFazerCardsSearchResults = (products = [], searchText = '') => (
+    products
+        .map((product) => ({
+            product,
+            score: scoreFazerCardsSearchResult(product, searchText),
+        }))
+        .sort((left, right) => (
+            right.score - left.score
+            || String(left.product.rawName || '').localeCompare(String(right.product.rawName || ''))
+            || String(left.product.externalProductId || '').localeCompare(String(right.product.externalProductId || ''))
+        ))
+        .map(({ product }) => product)
+);
 
 const listProviderProducts = async ({
     page = 1,
@@ -1365,15 +1474,28 @@ const listProviderProducts = async ({
     const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
     const skip = (normalizedPage - 1) * normalizedLimit;
 
-    const [products, total] = await Promise.all([
-        ProviderProduct.find(query)
+    let products = [];
+    let total = 0;
+
+    if (hasSearch) {
+        const matchedProducts = await ProviderProduct.find(query)
             .sort({ rawName: 1, externalProductId: 1 })
-            .skip(skip)
-            .limit(normalizedLimit)
             .populate('provider', 'name slug providerCode')
-            .lean(),
-        ProviderProduct.countDocuments(query),
-    ]);
+            .lean();
+        const rankedProducts = sortFazerCardsSearchResults(matchedProducts, searchText);
+        total = rankedProducts.length;
+        products = rankedProducts.slice(skip, skip + normalizedLimit);
+    } else {
+        [products, total] = await Promise.all([
+            ProviderProduct.find(query)
+                .sort({ rawName: 1, externalProductId: 1 })
+                .skip(skip)
+                .limit(normalizedLimit)
+                .populate('provider', 'name slug providerCode')
+                .lean(),
+            ProviderProduct.countDocuments(query),
+        ]);
+    }
 
     if (importedFilter === undefined && products.length) {
         const importedProducts = await Product.find({

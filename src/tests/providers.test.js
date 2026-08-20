@@ -1969,7 +1969,7 @@ describe('FazerCards catalog normalization and raw sync', () => {
             {
                 ...shared,
                 externalProductId: 'FAZER_TOPUP:pubg_mobile:uc_60',
-                rawName: 'PUBG Mobile - 60 UC',
+                rawName: 'Pubg Mobile 60 UC',
                 category: 'pubg_mobile',
                 categoryName: 'PUBG Mobile',
                 offerId: 'uc_60',
@@ -1979,6 +1979,36 @@ describe('FazerCards catalog normalization and raw sync', () => {
                 rawPayload: {
                     category: { category_id: 'pubg_mobile', name: 'PUBG Mobile' },
                     offer: { offer_id: 'uc_60', name: '60 UC', sku: 'SKU-7760' },
+                },
+            },
+            {
+                ...shared,
+                externalProductId: 'FAZER_TOPUP:pubg_mobile:uc_325',
+                rawName: 'Pubg Mobile 325 UC',
+                category: 'pubg_mobile',
+                categoryName: 'PUBG Mobile',
+                offerId: 'uc_325',
+                offerName: '325 UC',
+                familyKey: 'TOPUPS',
+                fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
+                rawPayload: {
+                    category: { category_id: 'pubg_mobile', name: 'PUBG Mobile' },
+                    offer: { offer_id: 'uc_325', name: '325 UC', sku: 'SKU-7325' },
+                },
+            },
+            {
+                ...shared,
+                externalProductId: 'FAZER_TOPUP:pubg_tr:uc_60',
+                rawName: 'PUBG TR 60 UC',
+                category: 'pubg_tr',
+                categoryName: 'PUBG TR',
+                offerId: 'uc_60_tr',
+                offerName: '60 UC',
+                familyKey: 'TOPUPS',
+                fulfillmentMode: FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
+                rawPayload: {
+                    category: { category_id: 'pubg_tr', name: 'PUBG TR' },
+                    offer: { offer_id: 'uc_60_tr', name: '60 UC', sku: 'SKU-TR60' },
                 },
             },
             {
@@ -2028,6 +2058,22 @@ describe('FazerCards catalog normalization and raw sync', () => {
                     offer: { manual_service_id: 'regex_pubg', name: 'Regex Literal.*[Token] PUBG' },
                 },
             },
+            {
+                ...shared,
+                externalProductId: 'FAZER_GAMEKEY:age_of_magic:lucky_shards',
+                rawName: 'Age of Magic - Lucky Shards',
+                category: 'age_of_magic',
+                categoryName: 'Age of Magic',
+                offerId: 'lucky_shards',
+                offerName: 'Lucky Shards',
+                familyKey: 'GAME_KEYS',
+                fulfillmentMode: FULFILLMENT_MODES.CODE_DELIVERY,
+                rawPayload: {
+                    family: 'GAME_KEYS',
+                    game: { game_id: 'age_of_magic', name: 'Age of Magic' },
+                    key: { key_id: 'lucky_shards', name: 'Lucky Shards', sku: 'LUCKY-SHARDS' },
+                },
+            },
         ]);
         const otherProvider = await Provider.create({
             name: 'Other Provider',
@@ -2050,18 +2096,30 @@ describe('FazerCards catalog normalization and raw sync', () => {
         const arabicAlias = await fazerCardsCatalogSvc.listProviderProducts({ search: 'ببجي' });
         const providerCode = await fazerCardsCatalogSvc.listProviderProducts({ search: 'key-code' });
         const sku = await fazerCardsCatalogSvc.listProviderProducts({ search: 'sku-7760' });
+        const ucDirect = await fazerCardsCatalogSvc.listProviderProducts({ search: 'UC' });
         const regexSafe = await fazerCardsCatalogSvc.listProviderProducts({ search: 'Literal.*[Token]' });
         const paged = await fazerCardsCatalogSvc.listProviderProducts({ search: 'pubg', page: 2, limit: 2 });
         const emptySearchBrowsing = await fazerCardsCatalogSvc.listProviderProducts({ search: '', familyKey: 'TOPUPS' });
 
-        expect(globalDefault.products.map((product) => product.familyKey).sort()).toEqual([
+        expect(globalDefault.products.map((product) => product.familyKey)).toEqual(expect.arrayContaining([
             'GAME_KEYS',
             'GIFTCARDS',
             'MANUAL_SERVICES',
             'TOPUPS',
-        ]);
-        expect(explicitTopups.products).toHaveLength(1);
-        expect(explicitTopups.products[0]).toMatchObject({ familyKey: 'TOPUPS', externalProductId: 'FAZER_TOPUP:pubg_mobile:uc_60' });
+        ]));
+        expect(globalDefault.products.slice(0, 3).map((product) => product.rawName)).toEqual(expect.arrayContaining([
+            'Pubg Mobile 60 UC',
+            'Pubg Mobile 325 UC',
+            'PUBG TR 60 UC',
+        ]));
+        expect(globalDefault.products.map((product) => product.rawName)).not.toContain('Age of Magic - Lucky Shards');
+        expect(explicitTopups.products).toHaveLength(3);
+        expect(explicitTopups.products.every((product) => product.familyKey === 'TOPUPS')).toBe(true);
+        expect(explicitTopups.products.map((product) => product.externalProductId)).toEqual(expect.arrayContaining([
+            'FAZER_TOPUP:pubg_mobile:uc_60',
+            'FAZER_TOPUP:pubg_mobile:uc_325',
+            'FAZER_TOPUP:pubg_tr:uc_60',
+        ]));
         expect(pubgmAlias.products.map((product) => product.externalProductId)).toEqual(expect.arrayContaining([
             'FAZER_TOPUP:pubg_mobile:uc_60',
             'FAZER_GIFTCARD:pubgm:wallet',
@@ -2074,11 +2132,16 @@ describe('FazerCards catalog normalization and raw sync', () => {
         expect(providerCode.products[0].externalProductId).toBe('FAZER_GAMEKEY:playerunknown:pack_1');
         expect(sku.products).toHaveLength(1);
         expect(sku.products[0].externalProductId).toBe('FAZER_TOPUP:pubg_mobile:uc_60');
+        expect(ucDirect.products.map((product) => product.rawName)).toEqual(expect.arrayContaining([
+            'Pubg Mobile 60 UC',
+            'PUBG TR 60 UC',
+        ]));
+        expect(ucDirect.products.map((product) => product.rawName)).not.toContain('Age of Magic - Lucky Shards');
         expect(regexSafe.products).toHaveLength(1);
         expect(regexSafe.products[0].externalProductId).toBe('FAZER_MANUAL:regex_pubg');
-        expect(paged.pagination).toMatchObject({ page: 2, limit: 2, total: 4, pages: 2 });
+        expect(paged.pagination).toMatchObject({ page: 2, limit: 2, total: 6, pages: 3 });
         expect(paged.products).toHaveLength(2);
-        expect(emptySearchBrowsing.products).toHaveLength(1);
+        expect(emptySearchBrowsing.products).toHaveLength(3);
         expect(globalDefault.products.map((product) => product.externalProductId)).not.toContain('other-pubg');
     });
 

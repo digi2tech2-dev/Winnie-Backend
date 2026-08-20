@@ -48,26 +48,61 @@ const aliasIndex = SEARCH_ALIAS_GROUPS.reduce((index, group) => {
     return index;
 }, new Map());
 
-const expandFazerCardsSearchTerms = (search) => {
+const isShortSearchTerm = (term) => normalizeSearchTerm(term).replace(/\s+/g, '').length <= 3;
+
+const buildFazerCardsSearchTermSpecs = (search) => {
     const raw = String(search || '').trim();
     const normalized = normalizeSearchTerm(raw);
     if (!raw && !normalized) return [];
 
-    const terms = new Set([raw, normalized].filter(Boolean));
+    const specs = new Map();
+    const addTerm = (term, reason = 'alias') => {
+        const normalizedTerm = normalizeSearchTerm(term);
+        if (!normalizedTerm) return;
+        const key = normalizedTerm;
+        const existing = specs.get(key) || {
+            direct: false,
+            pattern: term,
+            raw: term,
+            reason,
+            short: isShortSearchTerm(normalizedTerm),
+            supportingOnly: false,
+            term: normalizedTerm,
+        };
+        const wasDirect = existing.direct;
+        existing.direct = existing.direct || reason === 'direct';
+        if (reason === 'direct' && !wasDirect) existing.pattern = term;
+        existing.reason = existing.direct ? 'direct' : existing.reason;
+        existing.raw = existing.raw || term;
+        specs.set(key, existing);
+    };
+
+    addTerm(raw, 'direct');
+    addTerm(normalized, 'direct');
+
     const directAliases = aliasIndex.get(normalized) || [];
-    directAliases.forEach((term) => terms.add(term));
+    directAliases.forEach((term) => addTerm(term, 'alias'));
 
     for (const [alias, group] of aliasIndex.entries()) {
         if (normalized.includes(alias) || alias.includes(normalized)) {
-            group.forEach((term) => terms.add(term));
+            group.forEach((term) => addTerm(term, 'alias'));
         }
     }
 
-    return [...terms].filter(Boolean);
+    return [...specs.values()].map((spec) => ({
+        ...spec,
+        supportingOnly: spec.short && !spec.direct && !isShortSearchTerm(normalized),
+    }));
+};
+
+const expandFazerCardsSearchTerms = (search) => {
+    return buildFazerCardsSearchTermSpecs(search).map((spec) => spec.term);
 };
 
 module.exports = {
     SEARCH_ALIAS_GROUPS,
+    buildFazerCardsSearchTermSpecs,
     expandFazerCardsSearchTerms,
+    isShortSearchTerm,
     normalizeSearchTerm,
 };
