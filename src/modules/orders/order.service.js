@@ -7,6 +7,7 @@ const { ProviderProduct, FULFILLMENT_MODES } = require('../providers/providerPro
 const { ProviderDeliveredCode, DELIVERY_STATUSES } = require('../providers/fazercards/providerDeliveredCode.model');
 const { PROVIDER_CODES } = require('../providers/provider.constants');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('./order.model');
+const { Review } = require('../reviews/review.model');
 const { getNextSequence } = require('./counter.model');
 const { debitWalletAtomic, refundWalletAtomic } = require('../wallet/wallet.service');
 const {
@@ -339,6 +340,34 @@ const attachDeliveryMetadata = async (orders) => {
     const serialized = list.map((order) =>
         serializeOrderWithDeliveryMetadata(order, countByOrderId.get(String(order._id)) || 0)
     );
+    return Array.isArray(orders) ? serialized : serialized[0];
+};
+
+const attachReviewMetadata = async (orders, userId = null) => {
+    const list = Array.isArray(orders) ? orders : [orders].filter(Boolean);
+    if (list.length === 0) return orders;
+
+    const orderIds = list.map((order) => order._id).filter(Boolean);
+    if (orderIds.length === 0) return orders;
+
+    const query = { orderId: { $in: orderIds } };
+    if (userId) query.userId = userId;
+
+    const reviews = await Review.find(query)
+        .select('orderId status createdAt')
+        .lean();
+    const reviewByOrderId = new Map(reviews.map((review) => [String(review.orderId), review]));
+
+    const serialized = list.map((order) => {
+        const plain = order && typeof order.toObject === 'function' ? order.toObject() : { ...(order || {}) };
+        const review = reviewByOrderId.get(String(plain._id));
+        plain.hasReview = Boolean(review);
+        plain.reviewSubmitted = Boolean(review);
+        plain.reviewStatus = review?.status || null;
+        plain.reviewedAt = review?.createdAt || null;
+        return plain;
+    });
+
     return Array.isArray(orders) ? serialized : serialized[0];
 };
 
@@ -1458,8 +1487,9 @@ const listOrdersForUser = async (userId, { page = 1, limit = 20 } = {}) => {
         Order.countDocuments({ userId }),
     ]);
     const ordersWithDelivery = await attachDeliveryMetadata(orders);
+    const ordersWithReviews = await attachReviewMetadata(ordersWithDelivery, userId);
     return {
-        orders: ordersWithDelivery.map(sanitizeOrderForCustomer),
+        orders: ordersWithReviews.map(sanitizeOrderForCustomer),
         pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     };
 };
@@ -1489,7 +1519,8 @@ const getOrderById = async (orderId, userId = null) => {
 
     if (!order) throw new NotFoundError('Order');
     const orderWithDelivery = await attachDeliveryMetadata(order);
-    return userId ? sanitizeOrderForCustomer(orderWithDelivery) : orderWithDelivery;
+    const orderWithReview = userId ? await attachReviewMetadata(orderWithDelivery, userId) : orderWithDelivery;
+    return userId ? sanitizeOrderForCustomer(orderWithReview) : orderWithDelivery;
 };
 
 module.exports = {

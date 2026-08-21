@@ -128,11 +128,17 @@ describe('reviews API', () => {
 
     it('authenticated customer can submit one pending review for a completed owned order', async () => {
         const { customer, order } = await setupCompletedOrder();
+        const token = tokenFor(customer);
+
+        const beforeResponse = await fetch(`${baseUrl}/me/orders/${order._id}`, {
+            headers: { authorization: `Bearer ${token}` },
+        });
+        const beforeBody = await beforeResponse.json();
 
         const response = await fetch(`${baseUrl}/reviews`, {
             method: 'POST',
             headers: {
-                authorization: `Bearer ${tokenFor(customer)}`,
+                authorization: `Bearer ${token}`,
                 'content-type': 'application/json',
             },
             body: JSON.stringify({
@@ -151,6 +157,20 @@ describe('reviews API', () => {
         expect(review).toBeTruthy();
         expect(review.comment).toBe('Real verified purchase review');
         expect(review.verifiedPurchase).toBe(true);
+
+        const afterResponse = await fetch(`${baseUrl}/me/orders/${order._id}`, {
+            headers: { authorization: `Bearer ${token}` },
+        });
+        const afterBody = await afterResponse.json();
+
+        expect(beforeResponse.status).toBe(200);
+        expect(beforeBody.data.hasReview).toBe(false);
+        expect(beforeBody.data.reviewSubmitted).toBe(false);
+        expect(afterResponse.status).toBe(200);
+        expect(afterBody.data.hasReview).toBe(true);
+        expect(afterBody.data.reviewSubmitted).toBe(true);
+        expect(afterBody.data.reviewStatus).toBe(REVIEW_STATUS.PENDING);
+        expect(JSON.stringify(afterBody)).not.toContain('Real verified purchase review');
     });
 
     it('rejects duplicate reviews for the same order', async () => {
