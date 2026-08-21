@@ -228,4 +228,54 @@ describe('reviews API', () => {
         expect(publicBody.data.reviews[0].comment).toBe('Ready for approval');
         expect(publicBody.data.reviews[0].isFeatured).toBe(true);
     });
+
+    it('admin reviews list supports safe moderation fields and featured filtering', async () => {
+        const { customer, group, product, order } = await setupCompletedOrder();
+        const secondOrder = await createCompletedOrderFor(customer, product);
+        const admin = await createAdmin({ groupId: group._id });
+
+        await Review.create([
+            {
+                userId: customer._id,
+                orderId: order._id,
+                productId: product._id,
+                rating: 5,
+                comment: 'Featured admin review',
+                status: REVIEW_STATUS.APPROVED,
+                isFeatured: true,
+            },
+            {
+                userId: customer._id,
+                orderId: secondOrder._id,
+                productId: product._id,
+                rating: 3,
+                comment: 'Ordinary admin review',
+                status: REVIEW_STATUS.PENDING,
+                isFeatured: false,
+            },
+        ]);
+
+        const response = await fetch(`${baseUrl}/admin/reviews?featured=true`, {
+            headers: { authorization: `Bearer ${tokenFor(admin)}` },
+        });
+        const body = await response.json();
+        const rawBody = JSON.stringify(body);
+
+        expect(response.status).toBe(200);
+        expect(body.data.reviews).toHaveLength(1);
+        expect(body.data.reviews[0]).toMatchObject({
+            comment: 'Featured admin review',
+            status: REVIEW_STATUS.APPROVED,
+            isFeatured: true,
+            verifiedCustomer: true,
+        });
+        expect(body.data.reviews[0].id).toBeTruthy();
+        expect(body.data.reviews[0].reviewer.displayName).toBeTruthy();
+        expect(rawBody).not.toContain('private-reviewer@test.com');
+        expect(rawBody).not.toContain('+15551234567');
+        expect(rawBody).not.toContain(String(customer._id));
+        expect(rawBody).not.toContain(String(order._id));
+        expect(rawBody).not.toContain(String(secondOrder._id));
+        expect(rawBody).not.toContain('Ordinary admin review');
+    });
 });

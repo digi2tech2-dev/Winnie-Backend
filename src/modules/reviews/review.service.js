@@ -61,6 +61,31 @@ const toPublicReview = (review) => {
     };
 };
 
+const toAdminReview = (review) => {
+    const plain = typeof review.toObject === 'function' ? review.toObject() : review;
+    const user = plain.userId && typeof plain.userId === 'object' ? plain.userId : {};
+    const product = plain.productId && typeof plain.productId === 'object' ? plain.productId : {};
+
+    return {
+        id: String(plain._id || plain.id),
+        rating: normalizeRating(plain.rating),
+        comment: plain.comment || '',
+        status: plain.status,
+        createdAt: plain.createdAt,
+        updatedAt: plain.updatedAt,
+        moderatedAt: plain.moderatedAt || null,
+        verifiedPurchase: plain.verifiedPurchase === true,
+        verifiedCustomer: plain.verifiedPurchase === true,
+        isFeatured: plain.isFeatured === true,
+        reviewer: {
+            displayName: maskDisplayName(user.name || user.username),
+        },
+        product: {
+            name: product.name || '',
+        },
+    };
+};
+
 const getPublicReviews = async ({ limit, page, featured } = {}) => {
     const safeLimit = clampLimit(limit);
     const safePage = clampPage(page);
@@ -132,17 +157,20 @@ const submitReview = async ({ user, orderId, rating, comment }) => {
     return review;
 };
 
-const listAdminReviews = async ({ status, page, limit } = {}) => {
+const listAdminReviews = async ({ status, page, limit, featured } = {}) => {
     const safeLimit = clampLimit(limit, 50, 50);
     const safePage = clampPage(page);
     const query = {};
     if (status && Object.values(REVIEW_STATUS).includes(String(status).toUpperCase())) {
         query.status = String(status).toUpperCase();
     }
+    if (featured === true || featured === 'true') {
+        query.isFeatured = true;
+    }
 
     const [reviews, total] = await Promise.all([
         Review.find(query)
-            .populate('userId', 'name email username')
+            .populate('userId', 'name username')
             .populate('productId', 'name')
             .sort({ createdAt: -1 })
             .skip((safePage - 1) * safeLimit)
@@ -152,7 +180,7 @@ const listAdminReviews = async ({ status, page, limit } = {}) => {
     ]);
 
     return {
-        reviews,
+        reviews: reviews.map(toAdminReview),
         pagination: {
             page: safePage,
             limit: safeLimit,
@@ -181,7 +209,11 @@ const moderateReview = async ({ reviewId, status, isFeatured, moderatorId }) => 
     review.moderatedAt = new Date();
 
     await review.save();
-    return review;
+    await review.populate([
+        { path: 'userId', select: 'name username' },
+        { path: 'productId', select: 'name' },
+    ]);
+    return toAdminReview(review);
 };
 
 module.exports = {
@@ -190,4 +222,5 @@ module.exports = {
     listAdminReviews,
     moderateReview,
     toPublicReview,
+    toAdminReview,
 };
