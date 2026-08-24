@@ -6,6 +6,13 @@ const service = require('./whatsappNotification.service');
 let interval = null;
 let running = false;
 
+const getPollIntervalMs = () => {
+    const configuredSeconds = Number(
+        process.env.WHATSAPP_QUEUE_POLL_INTERVAL_SECONDS || config.openwa.queuePollIntervalSeconds || 10
+    );
+    return Math.max(1, Number.isFinite(configuredSeconds) ? configuredSeconds : 10) * 1000;
+};
+
 const tick = async () => {
     if (running) return;
     running = true;
@@ -23,8 +30,7 @@ const tick = async () => {
 
 const start = () => {
     if (config.env === 'test' || interval) return;
-    const delayMs = Math.max(10, Number(config.openwa.retryDelaySeconds || 60)) * 1000;
-    interval = setInterval(tick, delayMs);
+    interval = setInterval(tick, getPollIntervalMs());
     void tick();
 };
 
@@ -37,4 +43,4 @@ const stop = () => {
     });
 };
 
-module.exports = { start, stop, tick };
+module.exports = { getPollIntervalMs, start, stop, tick };

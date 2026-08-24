@@ -179,6 +179,7 @@ const config = {
         sendTimeoutMs: parseInt(process.env.OPENWA_SEND_TIMEOUT_MS || '15000', 10),
         maxRetries: parseInt(process.env.OPENWA_MAX_RETRIES || '3', 10),
         retryDelaySeconds: parseInt(process.env.OPENWA_RETRY_DELAY_SECONDS || '60', 10),
+        queuePollIntervalSeconds: parseInt(process.env.WHATSAPP_QUEUE_POLL_INTERVAL_SECONDS || '10', 10),
         workerLockTtlMs: parseInt(process.env.WHATSAPP_WORKER_LOCK_TTL_MS || '120000', 10),
         workerHeartbeatMs: parseInt(process.env.WHATSAPP_WORKER_HEARTBEAT_MS || '30000', 10),
         processingStaleAfterMs: parseInt(process.env.WHATSAPP_PROCESSING_STALE_AFTER_MS || '600000', 10),

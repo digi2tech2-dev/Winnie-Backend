@@ -48,6 +48,8 @@ const RETRYABLE_TRANSPORT_CODES = new Set([
     'ECONNABORTED',
     'ESOCKETTIMEDOUT',
 ]);
+const MAX_PROVIDER_ERROR_MESSAGE_LENGTH = 500;
+const MAX_PROVIDER_REQUEST_ID_LENGTH = 200;
 
 let processingPendingMessages = false;
 let processPendingAgain = false;
@@ -82,12 +84,91 @@ const pickKnownPreferences = (source = {}, defaults) => Object.keys(defaults).re
     return acc;
 }, {});
 
-const rawErrorMetadata = (error) => ({
-    statusCode: error.response?.status || null,
-    body: error.response?.data || null,
-    code: error.code || null,
-    message: error.message || null,
-});
+const redactDiagnosticValue = (message, value) => {
+    const normalizedValue = String(value || '').trim();
+    if (!normalizedValue) return message;
+    return message.split(normalizedValue).join('[REDACTED]');
+};
+
+const sanitizeProviderErrorMessage = (error, log = null) => {
+    const providerMessage = error.response?.data?.message || error.message || 'OpenWA request failed.';
+    let sanitized = String(providerMessage)
+        .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
+        .replace(/\b(authorization|x-api-key|api[_-]?key|access[_-]?token|token|session(?:[_ -]?id)?)\b\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]');
+
+    const messageFragments = String(log?.message || '')
+        .split(/\r?\n/)
+        .map((fragment) => fragment.trim())
+        .filter(Boolean);
+    sanitized = [log?.message, ...messageFragments].reduce(
+        (value, messageFragment) => redactDiagnosticValue(value, messageFragment),
+        sanitized
+    );
+    sanitized = redactDiagnosticValue(sanitized, log?.phone);
+    sanitized = redactDiagnosticValue(sanitized, log?.chatId);
+
+    return sanitized.slice(0, MAX_PROVIDER_ERROR_MESSAGE_LENGTH);
+};
+
+const getSafeProviderRequestId = (headers = {}) => {
+    const headerNames = ['x-request-id', 'request-id', 'x-correlation-id'];
+    for (const headerName of headerNames) {
+        const directValue = typeof headers?.get === 'function'
+            ? headers.get(headerName)
+            : headers?.[headerName] || headers?.[headerName.toUpperCase()];
+        const value = directValue || Object.entries(headers || {}).find(([name]) => (
+            String(name).toLowerCase() === headerName
+        ))?.[1];
+        const normalized = String(Array.isArray(value) ? value[0] : value || '')
+            .trim()
+            .replace(/[^a-zA-Z0-9._:-]/g, '')
+            .slice(0, MAX_PROVIDER_REQUEST_ID_LENGTH);
+        if (normalized) return normalized;
+    }
+    return null;
+};
+
+const buildSafeOpenWaErrorDiagnostics = (error, log) => {
+    const statusCode = error.response?.status || null;
+    const providerErrorMessage = sanitizeProviderErrorMessage(error, log);
+    const errorCode = String(error.code || '').trim().slice(0, 80) || null;
+    const fingerprintSource = [statusCode || 'NO_HTTP_STATUS', errorCode || 'NO_ERROR_CODE', providerErrorMessage].join('|');
+
+    return {
+        attemptedAt: new Date(),
+        httpStatus: statusCode,
+        providerErrorMessage,
+        providerRequestId: getSafeProviderRequestId(error.response?.headers),
+        errorFingerprint: crypto.createHash('sha256').update(fingerprintSource).digest('hex').slice(0, 32),
+    };
+};
+
+const serializeOpenWaMetadata = (openwa = {}) => {
+    const diagnostics = openwa?.diagnostics;
+    return {
+        deliveryState: openwa?.deliveryState || null,
+        statusCode: openwa?.statusCode || null,
+        ...(diagnostics ? {
+            diagnostics: {
+                attemptedAt: diagnostics.attemptedAt || null,
+                httpStatus: diagnostics.httpStatus || null,
+                providerErrorMessage: diagnostics.providerErrorMessage || null,
+                providerRequestId: diagnostics.providerRequestId || null,
+                errorFingerprint: diagnostics.errorFingerprint || null,
+            },
+        } : {}),
+    };
+};
+
+const serializeNotificationLog = (log) => {
+    const doc = log?.toObject ? log.toObject() : log;
+    if (!doc?.metadata || typeof doc.metadata !== 'object') return doc;
+    const { openwa, ...metadata } = doc.metadata;
+    return {
+        ...doc,
+        metadata: openwa ? { ...metadata, openwa: serializeOpenWaMetadata(openwa) } : metadata,
+    };
+};
 
 const classifyOpenWaSendError = (error) => {
     const statusCode = error.response?.status || null;
@@ -723,9 +804,7 @@ const processOneLog = async (log) => {
         log.metadata = {
             ...(log.metadata || {}),
             openwa: {
-                ...(log.metadata?.openwa || {}),
                 statusCode: 200,
-                body: result.raw || null,
                 deliveryState: 'SENT',
             },
         };
@@ -734,10 +813,11 @@ const processOneLog = async (log) => {
         return log;
     } catch (error) {
         const classification = classifyOpenWaSendError(error);
+        const diagnostics = buildSafeOpenWaErrorDiagnostics(error, log);
         const nextRetryCount = Number(log.retryCount || 0) + 1;
         log.retryCount = nextRetryCount;
         log.status = classification.status;
-        log.errorMessage = error.response?.data?.message || error.message || 'OpenWA request failed.';
+        log.errorMessage = diagnostics.providerErrorMessage;
         log.reason = classification.reason;
         if (classification.sentAt) {
             log.sentAt = new Date();
@@ -745,11 +825,11 @@ const processOneLog = async (log) => {
         log.metadata = {
             ...(log.metadata || {}),
             openwa: {
-                ...(log.metadata?.openwa || {}),
-                ...rawErrorMetadata(error),
+                statusCode: diagnostics.httpStatus,
                 deliveryState: classification.status === LOG_STATUSES.SENT_UNCONFIRMED
                     ? 'SENT_UNCONFIRMED'
                     : classification.retryable ? 'RETRY_PENDING' : 'FAILED',
+                ...(classification.status === LOG_STATUSES.SENT_UNCONFIRMED ? { diagnostics } : {}),
             },
         };
         log.markModified('metadata');
@@ -924,7 +1004,7 @@ const listLogs = async ({ status, eventType, recipientType, page = 1, limit = 20
     ]);
 
     return {
-        logs,
+        logs: logs.map(serializeNotificationLog),
         pagination: {
             page: safePage,
             limit: safeLimit,

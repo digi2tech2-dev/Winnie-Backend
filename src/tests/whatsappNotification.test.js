@@ -14,6 +14,7 @@ const config = require('../config/config');
 const orderService = require('../modules/orders/order.service');
 const groupRequestService = require('../modules/groupRequests/groupRequest.service');
 const whatsappService = require('../modules/notifications/whatsapp/whatsappNotification.service');
+const whatsappQueue = require('../modules/notifications/whatsapp/whatsappNotification.queue');
 const queueLockService = require('../modules/notifications/whatsapp/whatsappQueueLock.service');
 const {
     notifyDepositRequested,
@@ -63,6 +64,7 @@ beforeEach(async () => {
     process.env.OPENWA_MAX_RETRIES = '3';
     process.env.OPENWA_RETRY_DELAY_SECONDS = '1';
     process.env.WHATSAPP_QUEUE_ENABLED = 'true';
+    process.env.WHATSAPP_QUEUE_POLL_INTERVAL_SECONDS = '10';
     process.env.WHATSAPP_WORKER_LOCK_TTL_MS = '60000';
     process.env.WHATSAPP_WORKER_HEARTBEAT_MS = '10000';
     process.env.WHATSAPP_PROCESSING_STALE_AFTER_MS = '600000';
@@ -83,6 +85,7 @@ afterEach(() => {
     delete process.env.OPENWA_MAX_RETRIES;
     delete process.env.OPENWA_RETRY_DELAY_SECONDS;
     delete process.env.WHATSAPP_QUEUE_ENABLED;
+    delete process.env.WHATSAPP_QUEUE_POLL_INTERVAL_SECONDS;
     delete process.env.WHATSAPP_WORKER_LOCK_TTL_MS;
     delete process.env.WHATSAPP_WORKER_HEARTBEAT_MS;
     delete process.env.WHATSAPP_PROCESSING_STALE_AFTER_MS;
@@ -356,7 +359,10 @@ describe('WhatsApp notifications', () => {
         expect(await WhatsAppNotificationLog.countDocuments({ status: 'pending' })).toBe(1);
     });
 
-    it('sends pending messages through OpenWA with API key and marks failures retryable', async () => {
+    it('sends pending messages through OpenWA with API key and uses a separate poll interval', async () => {
+        process.env.WHATSAPP_QUEUE_POLL_INTERVAL_SECONDS = '2';
+        expect(whatsappQueue.getPollIntervalMs()).toBe(2000);
+
         const log = await whatsappService.queueWhatsAppNotification({
             recipientType: 'customer',
             phone: '+201011111111',
@@ -388,6 +394,59 @@ describe('WhatsApp notifications', () => {
         expect(failed.status).toBe('retry_pending');
         expect(failed.retryCount).toBe(1);
         expect(failed.nextRetryAt).toBeInstanceOf(Date);
+    });
+
+    it('uses the dedicated poll interval to schedule worker ticks', async () => {
+        const originalEnv = config.env;
+        const processSpy = jest.spyOn(whatsappService, 'processPendingMessages').mockResolvedValue([]);
+        const releaseSpy = jest.spyOn(whatsappService, 'releaseQueueLock').mockResolvedValue(true);
+        config.env = 'development';
+        process.env.WHATSAPP_QUEUE_POLL_INTERVAL_SECONDS = '2';
+        jest.useFakeTimers();
+
+        try {
+            whatsappQueue.start();
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(processSpy).toHaveBeenCalledTimes(1);
+            expect(processSpy).toHaveBeenLastCalledWith({ limit: 25 });
+
+            jest.advanceTimersByTime(1999);
+            await Promise.resolve();
+            expect(processSpy).toHaveBeenCalledTimes(1);
+
+            jest.advanceTimersByTime(1);
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(processSpy).toHaveBeenCalledTimes(2);
+        } finally {
+            whatsappQueue.stop();
+            config.env = originalEnv;
+            jest.useRealTimers();
+            processSpy.mockRestore();
+            releaseSpy.mockRestore();
+        }
+    });
+
+    it('uses the retry delay rather than the poll interval for retryable OpenWA failures', async () => {
+        process.env.OPENWA_RETRY_DELAY_SECONDS = '7';
+        process.env.WHATSAPP_QUEUE_POLL_INTERVAL_SECONDS = '2';
+        axios.post.mockRejectedValueOnce(new Error('timeout'));
+        const startedAt = Date.now();
+
+        const log = await whatsappService.queueWhatsAppNotification({
+            recipientType: 'admin',
+            phone: '+201022222222',
+            eventType: 'test_message',
+            payload: { message: 'retry delay check' },
+        });
+
+        await whatsappService.processPendingMessages({ limit: 1 });
+        const retryPending = await WhatsAppNotificationLog.findById(log._id).lean();
+
+        expect(retryPending.status).toBe('retry_pending');
+        expect(retryPending.nextRetryAt.getTime()).toBeGreaterThanOrEqual(startedAt + 6900);
+        expect(retryPending.nextRetryAt.getTime()).toBeLessThan(startedAt + 8000);
     });
 
     it('allows only one worker to acquire the WhatsApp queue lock', async () => {
@@ -491,15 +550,21 @@ describe('WhatsApp notifications', () => {
     });
 
     it('marks OpenWA HTTP 500 as sent_unconfirmed and does not auto-retry', async () => {
-        const error = new Error('Cannot read properties of undefined (reading id)');
-        error.response = { status: 500, data: { message: error.message } };
+        const secret = 'provider-secret-value';
+        const messagePayload = 'maybe delivered';
+        const error = new Error(`Cannot read properties of undefined (reading id): ${messagePayload}; Authorization: Bearer ${secret}`);
+        error.response = {
+            status: 500,
+            data: { message: error.message },
+            headers: { 'x-request-id': 'openwa-request-123' },
+        };
         axios.post.mockRejectedValueOnce(error);
 
         const log = await whatsappService.queueWhatsAppNotification({
             recipientType: 'customer',
             phone: '+201011111111',
             eventType: 'test_message',
-            payload: { message: 'maybe delivered' },
+            payload: { message: messagePayload },
         });
 
         await whatsappService.processPendingMessages({ limit: 1 });
@@ -508,8 +573,22 @@ describe('WhatsApp notifications', () => {
         expect(sentUnconfirmed.reason).toBe('OPENWA_UNKNOWN_DELIVERY');
         expect(sentUnconfirmed.nextRetryAt).toBeNull();
         expect(sentUnconfirmed.metadata.openwa.statusCode).toBe(500);
+        expect(sentUnconfirmed.metadata.openwa.diagnostics.attemptedAt).toBeInstanceOf(Date);
+        expect(sentUnconfirmed.metadata.openwa.diagnostics.httpStatus).toBe(500);
+        expect(sentUnconfirmed.metadata.openwa.diagnostics.providerRequestId).toBe('openwa-request-123');
+        expect(sentUnconfirmed.metadata.openwa.diagnostics.errorFingerprint).toMatch(/^[a-f0-9]{32}$/);
+        expect(sentUnconfirmed.errorMessage).not.toContain(secret);
+        expect(sentUnconfirmed.errorMessage).not.toContain(messagePayload);
+        expect(sentUnconfirmed.metadata.openwa.body).toBeUndefined();
+
+        const listed = await whatsappService.listLogs({ status: 'sent_unconfirmed' });
+        expect(JSON.stringify(listed.logs[0].metadata.openwa)).not.toContain(secret);
+        expect(JSON.stringify(listed.logs[0].metadata.openwa)).not.toContain(messagePayload);
+        expect(listed.logs[0].metadata.openwa.diagnostics.providerRequestId).toBe('openwa-request-123');
 
         axios.post.mockClear();
+        await whatsappService.processPendingMessages({ limit: 5 });
+        await whatsappService.processPendingMessages({ limit: 5 });
         await whatsappService.processPendingMessages({ limit: 5 });
         expect(axios.post).not.toHaveBeenCalled();
     });
