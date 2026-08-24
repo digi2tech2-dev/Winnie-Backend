@@ -9,12 +9,19 @@ const FAZERCARDS_ERROR_CODES = Object.freeze({
     DISABLED: 'FAZERCARDS_DISABLED',
     MISSING_API_KEY: 'FAZERCARDS_MISSING_API_KEY',
     HTTP_ERROR: 'FAZERCARDS_HTTP_ERROR',
+    RATE_LIMITED: 'FAZERCARDS_RATE_LIMITED',
     TIMEOUT: 'FAZERCARDS_TIMEOUT',
     NETWORK_ERROR: 'FAZERCARDS_NETWORK_ERROR',
     MALFORMED_RESPONSE: 'FAZERCARDS_MALFORMED_RESPONSE',
     SUBSCRIPTION_INACTIVE: 'FAZERCARDS_SUBSCRIPTION_INACTIVE',
     STATUS_ENDPOINT_UNCONFIRMED: 'FAZERCARDS_STATUS_ENDPOINT_UNCONFIRMED',
 });
+
+// This is intentionally process-local: it protects every FazerCards client in
+// this API process without persisting provider state or changing credentials.
+const FAZERCARDS_RATE_LIMIT_SAFETY_BUFFER_SECONDS = 10;
+const DEFAULT_RATE_LIMIT_RETRY_SECONDS = 60;
+let fazerCardsCooldownUntil = 0;
 
 const SENSITIVE_KEY_PATTERN = /api[-_]?key|authorization|token|secret|password|credential/i;
 
@@ -67,6 +74,33 @@ const parseRetryAfterSeconds = (...values) => {
         }
     }
     return null;
+};
+
+const getFazerCardsCooldownRemainingSeconds = () => Math.max(
+    0,
+    Math.ceil((fazerCardsCooldownUntil - Date.now()) / 1000)
+);
+
+const rememberFazerCardsCooldown = (upstreamRetryAfterSeconds) => {
+    const upstreamSeconds = Math.max(
+        1,
+        Math.ceil(Number(upstreamRetryAfterSeconds) || DEFAULT_RATE_LIMIT_RETRY_SECONDS)
+    );
+    const cooldownSeconds = upstreamSeconds + FAZERCARDS_RATE_LIMIT_SAFETY_BUFFER_SECONDS;
+    fazerCardsCooldownUntil = Math.max(fazerCardsCooldownUntil, Date.now() + (cooldownSeconds * 1000));
+    return getFazerCardsCooldownRemainingSeconds();
+};
+
+const makeFazerCardsCooldownError = () => {
+    const retryAfterSeconds = getFazerCardsCooldownRemainingSeconds();
+    const error = new BusinessRuleError(
+        'FazerCards requests are temporarily rate-limited. Try again after the cooldown.',
+        FAZERCARDS_ERROR_CODES.RATE_LIMITED
+    );
+    error.statusCode = 429;
+    error.httpStatus = 429;
+    error.retryAfterSeconds = retryAfterSeconds || rememberFazerCardsCooldown(DEFAULT_RATE_LIMIT_RETRY_SECONDS);
+    return error;
 };
 
 const safeMessage = (err, secrets = []) => (
@@ -125,12 +159,14 @@ const wrapFazerCardsError = (err, context = 'request', secrets = []) => {
     wrapped.safeUpstreamMessage = safeMessage(err, secrets);
     wrapped.providerBody = sanitizePayload(err.response?.data ?? null, 0, secrets);
     if (status === 429) {
-        wrapped.retryAfterSeconds = parseRetryAfterSeconds(
+        const upstreamRetryAfterSeconds = parseRetryAfterSeconds(
             getHeaderValue(err.response?.headers, 'retry-after'),
             err.response?.data?.retryAfterSeconds,
             err.response?.data?.retry_after,
             err.response?.data?.retryAfter
         );
+        wrapped.code = FAZERCARDS_ERROR_CODES.RATE_LIMITED;
+        wrapped.retryAfterSeconds = rememberFazerCardsCooldown(upstreamRetryAfterSeconds);
     }
     return wrapped;
 };
@@ -172,6 +208,9 @@ class FazerCardsClient {
 
     async request(method, path, { params, data, headers, context } = {}) {
         try {
+            if (getFazerCardsCooldownRemainingSeconds() > 0) {
+                throw makeFazerCardsCooldownError();
+            }
             const response = await this.http.request({ method, url: path, params, data, headers });
             const safeData = sanitizePayload(response.data, 0, this.redactSecrets);
             if (getProviderCode(safeData) === 'subscription_inactive') {
@@ -404,6 +443,8 @@ class FazerCardsClient {
 module.exports = {
     FazerCardsClient,
     FAZERCARDS_ERROR_CODES,
+    FAZERCARDS_RATE_LIMIT_SAFETY_BUFFER_SECONDS,
+    getFazerCardsCooldownRemainingSeconds,
     sanitizePayload,
     redactKnownSecrets,
     wrapFazerCardsError,

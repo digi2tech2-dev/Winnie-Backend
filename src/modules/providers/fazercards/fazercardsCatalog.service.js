@@ -24,7 +24,10 @@ const {
     normalizeTopupOrderStatus,
     normalizeRequiredFields,
 } = require('./fazercards.adapter');
-const { sanitizePayload } = require('./fazercards.client');
+const {
+    sanitizePayload,
+    FAZERCARDS_RATE_LIMIT_SAFETY_BUFFER_SECONDS,
+} = require('./fazercards.client');
 const {
     NORMALIZED_STATUSES,
     parseFazerCardsOrderPayload,
@@ -90,6 +93,11 @@ let steamGiftIndexRefreshInProgress = false;
 
 const STEAM_GIFT_INDEX_RATE_LIMIT_MS = 3 * 60 * 1000;
 const FAZERCARDS_CATALOG_SYNC_MAX_PAGES = 1000;
+
+const isFazerCardsRateLimitError = (error) => (
+    Number(error?.statusCode || error?.httpStatus) === 429
+    || String(error?.code || '').toUpperCase() === 'FAZERCARDS_RATE_LIMITED'
+);
 
 const buildCustomerVisibilityStatus = (product = {}) => {
     const status = String(product?.status || '').trim().toLowerCase();
@@ -358,6 +366,7 @@ const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOp
         try {
             offerPage = await adapter.fetchTopupOffers(categoryId);
         } catch (err) {
+            if (isFazerCardsRateLimitError(err)) throw err;
             productsSkipped++;
             incrementReason(skipReasons, 'TOPUP_OFFERS_FETCH_FAILED');
             errors.push(err.message || `Failed to fetch FazerCards offers for ${categoryId}`);
@@ -1147,7 +1156,7 @@ const refreshSteamGiftGameIndex = async (options = {}, adapterOptions = {}) => {
         const retryAfterSeconds = Math.max(
             1,
             Math.ceil((STEAM_GIFT_INDEX_RATE_LIMIT_MS - (now.getTime() - new Date(latest.indexedAt).getTime())) / 1000)
-        );
+        ) + FAZERCARDS_RATE_LIMIT_SAFETY_BUFFER_SECONDS;
         const error = new BusinessRuleError('Steam Gifts index refresh is rate-limited. Try again later.', 'FAZERCARDS_STEAM_GIFTS_INDEX_RATE_LIMITED');
         error.statusCode = 429;
         error.retryAfterSeconds = retryAfterSeconds;
@@ -1313,6 +1322,7 @@ const syncAllCatalogFamilies = async (options = {}, adapterOptions = {}) => {
                     familyKey,
                 };
             } catch (err) {
+                if (isFazerCardsRateLimitError(err)) throw err;
                 const safeError = {
                     code: err.code || 'FAZERCARDS_SYNC_FAMILY_FAILED',
                     message: err.safeUpstreamMessage || err.message || 'FazerCards family sync failed.',
