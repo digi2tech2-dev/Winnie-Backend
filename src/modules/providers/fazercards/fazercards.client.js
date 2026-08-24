@@ -51,6 +51,24 @@ const extractRequestId = (data, headers = {}) => (
     || null
 );
 
+const getHeaderValue = (headers = {}, name) => {
+    if (!headers) return null;
+    if (typeof headers.get === 'function') return headers.get(name) || headers.get(String(name).toLowerCase());
+    return headers[name] || headers[String(name).toLowerCase()] || null;
+};
+
+const parseRetryAfterSeconds = (...values) => {
+    for (const value of values) {
+        const parsed = Number.parseInt(String(value ?? ''), 10);
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
+        const retryAt = Date.parse(String(value ?? ''));
+        if (Number.isFinite(retryAt) && retryAt > Date.now()) {
+            return Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
+        }
+    }
+    return null;
+};
+
 const safeMessage = (err, secrets = []) => (
     redactKnownSecrets(
         err.response?.data?.error
@@ -106,6 +124,14 @@ const wrapFazerCardsError = (err, context = 'request', secrets = []) => {
     wrapped.requestId = extractRequestId(err.response?.data, err.response?.headers);
     wrapped.safeUpstreamMessage = safeMessage(err, secrets);
     wrapped.providerBody = sanitizePayload(err.response?.data ?? null, 0, secrets);
+    if (status === 429) {
+        wrapped.retryAfterSeconds = parseRetryAfterSeconds(
+            getHeaderValue(err.response?.headers, 'retry-after'),
+            err.response?.data?.retryAfterSeconds,
+            err.response?.data?.retry_after,
+            err.response?.data?.retryAfter
+        );
+    }
     return wrapped;
 };
 

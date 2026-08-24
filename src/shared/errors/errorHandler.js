@@ -67,10 +67,18 @@ const handleJWTError = () =>
 const handleJWTExpiredError = () =>
     new AppError('Your token has expired. Please log in again.', 401, 'TOKEN_EXPIRED');
 
+const applyRetryAfter = (err, res) => {
+    const retryAfterSeconds = Number.parseInt(String(err.retryAfterSeconds ?? ''), 10);
+    if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds <= 0) return null;
+    res.set('Retry-After', String(retryAfterSeconds));
+    return retryAfterSeconds;
+};
+
 /**
  * Send error response in development (full stack trace)
  */
 const sendErrorDev = (err, res) => {
+    const retryAfterSeconds = applyRetryAfter(err, res);
     res.status(err.statusCode).json({
         success: false,
         code: err.code,
@@ -78,6 +86,7 @@ const sendErrorDev = (err, res) => {
         support: err.support || undefined,
         details: err.details || undefined,
         errors: err.errors || undefined,
+        retryAfterSeconds: retryAfterSeconds || undefined,
         stack: err.stack,
     });
 };
@@ -87,6 +96,7 @@ const sendErrorDev = (err, res) => {
  */
 const sendErrorProd = (err, res) => {
     if (err.isOperational) {
+        const retryAfterSeconds = applyRetryAfter(err, res);
         // Known, safe-to-expose error
         return res.status(err.statusCode).json({
             success: false,
@@ -95,6 +105,7 @@ const sendErrorProd = (err, res) => {
             support: err.support || undefined,
             details: err.details || undefined,
             errors: err.errors || undefined,
+            retryAfterSeconds: retryAfterSeconds || undefined,
         });
     }
 

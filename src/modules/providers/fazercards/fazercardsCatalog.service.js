@@ -1144,7 +1144,14 @@ const refreshSteamGiftGameIndex = async (options = {}, adapterOptions = {}) => {
         .lean();
     const now = new Date();
     if (latest?.indexedAt && now.getTime() - new Date(latest.indexedAt).getTime() < STEAM_GIFT_INDEX_RATE_LIMIT_MS) {
-        throw new BusinessRuleError('Steam Gifts index refresh is rate-limited. Try again later.', 'FAZERCARDS_STEAM_GIFTS_INDEX_RATE_LIMITED');
+        const retryAfterSeconds = Math.max(
+            1,
+            Math.ceil((STEAM_GIFT_INDEX_RATE_LIMIT_MS - (now.getTime() - new Date(latest.indexedAt).getTime())) / 1000)
+        );
+        const error = new BusinessRuleError('Steam Gifts index refresh is rate-limited. Try again later.', 'FAZERCARDS_STEAM_GIFTS_INDEX_RATE_LIMITED');
+        error.statusCode = 429;
+        error.retryAfterSeconds = retryAfterSeconds;
+        throw error;
     }
 
     steamGiftIndexRefreshInProgress = true;
