@@ -31,6 +31,7 @@ const adminWhatsAppRecipientSchema = new mongoose.Schema(
             financialDayClosed: { type: Boolean, default: ADMIN_DEFAULT_EVENT_PREFERENCES.financialDayClosed },
             largeWalletAdjustment: { type: Boolean, default: ADMIN_DEFAULT_EVENT_PREFERENCES.largeWalletAdjustment },
             providerBalanceWarning: { type: Boolean, default: ADMIN_DEFAULT_EVENT_PREFERENCES.providerBalanceWarning },
+            subAgentRequestSubmitted: { type: Boolean, default: ADMIN_DEFAULT_EVENT_PREFERENCES.subAgentRequestSubmitted },
         },
         createdBy: {
             type: mongoose.Schema.Types.ObjectId,

@@ -40,6 +40,7 @@ const ADMIN_DEFAULT_EVENT_PREFERENCES = Object.freeze({
     financialDayClosed: true,
     largeWalletAdjustment: true,
     providerBalanceWarning: true,
+    subAgentRequestSubmitted: true,
 });
 
 const ADMIN_EVENT_PREFERENCE_BY_TYPE = Object.freeze({
@@ -51,6 +52,7 @@ const ADMIN_EVENT_PREFERENCE_BY_TYPE = Object.freeze({
     financial_day_closed: 'financialDayClosed',
     large_wallet_adjustment: 'largeWalletAdjustment',
     provider_balance_warning: 'providerBalanceWarning',
+    sub_agent_request_submitted: 'subAgentRequestSubmitted',
 });
 
 const WHATSAPP_PERMISSIONS = Object.freeze({

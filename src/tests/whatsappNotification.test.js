@@ -12,6 +12,7 @@ const axios = require('axios');
 const app = require('../app');
 const config = require('../config/config');
 const orderService = require('../modules/orders/order.service');
+const groupRequestService = require('../modules/groupRequests/groupRequest.service');
 const whatsappService = require('../modules/notifications/whatsapp/whatsappNotification.service');
 const queueLockService = require('../modules/notifications/whatsapp/whatsappQueueLock.service');
 const {
@@ -25,6 +26,7 @@ const { AdminWhatsAppRecipient } = require('../modules/notifications/whatsapp/ad
 const { normalizePhoneNumber } = require('../modules/notifications/whatsapp/phoneNormalizer');
 const { User } = require('../modules/users/user.model');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('../modules/orders/order.model');
+const { GROUP_REQUEST_TYPES } = require('../modules/groupRequests/groupRequest.constants');
 const {
     connectTestDB,
     disconnectTestDB,
@@ -116,7 +118,118 @@ const waitFor = async (predicate, { timeoutMs = 1000, intervalMs = 20 } = {}) =>
     throw new Error('Timed out waiting for condition.');
 };
 
+const subAgentProofImage = {
+    proofImagePath: 'uploads/sub-agent-requests/whatsapp-test.jpg',
+    proofImageUrl: '/uploads/sub-agent-requests/whatsapp-test.jpg',
+    proofImageOriginalName: 'whatsapp-test.jpg',
+    proofImageMimeType: 'image/jpeg',
+    proofImageSize: 12345,
+};
+
 describe('WhatsApp notifications', () => {
+    it('queues one admin WhatsApp event after a sub-agent request commits, but not for a group change request', async () => {
+        const { customer, group } = await setup();
+        const secondCustomer = await createCustomer({ groupId: group._id });
+        const targetGroup = await createGroup({ name: `WhatsApp-target-${Date.now()}-${Math.random()}` });
+        await AdminWhatsAppRecipient.create({
+            name: 'Sub-agent reviewer',
+            phone: '201011111111',
+            enabled: true,
+        });
+
+        const subAgentRequest = await groupRequestService.createGroupRequest({
+            userId: customer._id,
+            requestType: GROUP_REQUEST_TYPES.SUB_AGENT,
+            proofImage: subAgentProofImage,
+        });
+
+        await waitFor(() => WhatsAppNotificationLog.countDocuments({
+            eventType: 'sub_agent_request_submitted',
+            relatedEntityId: subAgentRequest.id,
+        }).then((count) => count === 1));
+
+        const log = await WhatsAppNotificationLog.findOne({
+            eventType: 'sub_agent_request_submitted',
+            relatedEntityId: subAgentRequest.id,
+        }).lean();
+        expect(log.recipientType).toBe('admin');
+        expect(log.message).not.toContain(customer.email);
+        if (customer.phone) expect(log.message).not.toContain(customer.phone);
+
+        await groupRequestService.createGroupRequest({
+            userId: secondCustomer._id,
+            requestType: GROUP_REQUEST_TYPES.GROUP_CHANGE,
+            requestedGroupId: targetGroup._id,
+        });
+
+        expect(await WhatsAppNotificationLog.countDocuments({ eventType: 'sub_agent_request_submitted' })).toBe(1);
+    });
+
+    it('queues the sub-agent event only for enabled recipients with the event preference enabled', async () => {
+        const relatedEntityId = new mongoose.Types.ObjectId();
+        const enabledRecipient = await AdminWhatsAppRecipient.create({
+            name: 'Enabled reviewer',
+            phone: '201011111111',
+            enabled: true,
+        });
+        const disabledRecipient = await AdminWhatsAppRecipient.create({
+            name: 'Disabled reviewer',
+            phone: '201022222222',
+            enabled: false,
+        });
+        const optedOutRecipient = await AdminWhatsAppRecipient.create({
+            name: 'Opted-out reviewer',
+            phone: '201033333333',
+            enabled: true,
+            eventPreferences: { subAgentRequestSubmitted: false },
+        });
+
+        const logs = await whatsappService.queueAdminEvent({
+            eventType: 'sub_agent_request_submitted',
+            relatedEntityType: 'group_change_request',
+            relatedEntityId,
+            idempotencyScope: 'created',
+        });
+
+        expect(logs).toHaveLength(2);
+        expect(logs.filter((log) => log.status === 'pending')).toHaveLength(1);
+        expect(logs.find((log) => log.status === 'skipped')).toMatchObject({ reason: 'EVENT_DISABLED' });
+        expect(logs.map((log) => String(log.adminRecipientId))).toEqual(expect.arrayContaining([
+            String(enabledRecipient._id),
+            String(optedOutRecipient._id),
+        ]));
+        expect(logs.map((log) => String(log.adminRecipientId))).not.toContain(String(disabledRecipient._id));
+        expect(await WhatsAppNotificationLog.countDocuments({
+            eventType: 'sub_agent_request_submitted',
+            relatedEntityId,
+        })).toBe(2);
+    });
+
+    it('deduplicates repeated sub-agent request side effects per recipient', async () => {
+        const relatedEntityId = new mongoose.Types.ObjectId();
+        await AdminWhatsAppRecipient.create({
+            name: 'Reviewer',
+            phone: '201011111111',
+            enabled: true,
+        });
+
+        const event = {
+            eventType: 'sub_agent_request_submitted',
+            relatedEntityType: 'group_change_request',
+            relatedEntityId,
+            idempotencyScope: 'created',
+        };
+        await Promise.all([
+            whatsappService.queueAdminEvent(event),
+            whatsappService.queueAdminEvent(event),
+        ]);
+
+        expect(await WhatsAppNotificationLog.countDocuments({
+            eventType: 'sub_agent_request_submitted',
+            relatedEntityId,
+        })).toBe(1);
+    });
+
     it('normalizes supported phone formats for OpenWA chat ids', () => {
         expect(normalizePhoneNumber('01012345678').chatId).toBe('201012345678@c.us');
         expect(normalizePhoneNumber('+201012345678').phone).toBe('201012345678');

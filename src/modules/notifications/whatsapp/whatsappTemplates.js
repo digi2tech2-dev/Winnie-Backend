@@ -184,6 +184,14 @@ const renderTemplate = (eventType, payload = {}) => {
                 'Winnie',
             ],
         },
+        sub_agent_request_submitted: {
+            title: 'طلب وكيل فرعي جديد',
+            message: [
+                'يوجد طلب وكيل فرعي جديد يحتاج إلى مراجعة.',
+                'يرجى فتح لوحة الإدارة لمراجعة الطلب.',
+                'Winnie',
+            ],
+        },
         verification_code: {
             title: 'كود تفعيل واتساب',
             message: [

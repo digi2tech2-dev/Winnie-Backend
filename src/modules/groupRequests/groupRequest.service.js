@@ -22,6 +22,7 @@ const {
     safeCreateNotification,
     safeCreateAdminActorNotifications,
 } = require('../notifications/notification.service');
+const whatsappService = require('../notifications/whatsapp/whatsappNotification.service');
 const { NOTIFICATION_TYPES, NOTIFICATION_PRIORITIES } = require('../notifications/notification.model');
 const {
     NotFoundError,
@@ -320,6 +321,20 @@ const emitCreatedSideEffects = ({ request, userId, actor = {} }) => {
             userId: toIdString(userId),
         },
     });
+
+    if (request.requestType === GROUP_REQUEST_TYPES.SUB_AGENT) {
+        void whatsappService.queueAdminEvent({
+            eventType: 'sub_agent_request_submitted',
+            relatedEntityType: 'group_change_request',
+            relatedEntityId: requestObjectId,
+            idempotencyScope: 'created',
+        }).catch((error) => {
+            const message = error.message || '';
+            if (!message.includes('client was closed') && !message.includes('connection was destroyed')) {
+                console.error('[WhatsAppNotifications] Failed to queue sub-agent request notification:', message);
+            }
+        });
+    }
 };
 
 const emitCanceledSideEffects = ({ request, userId, actor = {} }) => {
