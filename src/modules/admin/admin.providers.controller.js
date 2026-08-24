@@ -9,6 +9,7 @@ const xenaSvc = require('../providers/xena/xena.service');
 const xenaProductSvc = require('../providers/xena/xenaProduct.service');
 const xenaTargetSvc = require('../providers/xena/xenaTarget.service');
 const fazerCardsCatalogSvc = require('../providers/fazercards/fazercardsCatalog.service');
+const fazerCardsCatalogSyncJobSvc = require('../providers/fazercards/fazercardsCatalogSyncJob.service');
 const fazerCardsWebhookSvc = require('../providers/fazercards/fazercards.webhook.service');
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendCreated, sendPaginated } = require('../../shared/utils/apiResponse');
@@ -179,8 +180,19 @@ const syncFazerCardsCatalogAll = catchAsync(async (req, res) => {
     sendSuccess(res, data, 'FazerCards catalog families synced');
 });
 
+const startFazerCardsCatalogSyncJobs = catchAsync(async (req, res) => {
+    const jobs = await fazerCardsCatalogSyncJobSvc.startCatalogSyncJobs(req.body);
+    sendSuccess(res, { jobs }, 'FazerCards catalog sync queued');
+});
+
+const getFazerCardsCatalogSyncJobs = catchAsync(async (req, res) => {
+    const jobs = await fazerCardsCatalogSyncJobSvc.getCatalogSyncJobs();
+    sendSuccess(res, { jobs }, 'FazerCards catalog sync jobs retrieved');
+});
+
 const getFazerCardsCatalogSyncStatus = catchAsync(async (req, res) => {
     const data = await fazerCardsCatalogSvc.getCatalogSyncStatus();
+    data.jobs = await fazerCardsCatalogSyncJobSvc.getCatalogSyncJobs();
     sendSuccess(res, data, 'FazerCards catalog sync status retrieved');
 });
 
@@ -417,6 +429,8 @@ module.exports = {
     listFazerCardsCatalogFamilies,
     syncFazerCardsCatalogFamily,
     syncFazerCardsCatalogAll,
+    startFazerCardsCatalogSyncJobs,
+    getFazerCardsCatalogSyncJobs,
     getFazerCardsCatalogSyncStatus,
     getFazerCardsCatalogSummary,
     refreshFazerCardsSteamGiftGameIndex,

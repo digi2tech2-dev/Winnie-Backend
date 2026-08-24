@@ -8,6 +8,7 @@ const config = require('./config/config');
 const connectDB = require('./config/database');
 const fulfillmentJob = require('./modules/orders/fulfillmentJob');
 const syncProvidersJob = require('./modules/providers/syncProvidersJob');
+const fazerCardsCatalogSyncJob = require('./modules/providers/fazercards/fazercardsCatalogSync.job');
 const whatsappNotificationQueue = require('./modules/notifications/whatsapp/whatsappNotification.queue');
 const {
     sendReadySignal,
@@ -18,6 +19,7 @@ const {
 const backgroundJobs = [
     fulfillmentJob,
     syncProvidersJob,
+    fazerCardsCatalogSyncJob,
     whatsappNotificationQueue,
 ];
 

@@ -197,6 +197,8 @@ router.get('/providers/fazercards/contracts/:familyKey', authorizeRoles('ADMIN')
 router.post('/providers/fazercards/catalog/backfill-families', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.backfillFazerCardsCatalogFamilies);
 router.post('/providers/fazercards/catalog/sync-page', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsCatalogSync), providersCtrl.syncFazerCardsCatalogPage);
 router.post('/providers/fazercards/catalog/sync-all', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsCatalogSyncAll), providersCtrl.syncFazerCardsCatalogAll);
+router.post('/providers/fazercards/catalog/sync-jobs', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsCatalogJobStart), providersCtrl.startFazerCardsCatalogSyncJobs);
+router.get('/providers/fazercards/catalog/sync-jobs', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.getFazerCardsCatalogSyncJobs);
 router.get('/providers/fazercards/catalog/sync-status', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.getFazerCardsCatalogSyncStatus);
 router.post('/providers/fazercards/catalog/sync-family', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsCatalogSyncFamily), providersCtrl.syncFazerCardsCatalogFamily);
 router.post('/providers/fazercards/steam-gifts/index/refresh', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.refreshFazerCardsSteamGiftGameIndex);

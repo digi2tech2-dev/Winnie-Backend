@@ -290,7 +290,7 @@ const mergeCategoryFromOfferResponse = (category, offerPage) => ({
 
 const getCategoryId = (category = {}) => String(category.category_id || category.categoryId || category.id || '').trim();
 
-const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOptions = {}) => {
+const syncCatalogPage = async ({ limit = 100, cursor, category, maxPages = FAZERCARDS_CATALOG_SYNC_MAX_PAGES } = {}, adapterOptions = {}) => {
     const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
     const { provider, adapter } = await getConfiguredAdapter(adapterOptions);
 
@@ -316,7 +316,9 @@ const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOp
     const categoryFilter = String(category || '').trim();
     const allCategories = [];
 
-    while (hasMore && pagesFetched < FAZERCARDS_CATALOG_SYNC_MAX_PAGES) {
+    const normalizedMaxPages = Math.min(Math.max(parseInt(maxPages, 10) || FAZERCARDS_CATALOG_SYNC_MAX_PAGES, 1), FAZERCARDS_CATALOG_SYNC_MAX_PAGES);
+
+    while (hasMore && pagesFetched < normalizedMaxPages) {
         const page = await adapter.fetchTopupCategoriesPage({ limit: normalizedLimit, cursor: nextCursor });
         pagesFetched++;
         if (page.requestId) requestIds.push(page.requestId);
@@ -340,11 +342,13 @@ const syncCatalogPage = async ({ limit = 100, cursor, category } = {}, adapterOp
         }
     }
 
-    if (pagesFetched >= FAZERCARDS_CATALOG_SYNC_MAX_PAGES && lastMeta?.has_more) {
+    if (pagesFetched >= normalizedMaxPages && lastMeta?.has_more) {
         hasMore = true;
         paginationIncomplete = true;
-        incrementReason(skipReasons, 'MAX_CATALOG_PAGES_REACHED');
-        errors.push('FazerCards top-up sync stopped after the maximum page limit.');
+        incrementReason(skipReasons, normalizedMaxPages === FAZERCARDS_CATALOG_SYNC_MAX_PAGES ? 'MAX_CATALOG_PAGES_REACHED' : 'PAGE_BATCH_LIMIT_REACHED');
+        errors.push(normalizedMaxPages === FAZERCARDS_CATALOG_SYNC_MAX_PAGES
+            ? 'FazerCards top-up sync stopped after the maximum page limit.'
+            : 'FazerCards top-up sync paused after its page batch limit.');
     }
 
     const categories = categoryFilter
@@ -818,7 +822,7 @@ const normalizeManualServiceProduct = (category = {}, offer = {}) => {
     });
 };
 
-const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName } = {}) => {
+const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName, maxPages } = {}) => {
     const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
     if (family.familyKey === 'GIFTCARDS') {
         const page = await fetchCatalogPathPages(adapter, '/giftcards', {
@@ -826,6 +830,7 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName 
             cursor,
             context: 'giftcards',
             itemKeys: ['items', 'categories'],
+            maxPages,
         });
         const categories = page.items;
         const products = [];
@@ -870,6 +875,7 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName 
             cursor,
             context: 'gamekeys',
             itemKeys: ['items', 'games'],
+            maxPages,
         });
         const games = page.items;
         const products = [];
@@ -950,6 +956,7 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName 
             cursor,
             context: 'manual_services',
             itemKeys: ['items', 'services'],
+            maxPages,
         });
         const categories = page.items;
         const products = [];
@@ -996,13 +1003,13 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName 
     throw new BusinessRuleError(`FazerCards family '${family.familyKey}' is not syncable yet.`, 'FAZERCARDS_FAMILY_DISCOVERY_UNCONFIRMED');
 };
 
-const syncCatalogFamily = async ({ family, limit = 20, cursor, appid, gameName } = {}, adapterOptions = {}) => {
+const syncCatalogFamily = async ({ family, limit = 20, cursor, appid, gameName, maxPages } = {}, adapterOptions = {}) => {
     const registryEntry = getFazerCardsFamily(family);
     if (!registryEntry || registryEntry.familyKey === 'UNKNOWN') {
         throw new BusinessRuleError('Unknown FazerCards catalog family.', 'FAZERCARDS_UNKNOWN_FAMILY');
     }
     if (registryEntry.familyKey === 'TOPUPS') {
-        return syncCatalogPage({ limit, cursor }, adapterOptions);
+        return syncCatalogPage({ limit, cursor, maxPages }, adapterOptions);
     }
 
     const { provider, adapter } = await getConfiguredAdapter(adapterOptions);
@@ -1022,7 +1029,7 @@ const syncCatalogFamily = async ({ family, limit = 20, cursor, appid, gameName }
         meta,
         requestId,
         requestIds = requestId ? [requestId] : [],
-    } = await syncFamilyDtos(registryEntry, adapter, { limit, cursor, appid, gameName });
+    } = await syncFamilyDtos(registryEntry, adapter, { limit, cursor, appid, gameName, maxPages });
     let providerProductsCreated = 0;
     let providerProductsUpdated = 0;
     for (const dto of products) {

@@ -506,6 +506,16 @@ const fazerCardsCatalogSyncAllSchema = Joi.object({
     includeSteamGifts: Joi.boolean().default(false),
 });
 
+const fazerCardsCatalogJobStartSchema = Joi.object({
+    family: Joi.string().trim().uppercase().valid(
+        'TOPUPS', 'GIFTCARDS', 'GAME_KEYS', 'STEAM_TOPUP', 'TELEGRAM', 'MANUAL_SERVICES'
+    ).optional(),
+    families: Joi.array().items(Joi.string().trim().uppercase().valid(
+        'TOPUPS', 'GIFTCARDS', 'GAME_KEYS', 'STEAM_TOPUP', 'TELEGRAM', 'MANUAL_SERVICES'
+    )).unique().min(1).optional(),
+    limit: Joi.number().integer().min(1).max(100).default(100),
+}).xor('family', 'families');
+
 const fazerCardsSteamGiftIndexSearchSchema = Joi.object({
     q: Joi.string().trim().max(120).allow('', null),
     limit: Joi.number().integer().min(1).max(50).default(20),
@@ -798,6 +808,7 @@ module.exports = {
         fazerCardsCatalogSync: fazerCardsCatalogSyncSchema,
         fazerCardsCatalogSyncFamily: fazerCardsCatalogSyncFamilySchema,
         fazerCardsCatalogSyncAll: fazerCardsCatalogSyncAllSchema,
+        fazerCardsCatalogJobStart: fazerCardsCatalogJobStartSchema,
         fazerCardsSteamGiftIndexSearch: fazerCardsSteamGiftIndexSearchSchema,
         fazerCardsTopupDryRun: fazerCardsTopupDryRunSchema,
         fazerCardsUnifiedDryRun: fazerCardsUnifiedDryRunSchema,
