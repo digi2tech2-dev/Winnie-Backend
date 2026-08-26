@@ -1359,6 +1359,13 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         }
     }
 
+    // A Xena create-recharge response is only acceptance, never delivery
+    // confirmation. Keep it pollable even if an upstream payload says success.
+    if (isXenaOrder && newStatus === ORDER_STATUS.COMPLETED) {
+        result = { ...result, providerStatus: 'Pending' };
+        newStatus = ORDER_STATUS.PROCESSING;
+    }
+
     // ── Persist the provider response onto the order ───────────────────────────
     if (newStatus === ORDER_STATUS.CANCELED || newStatus === ORDER_STATUS.PARTIAL) {
         const preparedOrder = await Order.findByIdAndUpdate(

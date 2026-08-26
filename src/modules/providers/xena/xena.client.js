@@ -16,6 +16,7 @@ const XENA_ERROR_CODES = Object.freeze({
     OTP_EXPIRED: 'XENA_OTP_EXPIRED',
     TARGET_INVALID: 'XENA_TARGET_INVALID',
     BALANCE_UNAVAILABLE: 'XENA_BALANCE_UNAVAILABLE',
+    INSUFFICIENT_PROVIDER_BALANCE: 'XENA_INSUFFICIENT_PROVIDER_BALANCE',
     RATE_LIMITED: 'XENA_RATE_LIMITED',
     VERIFICATION_UNAVAILABLE: 'XENA_VERIFICATION_UNAVAILABLE',
     RECHARGE_ID_MISSING: 'XENA_RECHARGE_ID_MISSING',
@@ -57,6 +58,8 @@ const safeMessageForCode = (code) => {
             return 'Xena target UID is invalid.';
         case XENA_ERROR_CODES.BALANCE_UNAVAILABLE:
             return 'Xena balance is currently unavailable.';
+        case XENA_ERROR_CODES.INSUFFICIENT_PROVIDER_BALANCE:
+            return 'Xena provider balance is insufficient for this recharge.';
         case XENA_ERROR_CODES.RATE_LIMITED:
             return 'Xena rate limit reached. Please retry later.';
         case XENA_ERROR_CODES.VERIFICATION_UNAVAILABLE:
@@ -93,6 +96,13 @@ const mapXenaErrorCode = (err, context) => {
     const providerMessage = String(err.response?.data?.message || err.response?.data?.error || err.message || '').toUpperCase();
     const providerSignal = `${providerCode} ${providerMessage}`;
     const isTimeout = err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '');
+
+    if (
+        (context === 'recharge' || context === 'rechargeStatus')
+        && /(?:INSUFFICIENT|NOT[ _-]?ENOUGH|OUT[ _-]?OF|NO)[ _-]*(?:PROVIDER[ _-]*)?(?:BALANCE|STOCK|FUNDS|CREDIT)|(?:BALANCE|STOCK|FUNDS|CREDIT)[ _-]*(?:INSUFFICIENT|EXHAUSTED)/.test(providerSignal)
+    ) {
+        return XENA_ERROR_CODES.INSUFFICIENT_PROVIDER_BALANCE;
+    }
 
     if (status === 429 || providerCode.includes('RATE')) {
         return XENA_ERROR_CODES.RATE_LIMITED;

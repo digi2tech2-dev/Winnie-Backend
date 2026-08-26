@@ -42,6 +42,7 @@ const { getLivePrice, invalidate: invalidatePriceCache } = require('../providers
 const { toDecimal, toStr, toFiat, multiply, subtract, add, isPositive, compare } = require('../../shared/utils/decimalPrecision');
 const config = require('../../config/config');
 const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
+const xenaService = require('../providers/xena/xena.service');
 
 const XENA_EXTERNAL_PRODUCT_ID = 'xena-dynamic-recharge';
 const XENA_TARGET_FIELD_KEY = 'target_uid';
@@ -59,6 +60,32 @@ const _isXenaLinkedProduct = async (product, session) => {
         .lean();
 
     return String(providerProduct?.externalProductId || '').trim() === XENA_EXTERNAL_PRODUCT_ID;
+};
+
+const _preflightXenaProviderBalance = async ({ productId, quantity }) => {
+    const product = await Product.findById(productId)
+        .select('provider providerProduct minQty maxQty isActive visibleInStore isPaused status isAvailableForApi customerPurchaseEnabled');
+    _assertProductAvailable(product);
+    const requestedQuantity = _normaliseOrderQuantity(quantity, product);
+
+    if (!(await _isXenaLinkedProduct(product))) return;
+
+    const provider = product.provider ? await Provider.findById(product.provider) : null;
+    if (!xenaService.isXenaProvider(provider)) return;
+
+    try {
+        await xenaService.assertSufficientProviderBalance({
+            provider,
+            quantity: requestedQuantity,
+        });
+    } catch (err) {
+        if (err.code === 'XENA_INSUFFICIENT_PROVIDER_BALANCE') throw err;
+
+        throw new BusinessRuleError(
+            'Xena provider balance is currently unavailable. Please try again later.',
+            'XENA_BALANCE_UNAVAILABLE'
+        );
+    }
 };
 
 const _canonicalizeXenaOrderFields = async ({ product, orderFieldsValues, session }) => {
@@ -567,6 +594,10 @@ const createOrder = async ({
             return { order: existing, idempotent: true };
         }
     }
+
+    // Xena balance is sellable provider stock, not a diagnostic value. This
+    // executes before the transaction that creates the order and debits wallet.
+    await _preflightXenaProviderBalance({ productId, quantity });
 
     // â”€â”€ Auto-resolve provider adapter (production flow) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // If no adapter was injected (i.e. called from HTTP controller), resolve

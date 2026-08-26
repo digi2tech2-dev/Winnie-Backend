@@ -265,6 +265,32 @@ describe('Xena active polling behavior', () => {
         expect(refunds).toHaveLength(1);
     });
 
+    it('polling explicit provider insufficient balance marks FAILED and refunds exactly once', async () => {
+        const { order, customer } = await createXenaProcessingOrder({ providerOrderId: 'rch_insufficient', walletDeducted: 50 });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            data: {
+                id: 'rch_insufficient',
+                status: 'failed',
+                errorCode: 'INSUFFICIENT_BALANCE',
+                errorMessage: 'Insufficient provider balance',
+            },
+            status: 200,
+            headers: {},
+        });
+
+        await pollProcessingOrders();
+        await pollProcessingOrders();
+
+        const updated = await Order.findById(order._id);
+        const refunds = await WalletTransaction.find({ userId: customer._id, type: 'REFUND' });
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.providerErrorCode).toBe('XENA_INSUFFICIENT_PROVIDER_BALANCE');
+        expect(updated.refunded).toBe(true);
+        expect(refunds).toHaveLength(1);
+    });
+
     it.each([
         ['unknown status', { data: { id: 'rch_unknown', status: 'strange' }, status: 200, headers: {} }, 'XENA_RECHARGE_UNKNOWN'],
         ['404 not found', { reject: { response: { status: 404, data: { message: 'not found' }, headers: {} }, message: 'not found' } }, 'XENA_RECHARGE_NOT_FOUND'],

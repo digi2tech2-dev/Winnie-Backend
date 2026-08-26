@@ -6,6 +6,7 @@ const { XenaClient, XENA_ERROR_CODES, safeMessageForCode } = require('./xena.cli
 const { NotFoundError, BusinessRuleError } = require('../../../shared/errors/AppError');
 const config = require('../../../config/config');
 const { getProviderCredential, hasSecretValue, redactSecretText } = require('../../../shared/utils/secretEncryption');
+const Decimal = require('decimal.js');
 
 const XENA_PROVIDER_CODE = 'xena-recharge';
 
@@ -505,6 +506,12 @@ const normalizeRechargeResponse = ({ data, requestId }) => {
     const providerOrderId = extractRechargeId(data);
     const statusSource = payload.status ?? data?.status ?? data?.data?.status;
     const { xenaStatus, providerStatus } = normalizeRechargeStatus(statusSource);
+    const rawProviderErrorCode = payload.errorCode ?? payload.code ?? null;
+    const rawProviderErrorMessage = payload.errorMessage ?? payload.error ?? payload.message ?? null;
+    const insufficientProviderBalance = isInsufficientProviderBalanceSignal(
+        rawProviderErrorCode,
+        rawProviderErrorMessage
+    );
 
     return {
         providerOrderId,
@@ -512,10 +519,23 @@ const normalizeRechargeResponse = ({ data, requestId }) => {
         providerStatus,
         xenaStatus,
         providerMessage: payload.providerMessage ?? payload.message ?? null,
-        providerErrorCode: payload.errorCode ?? payload.code ?? null,
-        providerErrorMessage: payload.errorMessage ?? payload.error ?? null,
+        providerErrorCode: insufficientProviderBalance
+            ? XENA_ERROR_CODES.INSUFFICIENT_PROVIDER_BALANCE
+            : rawProviderErrorCode,
+        providerErrorMessage: insufficientProviderBalance
+            ? safeMessageForCode(XENA_ERROR_CODES.INSUFFICIENT_PROVIDER_BALANCE)
+            : rawProviderErrorMessage,
         rawResponse: sanitizeXenaPayload(data),
     };
+};
+
+const isInsufficientProviderBalanceSignal = (...values) => {
+    const signal = values
+        .filter((value) => value !== undefined && value !== null)
+        .map((value) => String(value).toUpperCase())
+        .join(' ');
+
+    return /(?:INSUFFICIENT|NOT[ _-]?ENOUGH|OUT[ _-]?OF|NO)[ _-]*(?:PROVIDER[ _-]*)?(?:BALANCE|STOCK|FUNDS|CREDIT)|(?:BALANCE|STOCK|FUNDS|CREDIT)[ _-]*(?:INSUFFICIENT|EXHAUSTED)/.test(signal);
 };
 
 const assertPositiveSafeInteger = (value, code, message) => {
@@ -797,6 +817,44 @@ const refreshBalance = async ({ provider: providerOrId }) => {
     }
 };
 
+const assertSufficientProviderBalance = async ({ provider: providerOrId, quantity }) => {
+    const requestedQuantity = assertPositiveSafeInteger(
+        quantity,
+        XENA_ERROR_CODES.MALFORMED_RESPONSE,
+        'Xena recharge amount must be a positive safe integer.'
+    );
+    const balanceResult = await refreshBalance({ provider: providerOrId });
+
+    let availableBalance;
+    try {
+        availableBalance = new Decimal(balanceResult.balance);
+    } catch (_) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.BALANCE_UNAVAILABLE),
+            XENA_ERROR_CODES.BALANCE_UNAVAILABLE
+        );
+    }
+
+    if (!availableBalance.isFinite() || availableBalance.isNegative()) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.BALANCE_UNAVAILABLE),
+            XENA_ERROR_CODES.BALANCE_UNAVAILABLE
+        );
+    }
+
+    if (availableBalance.lessThan(requestedQuantity)) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.INSUFFICIENT_PROVIDER_BALANCE),
+            XENA_ERROR_CODES.INSUFFICIENT_PROVIDER_BALANCE
+        );
+    }
+
+    return {
+        availableBalance: availableBalance.toString(),
+        checkedAt: balanceResult.checkedAt,
+    };
+};
+
 const verifyTargetUser = async ({ provider: providerOrId, targetUid }) => {
     assertXenaRechargeEnabled();
     const provider = await loadProvider(providerOrId);
@@ -908,6 +966,7 @@ module.exports = {
     normalizeTargetUserResponse,
     normalizeRechargeResponse,
     normalizeRechargeStatus,
+    isInsufficientProviderBalanceSignal,
     extractRechargeId,
     sanitizeXenaPayload,
     challengeConnection,
@@ -915,6 +974,7 @@ module.exports = {
     verifyConnection,
     getConnectionStatus,
     refreshBalance,
+    assertSufficientProviderBalance,
     verifyTargetUser,
     createRecharge,
     getRecharge,

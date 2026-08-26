@@ -192,6 +192,22 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
                 idempotencyKey: providerIdempotencyKey,
             });
         } catch (err) {
+            if (err.code === 'XENA_INSUFFICIENT_PROVIDER_BALANCE') {
+                return {
+                    success: false,
+                    providerOrderId: null,
+                    providerStatus: 'Failed',
+                    providerIdempotencyKey,
+                    providerErrorCode: err.code,
+                    providerErrorMessage: err.message,
+                    rawResponse: buildAttemptMetadata({
+                        targetUid,
+                        reason: err.code,
+                        providerResponse: safeErrorPayload(err, err.code),
+                    }),
+                    errorMessage: err.message,
+                };
+            }
             return buildManualReviewResult({
                 providerIdempotencyKey,
                 providerErrorCode: err.code || 'XENA_RECHARGE_UNKNOWN',
@@ -235,12 +251,10 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
             });
         }
 
-        if (recharge.xenaStatus === 'succeeded') {
-            return { ...baseResult, success: true };
-        }
-
-        if (recharge.xenaStatus === 'processing') {
-            return { ...baseResult, success: true };
+        if (recharge.xenaStatus === 'succeeded' || recharge.xenaStatus === 'processing') {
+            // A create response only means Xena accepted the request. Delivery is
+            // confirmed exclusively by the later GET /v1/recharges/:id poll.
+            return { ...baseResult, success: true, providerStatus: 'Pending' };
         }
 
         if (recharge.xenaStatus === 'failed') {
@@ -282,6 +296,16 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
                 rechargeId,
             });
         } catch (err) {
+            if (err.code === 'XENA_INSUFFICIENT_PROVIDER_BALANCE') {
+                return {
+                    providerOrderId: rechargeId,
+                    providerStatus: 'Failed',
+                    providerRequestId: err.requestId || null,
+                    providerErrorCode: err.code,
+                    providerErrorMessage: err.message,
+                    rawResponse: safeErrorPayload(err, err.code),
+                };
+            }
             if ([
                 xenaService.XENA_DISABLED_ERROR_CODE,
                 'XENA_RECHARGE_NOT_FOUND',

@@ -461,6 +461,13 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
     it('order creation accepts canonical target_uid for a legacy account_id Xena product definition', async () => {
         const { product, customer } = await createXenaOrder({ fieldKey: 'account_id' });
         await Product.findByIdAndUpdate(product._id, { executionType: ORDER_EXECUTION_TYPES.MANUAL });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            data: { balance: 1000000 },
+            status: 200,
+            headers: {},
+        });
 
         const { order } = await createOrder({
             userId: customer._id,
@@ -502,7 +509,7 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
         }));
     });
 
-    it('succeeded completes the local order and keeps requestId separate from providerOrderId', async () => {
+    it('create-recharge succeeded response keeps the local order PROCESSING until polling confirms delivery', async () => {
         const { order } = await createXenaOrder();
         const client = makeClient();
         axios.create.mockReturnValue(client);
@@ -515,7 +522,8 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
 
         const { order: updated, refunded } = await executeOrder(order._id);
 
-        expect(updated.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(updated.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(updated.providerStatus).toBe('Pending');
         expect(updated.providerOrderId).toBe('rch_success');
         expect(updated.providerRequestId).toBe('req_success');
         expect(updated.providerOrderId).not.toBe('req_success');
@@ -558,6 +566,33 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
         const updated = await Order.findById(order._id);
         const refunds = await WalletTransaction.find({ userId: customer._id, type: 'REFUND' });
         expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(refunds).toHaveLength(1);
+    });
+
+    it('explicit provider insufficient balance after debit marks FAILED and refunds once', async () => {
+        const { order, customer } = await createXenaOrder({ walletDeducted: 50 });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        queueSuccessfulVerification(client);
+        client.request.mockResolvedValueOnce({
+            data: {
+                id: 'rch_insufficient',
+                status: 'failed',
+                errorCode: 'INSUFFICIENT_BALANCE',
+                errorMessage: 'Insufficient provider balance',
+            },
+            status: 200,
+            headers: {},
+        });
+
+        await executeOrder(order._id);
+        await executeOrder(order._id);
+
+        const updated = await Order.findById(order._id);
+        const refunds = await WalletTransaction.find({ userId: customer._id, type: 'REFUND' });
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.providerErrorCode).toBe('XENA_INSUFFICIENT_PROVIDER_BALANCE');
         expect(updated.refunded).toBe(true);
         expect(refunds).toHaveLength(1);
     });
