@@ -10,6 +10,8 @@ const { Product } = require('../modules/products/product.model');
 const { XenaConnection } = require('../modules/providers/xena/xenaConnection.model');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('../modules/orders/order.model');
 const { createOrder } = require('../modules/orders/order.service');
+const { processOrderStatusResult } = require('../modules/orders/orderFulfillment.service');
+const orderFulfillmentService = require('../modules/orders/orderFulfillment.service');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { User } = require('../modules/users/user.model');
 const {
@@ -21,6 +23,7 @@ const {
 
 const TEST_KEY = Buffer.alloc(32, 43).toString('base64');
 const adminId = new mongoose.Types.ObjectId();
+let executeOrderSpy;
 
 const createXenaFixture = async () => {
     const provider = await adminProviderService.createProvider({
@@ -57,6 +60,7 @@ const createXenaFixture = async () => {
         provider: provider._id,
         providerProduct: providerProduct._id,
         orderFields: [{
+            id: 'target_uid',
             key: 'target_uid',
             label: 'Xena ID',
             type: 'text',
@@ -94,24 +98,36 @@ beforeEach(async () => {
     process.env.XENA_RECHARGE_ENABLED = 'true';
     axios.create.mockReset();
     await clearCollections();
+    // createOrder deliberately starts fulfillment after committing. This suite
+    // verifies the creation/debit boundary only, so keep that background work
+    // mocked and prevent it racing the disposable DB teardown.
+    executeOrderSpy = jest.spyOn(orderFulfillmentService, 'executeOrder')
+        .mockResolvedValue({ order: null, placed: false, refunded: false });
 });
 
 afterEach(() => {
+    executeOrderSpy?.mockRestore();
     delete process.env.XENA_RECHARGE_ENABLED;
 });
 
-describe('Xena provider balance preflight', () => {
-    it('allows quantity below live balance and creates a PROCESSING order', async () => {
+describe('Xena provider balance diagnostics do not block customer order creation', () => {
+    const pendingAdapter = (provider) => ({
+        provider,
+        // createOrder refreshes provider pricing through the adapter before
+        // creating its financial transaction. Keep that read local to this
+        // test double; balance diagnostics must never reach the real client.
+        getProducts: jest.fn().mockResolvedValue([]),
+        placeOrder: jest.fn().mockResolvedValue({
+            success: true,
+            providerOrderId: 'rch_preflight_pending',
+            providerStatus: 'Pending',
+        }),
+    });
+
+    it('creates a PROCESSING order without consulting live Xena balance', async () => {
         const { customer, product, provider } = await createXenaFixture();
         const client = mockLiveBalance(100);
-        const adapter = {
-            provider,
-            placeOrder: jest.fn().mockResolvedValue({
-                success: true,
-                providerOrderId: 'rch_preflight_pending',
-                providerStatus: 'Pending',
-            }),
-        };
+        const adapter = pendingAdapter(provider);
 
         const { order } = await createOrder({
             userId: customer._id,
@@ -123,34 +139,64 @@ describe('Xena provider balance preflight', () => {
         });
 
         expect(order.status).toBe(ORDER_STATUS.PROCESSING);
-        expect(client.request).toHaveBeenCalledWith(expect.objectContaining({
-            method: 'get',
-            url: '/v1/connections/test-xena-connection/balance',
-        }));
+        expect(client.request).not.toHaveBeenCalled();
         expect(await Order.countDocuments()).toBe(1);
         expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBeGreaterThan(0);
     });
 
-    it('rejects quantity above live balance before wallet debit or order creation', async () => {
-        const { customer, product } = await createXenaFixture();
-        mockLiveBalance(9);
+    it('keeps a successful 200-unit Xena order debited at 800 after confirmed completion', async () => {
+        const { customer, product, provider } = await createXenaFixture();
+
+        const { order } = await createOrder({
+            userId: customer._id,
+            productId: product._id,
+            quantity: 200,
+            orderFieldsValues: { target_uid: '001234' },
+            provider: pendingAdapter(provider),
+            idempotencyKey: `xena-success-debit-${product._id}`,
+        });
+
+        expect(order.status).toBe(ORDER_STATUS.PROCESSING);
+        expect((await User.findById(customer._id)).walletBalance).toBe(800);
+        expect(await WalletTransaction.countDocuments({
+            reference: order._id,
+            type: 'DEBIT',
+            semanticType: 'ORDER_DEBIT',
+        })).toBe(1);
+
+        await processOrderStatusResult(order, {
+            providerOrderId: 'rch_confirmed_success',
+            providerStatus: 'Completed',
+        });
+
+        expect((await Order.findById(order._id)).status).toBe(ORDER_STATUS.COMPLETED);
+        expect((await User.findById(customer._id)).walletBalance).toBe(800);
+        expect(await WalletTransaction.countDocuments({ reference: order._id, type: 'REFUND' })).toBe(0);
+    });
+
+    it('creates and debits when the last diagnostic balance would be insufficient', async () => {
+        const { customer, product, provider } = await createXenaFixture();
+        const client = mockLiveBalance(9);
         const balanceBefore = (await User.findById(customer._id)).walletBalance;
 
-        await expect(createOrder({
+        const { order } = await createOrder({
             userId: customer._id,
             productId: product._id,
             quantity: 10,
             orderFieldsValues: { target_uid: '001234' },
+            provider: pendingAdapter(provider),
             idempotencyKey: `xena-preflight-insufficient-${product._id}`,
-        })).rejects.toMatchObject({ code: 'XENA_INSUFFICIENT_PROVIDER_BALANCE' });
+        });
 
-        expect((await User.findById(customer._id)).walletBalance).toBe(balanceBefore);
-        expect(await Order.countDocuments()).toBe(0);
-        expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(0);
+        expect(order.status).toBe(ORDER_STATUS.PROCESSING);
+        expect((await User.findById(customer._id)).walletBalance).toBeLessThan(balanceBefore);
+        expect(await Order.countDocuments()).toBe(1);
+        expect(await WalletTransaction.countDocuments({ userId: customer._id, type: 'DEBIT' })).toBe(1);
+        expect(client.request).not.toHaveBeenCalled();
     });
 
-    it('fails closed when the live balance check is unavailable', async () => {
-        const { customer, product } = await createXenaFixture();
+    it('creates and debits when live balance diagnostics are unavailable', async () => {
+        const { customer, product, provider } = await createXenaFixture();
         const client = { request: jest.fn().mockRejectedValue({
             code: 'ECONNABORTED',
             message: 'timeout',
@@ -158,16 +204,19 @@ describe('Xena provider balance preflight', () => {
         axios.create.mockReturnValue(client);
         const balanceBefore = (await User.findById(customer._id)).walletBalance;
 
-        await expect(createOrder({
+        const { order } = await createOrder({
             userId: customer._id,
             productId: product._id,
             quantity: 10,
             orderFieldsValues: { target_uid: '001234' },
+            provider: pendingAdapter(provider),
             idempotencyKey: `xena-preflight-unavailable-${product._id}`,
-        })).rejects.toMatchObject({ code: 'XENA_BALANCE_UNAVAILABLE' });
+        });
 
-        expect((await User.findById(customer._id)).walletBalance).toBe(balanceBefore);
-        expect(await Order.countDocuments()).toBe(0);
-        expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(0);
+        expect(order.status).toBe(ORDER_STATUS.PROCESSING);
+        expect((await User.findById(customer._id)).walletBalance).toBeLessThan(balanceBefore);
+        expect(await Order.countDocuments()).toBe(1);
+        expect(await WalletTransaction.countDocuments({ userId: customer._id, type: 'DEBIT' })).toBe(1);
+        expect(client.request).not.toHaveBeenCalled();
     });
 });

@@ -13,6 +13,9 @@ const { MongoMemoryReplSet } = require('mongodb-memory-server');
 module.exports = async () => {
     // one-node replica set is enough for transactions
     const replSet = await MongoMemoryReplSet.create({
+        // Pin the test server version so mongodb-memory-server does not follow
+        // a package-default upgrade and unexpectedly download a new binary.
+        binary: { version: '8.2.1' },
         replSet: { count: 1, storageEngine: 'wiredTiger' },
         instanceOpts: [{ launchTimeout: 60000 }],
     });

@@ -15,7 +15,7 @@
  *
  * Design contract:
  *   - executeOrder() NEVER throws — returns result object, logs audit.
- *   - refundFailedOrder() is idempotent via the `refunded` boolean guard.
+ *   - refundFailedOrder() is idempotent via transactional order + ledger checks.
  *   - pollProcessingOrders() is idempotent — safe to run 1× per minute.
  */
 
@@ -27,6 +27,7 @@ const { PROVIDER_CODES } = require('../providers/provider.constants');
 const config = require('../../config/config');
 const { refundWalletAtomic } = require('../wallet/wallet.service');
 const {
+    WalletTransaction,
     LEDGER_TRANSACTION_TYPES,
     TRANSACTION_SOURCE_TYPES,
 } = require('../wallet/walletTransaction.model');
@@ -60,32 +61,50 @@ const { storeDeliveredCodesForOrder, sanitizeProviderCodePayload } = require('..
  *   Uses order.usdAmount (the USD truth frozen at order time) and converts
  *   it to the user's CURRENT currency rate before crediting the wallet.
  *
- * Guard: the `refunded` boolean is set to true via a compare-and-swap
- * findOneAndUpdate so concurrent refund calls cannot double-credit the wallet.
+ * The refund marker, wallet credit, and deterministic ledger row are written in
+ * one transaction. Existing ledger evidence is authoritative for recovery.
  *
  * @param {Object} order  - Mongoose Order document
  * @returns {Promise<boolean>} true if refund was applied, false if already refunded
  */
 const refundFailedOrder = async (order, notificationContext = {}) => {
-    // Compare-and-swap: only proceeds when refunded===false
-    const swapped = await Order.findOneAndUpdate(
-        { _id: order._id, refunded: false },
-        { $set: { refunded: true, refundedAt: new Date() } },
-        { new: true }
-    );
-
-    if (!swapped) {
-        // Already refunded by a concurrent call
-        return false;
-    }
-
-    // Execute the wallet refund inside its own session
     const session = await mongoose.startSession();
     try {
         session.startTransaction({
             readConcern: { level: 'snapshot' },
             writeConcern: { w: 'majority' },
         });
+
+        const currentOrder = await Order.findById(order._id).session(session);
+        if (!currentOrder) {
+            await session.abortTransaction();
+            return false;
+        }
+        order = currentOrder;
+
+        // The ledger is the financial source of truth. It lets this path repair
+        // stale order flags without issuing another credit, and also protects
+        // legacy orders whose refund marker was persisted before a crash.
+        const existingRefund = await WalletTransaction.findOne({
+            reference: order._id,
+            type: 'REFUND',
+            semanticType: LEDGER_TRANSACTION_TYPES.ORDER_REFUND,
+        }).session(session);
+        if (existingRefund) {
+            if (!order.refunded || !order.refundedAt) {
+                order.refunded = true;
+                order.refundedAt = existingRefund.createdAt || new Date();
+                await order.save({ session });
+            }
+            await session.commitTransaction();
+            return false;
+        }
+
+        // This marker is deliberately written in the SAME transaction as the
+        // wallet credit and refund ledger row. No crash window may leave a
+        // permanent refunded=true / no-credit state.
+        order.refunded = true;
+        order.refundedAt = new Date();
 
         // ── Use the EXACT amounts originally deducted ────────────────────
         // NEVER do a live currency conversion. Exchange rates fluctuate.
@@ -104,11 +123,10 @@ const refundFailedOrder = async (order, notificationContext = {}) => {
         const totalRefund = refundWallet + refundCredit;
 
         if (totalRefund <= 0) {
-            // Nothing to refund — undo the CAS flag and bail
-            await Order.findByIdAndUpdate(order._id, { $set: { refunded: false, refundedAt: null } });
-            console.error(`[Fulfillment] refundFailedOrder: order ${order._id} has 0 refundable amount (walletDeducted=${order.walletDeducted}, chargedAmount=${order.chargedAmount})`);
-            return false;
+            throw new Error(`refundFailedOrder: order ${order._id} has 0 refundable amount`);
         }
+
+        await order.save({ session });
 
         await refundWalletAtomic({
             userId: order.userId,
@@ -185,8 +203,9 @@ const refundFailedOrder = async (order, notificationContext = {}) => {
 
     } catch (err) {
         if (session.inTransaction()) await session.abortTransaction();
-        // Undo the refunded=true flag so the next retry can attempt again
-        await Order.findByIdAndUpdate(order._id, { $set: { refunded: false, refundedAt: null } });
+        // A duplicate key means a concurrent transaction committed the same
+        // deterministic refund first; its wallet mutation committed with it.
+        if ([11000, 112, 244, 251].includes(err?.code)) return false;
         throw err;
     } finally {
         try { session.endSession(); } catch (_) { /* already ended */ }
@@ -2124,9 +2143,67 @@ const pollProcessingOrders = async (providerOverride = null) => {
     return stats;
 };
 
+/**
+ * Bounded financial reconciliation for terminal failures. This is intentionally
+ * callable rather than scheduled independently: the existing fulfillment job or
+ * an admin recovery action can invoke it without adding a noisy second scanner.
+ */
+const reconcileFailedOrderRefunds = async ({ limit = 100 } = {}) => {
+    const safeLimit = Math.min(Math.max(Number.parseInt(limit, 10) || 100, 1), 200);
+    const orders = await Order.find({ status: ORDER_STATUS.FAILED })
+        .sort({ failedAt: 1, createdAt: 1 })
+        .limit(safeLimit);
+    const stats = { checked: orders.length, refunded: 0, reconciled: 0, skippedNoDebit: 0, errors: [] };
+
+    for (const order of orders) {
+        try {
+            const hadRefundLedger = await WalletTransaction.exists({
+                reference: order._id,
+                type: 'REFUND',
+                semanticType: LEDGER_TRANSACTION_TYPES.ORDER_REFUND,
+            });
+
+            // A completed refund ledger is sufficient evidence that only the
+            // order metadata needs repair. For a missing refund, require a
+            // matching order-debit ledger before compensating a historical
+            // FAILED order. This prevents the periodic recovery pass from
+            // crediting legacy/manual failures that were never charged.
+            if (!hadRefundLedger) {
+                const hadDebitLedger = await WalletTransaction.exists({
+                    reference: order._id,
+                    type: 'DEBIT',
+                    semanticType: {
+                        $in: [
+                            LEDGER_TRANSACTION_TYPES.ORDER_DEBIT,
+                            LEDGER_TRANSACTION_TYPES.DEBIT,
+                        ],
+                    },
+                });
+                if (!hadDebitLedger) {
+                    stats.skippedNoDebit += 1;
+                    continue;
+                }
+            }
+
+            const refunded = await refundFailedOrder(order, {
+                source: 'failed_order_reconciliation',
+                reason: 'FAILED_ORDER_REFUND_RECOVERY',
+                providerRejected: true,
+            });
+            if (refunded) stats.refunded += 1;
+            else if (hadRefundLedger && (!order.refunded || !order.refundedAt)) stats.reconciled += 1;
+        } catch (err) {
+            stats.errors.push(`[${order._id}] ${err.message}`);
+        }
+    }
+
+    return stats;
+};
+
 module.exports = {
     executeOrder,
     refundFailedOrder,
     processOrderStatusResult,
     pollProcessingOrders,
+    reconcileFailedOrderRefunds,
 };

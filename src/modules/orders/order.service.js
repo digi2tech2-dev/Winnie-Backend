@@ -11,6 +11,7 @@ const { Review } = require('../reviews/review.model');
 const { getNextSequence } = require('./counter.model');
 const { debitWalletAtomic, refundWalletAtomic } = require('../wallet/wallet.service');
 const {
+    WalletTransaction,
     LEDGER_TRANSACTION_TYPES,
     TRANSACTION_SOURCE_TYPES,
 } = require('../wallet/walletTransaction.model');
@@ -42,7 +43,6 @@ const { getLivePrice, invalidate: invalidatePriceCache } = require('../providers
 const { toDecimal, toStr, toFiat, multiply, subtract, add, isPositive, compare } = require('../../shared/utils/decimalPrecision');
 const config = require('../../config/config');
 const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
-const xenaService = require('../providers/xena/xena.service');
 
 const XENA_EXTERNAL_PRODUCT_ID = 'xena-dynamic-recharge';
 const XENA_TARGET_FIELD_KEY = 'target_uid';
@@ -60,32 +60,6 @@ const _isXenaLinkedProduct = async (product, session) => {
         .lean();
 
     return String(providerProduct?.externalProductId || '').trim() === XENA_EXTERNAL_PRODUCT_ID;
-};
-
-const _preflightXenaProviderBalance = async ({ productId, quantity }) => {
-    const product = await Product.findById(productId)
-        .select('provider providerProduct minQty maxQty isActive visibleInStore isPaused status isAvailableForApi customerPurchaseEnabled');
-    _assertProductAvailable(product);
-    const requestedQuantity = _normaliseOrderQuantity(quantity, product);
-
-    if (!(await _isXenaLinkedProduct(product))) return;
-
-    const provider = product.provider ? await Provider.findById(product.provider) : null;
-    if (!xenaService.isXenaProvider(provider)) return;
-
-    try {
-        await xenaService.assertSufficientProviderBalance({
-            provider,
-            quantity: requestedQuantity,
-        });
-    } catch (err) {
-        if (err.code === 'XENA_INSUFFICIENT_PROVIDER_BALANCE') throw err;
-
-        throw new BusinessRuleError(
-            'Xena provider balance is currently unavailable. Please try again later.',
-            'XENA_BALANCE_UNAVAILABLE'
-        );
-    }
 };
 
 const _canonicalizeXenaOrderFields = async ({ product, orderFieldsValues, session }) => {
@@ -595,9 +569,10 @@ const createOrder = async ({
         }
     }
 
-    // Xena balance is sellable provider stock, not a diagnostic value. This
-    // executes before the transaction that creates the order and debits wallet.
-    await _preflightXenaProviderBalance({ productId, quantity });
+    // Xena live balance remains available through the provider diagnostics, but
+    // must not decide whether a customer order is accepted. Provider stock can
+    // change between a read and the later recharge request; definitive Xena
+    // rejections are handled by the post-debit fulfillment/refund lifecycle.
 
     // â”€â”€ Auto-resolve provider adapter (production flow) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // If no adapter was injected (i.e. called from HTTP controller), resolve
@@ -1097,19 +1072,37 @@ const markOrderAsFailed = async (orderId, auditContext = null) => {
         const order = await Order.findById(orderId).session(session);
         if (!order) throw new NotFoundError('Order');
 
-        if (order.status === ORDER_STATUS.FAILED) {
-            throw new BusinessRuleError(
-                'This order has already been marked as failed.',
-                'ORDER_ALREADY_FAILED'
-            );
-        }
+        const existingRefund = await WalletTransaction.findOne({
+            reference: order._id,
+            type: 'REFUND',
+            semanticType: LEDGER_TRANSACTION_TYPES.ORDER_REFUND,
+        }).session(session);
 
-        if (order.refundedAt !== null) {
+        if (existingRefund) {
+            // Repair old partial settlement state without ever crediting twice.
+            if (!order.refunded || !order.refundedAt) {
+                order.status = ORDER_STATUS.FAILED;
+                order.failedAt = order.failedAt || new Date();
+                order.refunded = true;
+                order.refundedAt = existingRefund.createdAt || new Date();
+                await order.save({ session });
+                await session.commitTransaction();
+                return order;
+            }
+            if (order.status === ORDER_STATUS.FAILED) {
+                throw new BusinessRuleError(
+                    'This order has already been marked as failed.',
+                    'ORDER_ALREADY_FAILED'
+                );
+            }
             throw new BusinessRuleError(
                 'A refund has already been issued for this order.',
                 'ALREADY_REFUNDED'
             );
         }
+
+        // A FAILED order without a refund ledger is recoverable. The financial
+        // settlement below is driven by ledger evidence, not status alone.
 
         // â”€â”€ Refund amount â€” use the EXACT amounts originally deducted â”€â”€â”€â”€â”€â”€â”€â”€
         // NEVER do a live currency conversion here. Exchange rates fluctuate.

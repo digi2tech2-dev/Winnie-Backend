@@ -11,6 +11,7 @@ const { ProviderProduct } = require('../modules/providers/providerProduct.model'
 const { Product } = require('../modules/products/product.model');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES, MAX_RETRY_COUNT } = require('../modules/orders/order.model');
 const { pollProcessingOrders } = require('../modules/orders/orderFulfillment.service');
+const { retryOrder, syncOrderProviderStatus } = require('../modules/admin/admin.orders.service');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { User } = require('../modules/users/user.model');
 const {
@@ -289,6 +290,44 @@ describe('Xena active polling behavior', () => {
         expect(updated.providerErrorCode).toBe('XENA_INSUFFICIENT_PROVIDER_BALANCE');
         expect(updated.refunded).toBe(true);
         expect(refunds).toHaveLength(1);
+    });
+
+    it('admin provider sync treats authoritative Xena Failed as terminal and refunds once', async () => {
+        const { order, customer } = await createXenaProcessingOrder({ providerOrderId: 'rch_admin_failed', walletDeducted: 50 });
+        const walletBeforeDebit = (await User.findById(customer._id)).walletBalance;
+        await User.findByIdAndUpdate(customer._id, { $inc: { walletBalance: -50 } });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            data: { id: 'rch_admin_failed', status: 'failed', errorCode: 'DENIED', errorMessage: 'Rejected' },
+            status: 200,
+            headers: {},
+        });
+
+        await syncOrderProviderStatus(order._id, adminId);
+
+        const updated = await Order.findById(order._id);
+        const refunds = await WalletTransaction.find({ reference: order._id, type: 'REFUND' });
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(refunds).toHaveLength(1);
+        expect(refunds[0].semanticType).toBe('ORDER_REFUND');
+        expect((await User.findById(customer._id)).walletBalance).toBe(walletBeforeDebit);
+    });
+
+    it('admin retry rejects an order that has already been refunded', async () => {
+        const { order } = await createXenaProcessingOrder({ status: ORDER_STATUS.FAILED, walletDeducted: 50 });
+        order.refunded = true;
+        order.refundedAt = new Date();
+        await order.save();
+
+        await expect(retryOrder(order._id, adminId)).rejects.toMatchObject({
+            code: 'REFUNDED_ORDER_NOT_RETRYABLE',
+        });
+
+        const unchanged = await Order.findById(order._id);
+        expect(unchanged.status).toBe(ORDER_STATUS.FAILED);
+        expect(unchanged.providerOrderId).toBe('rch_poll');
     });
 
     it.each([

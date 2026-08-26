@@ -10,7 +10,7 @@
     "seed:clear": "node src/scripts/seed.js --clear",
     "seed:smoke": "node scripts/seed-smoke-data.js",
     "migrate:provider-credentials": "node scripts/migrate-provider-credentials.js",
-    "test": "jest --runInBand --forceExit",
+    "test": "jest --runInBand",
     "lint": "node scripts/check-syntax.js"
   },
   "keywords": [

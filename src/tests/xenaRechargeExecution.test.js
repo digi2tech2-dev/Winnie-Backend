@@ -571,7 +571,23 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
     });
 
     it('explicit provider insufficient balance after debit marks FAILED and refunds once', async () => {
-        const { order, customer } = await createXenaOrder({ walletDeducted: 50 });
+        const { order, customer } = await createXenaOrder({ walletDeducted: 200 });
+        const walletBeforeDebit = (await User.findById(customer._id)).walletBalance;
+        await User.findByIdAndUpdate(customer._id, { $inc: { walletBalance: -200 } });
+        await WalletTransaction.create({
+            userId: customer._id,
+            type: 'DEBIT',
+            semanticType: 'ORDER_DEBIT',
+            sourceType: 'ORDER',
+            sourceId: order._id,
+            direction: 'DEBIT',
+            amount: 200,
+            balanceBefore: walletBeforeDebit,
+            balanceAfter: walletBeforeDebit - 200,
+            reference: order._id,
+            description: 'Xena test order debit',
+            idempotencyKey: `test-xena-debit-${order._id}`,
+        });
         const client = makeClient();
         axios.create.mockReturnValue(client);
         queueSuccessfulVerification(client);
@@ -595,6 +611,13 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
         expect(updated.providerErrorCode).toBe('XENA_INSUFFICIENT_PROVIDER_BALANCE');
         expect(updated.refunded).toBe(true);
         expect(refunds).toHaveLength(1);
+        expect((await User.findById(customer._id)).walletBalance).toBe(walletBeforeDebit);
+        expect(refunds[0].metadata.totalRefund).toBe(200);
+        expect(await WalletTransaction.countDocuments({
+            reference: order._id,
+            type: 'DEBIT',
+            semanticType: 'ORDER_DEBIT',
+        })).toBe(1);
     });
 
     it('unknown, timeout after POST, and missing id move to manual review without refund', async () => {

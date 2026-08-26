@@ -17,7 +17,8 @@ const { AuditLog } = require('../modules/audit/audit.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { ProviderProduct } = require('../modules/providers/providerProduct.model');
 const { toInternalStatus, isTerminal, requiresRefund } = require('../modules/providers/statusMapper');
-const { executeOrder, refundFailedOrder, processOrderStatusResult, pollProcessingOrders } = require('../modules/orders/orderFulfillment.service');
+const { executeOrder, refundFailedOrder, processOrderStatusResult, pollProcessingOrders, reconcileFailedOrderRefunds } = require('../modules/orders/orderFulfillment.service');
+const orderFulfillmentService = require('../modules/orders/orderFulfillment.service');
 const { createOrder } = require('../modules/orders/order.service');
 const {
     connectTestDB,
@@ -358,6 +359,130 @@ describe('[3] refundFailedOrder -- idempotency', () => {
         expect(txns[0].sourceId.toString()).toBe(order._id.toString());
         expect(txns[0].direction).toBe('CREDIT');
     });
+
+    it('keeps the refund marker rolled back when wallet settlement fails', async () => {
+        const order = await makeOrderDoc(customer._id, { walletDeducted: 50 });
+        const before = (await User.findById(customer._id)).walletBalance;
+        const createSpy = jest.spyOn(WalletTransaction, 'create')
+            .mockRejectedValueOnce(new Error('Injected refund-ledger failure'));
+
+        await expect(refundFailedOrder(order)).rejects.toThrow('Injected refund-ledger failure');
+        createSpy.mockRestore();
+
+        const fresh = await Order.findById(order._id);
+        expect(fresh.refunded).toBe(false);
+        expect(fresh.refundedAt).toBeNull();
+        expect(await WalletTransaction.countDocuments({ reference: order._id, type: 'REFUND' })).toBe(0);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+
+        // The same failed order can recover normally after the aborted
+        // transaction; it produces one, and only one, completed settlement.
+        await refundFailedOrder(order);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before + 50);
+        expect(await WalletTransaction.countDocuments({ reference: order._id, type: 'REFUND' })).toBe(1);
+    });
+
+    it('concurrent terminal refund attempts create one credit and one ledger row', async () => {
+        const order = await makeOrderDoc(customer._id, { walletDeducted: 60 });
+        const before = (await User.findById(customer._id)).walletBalance;
+
+        await Promise.all([refundFailedOrder(order), refundFailedOrder(order)]);
+
+        const fresh = await Order.findById(order._id);
+        const refunds = await WalletTransaction.find({ reference: order._id, type: 'REFUND' });
+        expect(fresh.refunded).toBe(true);
+        expect(refunds).toHaveLength(1);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before + 60);
+    });
+
+    it('reconciles a FAILED order marked refunded without a refund ledger', async () => {
+        const order = await makeOrderDoc(customer._id, {
+            status: ORDER_STATUS.FAILED,
+            walletDeducted: 70,
+            refunded: true,
+            refundedAt: new Date(),
+        });
+        const before = (await User.findById(customer._id)).walletBalance;
+        await WalletTransaction.create({
+            userId: customer._id,
+            type: 'DEBIT',
+            semanticType: 'ORDER_DEBIT',
+            sourceType: 'ORDER',
+            sourceId: order._id,
+            direction: 'DEBIT',
+            amount: 70,
+            balanceBefore: before + 70,
+            balanceAfter: before,
+            reference: order._id,
+            description: 'Test order debit',
+            idempotencyKey: `test-order-debit-${order._id}`,
+        });
+
+        const stats = await reconcileFailedOrderRefunds({ limit: 10 });
+
+        const fresh = await Order.findById(order._id);
+        expect(stats.refunded).toBe(1);
+        expect(fresh.refunded).toBe(true);
+        expect(await WalletTransaction.countDocuments({ reference: order._id, type: 'REFUND' })).toBe(1);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before + 70);
+
+        // Recovery is safe to run repeatedly once the ledger is present.
+        await reconcileFailedOrderRefunds({ limit: 10 });
+        expect(await WalletTransaction.countDocuments({ reference: order._id, type: 'REFUND' })).toBe(1);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before + 70);
+    });
+
+    it('repairs stale refund metadata from an existing refund ledger without another credit', async () => {
+        const order = await makeOrderDoc(customer._id, {
+            status: ORDER_STATUS.FAILED,
+            walletDeducted: 70,
+            refunded: false,
+            refundedAt: null,
+        });
+        const before = (await User.findById(customer._id)).walletBalance;
+
+        await User.findByIdAndUpdate(customer._id, { $inc: { walletBalance: 70 } });
+        await WalletTransaction.create({
+            userId: customer._id,
+            type: 'REFUND',
+            semanticType: 'ORDER_REFUND',
+            sourceType: 'ORDER',
+            sourceId: order._id,
+            direction: 'CREDIT',
+            amount: 70,
+            balanceBefore: before,
+            balanceAfter: before + 70,
+            reference: order._id,
+            description: 'Existing test refund',
+            idempotencyKey: `order:${order._id}:refund:provider`,
+        });
+
+        const stats = await reconcileFailedOrderRefunds({ limit: 10 });
+
+        const fresh = await Order.findById(order._id);
+        expect(stats.reconciled).toBe(1);
+        expect(fresh.refunded).toBe(true);
+        expect(fresh.refundedAt).not.toBeNull();
+        expect(await WalletTransaction.countDocuments({ reference: order._id, type: 'REFUND' })).toBe(1);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before + 70);
+    });
+
+    it('does not reconcile a historical FAILED order without debit-ledger evidence', async () => {
+        const order = await makeOrderDoc(customer._id, {
+            status: ORDER_STATUS.FAILED,
+            walletDeducted: 70,
+            refunded: false,
+            refundedAt: null,
+        });
+        const before = (await User.findById(customer._id)).walletBalance;
+
+        const stats = await reconcileFailedOrderRefunds({ limit: 10 });
+
+        expect(stats.skippedNoDebit).toBe(1);
+        expect((await Order.findById(order._id)).refunded).toBe(false);
+        expect(await WalletTransaction.countDocuments({ reference: order._id, type: 'REFUND' })).toBe(0);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+    });
 });
 
 // ============================================================================
@@ -548,11 +673,19 @@ describe('[5] pollProcessingOrders -- cron batch', () => {
 describe('[6] createOrder -- AUTOMATIC executionType', () => {
     let customer;
     let autoProduct;
+    let executeOrderSpy;
 
     beforeEach(async () => {
         ({ customer } = await createCustomerWithGroup({ walletBalance: 1000, creditLimit: 0 }, { percentage: 0 }));
         autoProduct = await createProduct({ executionType: ORDER_EXECUTION_TYPES.AUTOMATIC, basePrice: 50 });
+        // These assertions cover the committed order/debit result. Stub the
+        // separately-tested fire-and-forget fulfillment so it cannot outlive
+        // the per-test database cleanup.
+        executeOrderSpy = jest.spyOn(orderFulfillmentService, 'executeOrder')
+            .mockResolvedValue({ order: null, placed: false, refunded: false });
     });
+
+    afterEach(() => executeOrderSpy?.mockRestore());
 
     it('AUTOMATIC product with provider injected -> order status is PROCESSING', async () => {
         const provider = makeMockProvider({

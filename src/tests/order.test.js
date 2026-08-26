@@ -20,7 +20,7 @@
 const mongoose = require('mongoose');
 const orderService = require('../modules/orders/order.service');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
-const { Order } = require('../modules/orders/order.model');
+const { Order, ORDER_STATUS } = require('../modules/orders/order.model');
 const {
     connectTestDB,
     disconnectTestDB,
@@ -301,21 +301,30 @@ describe('Double refund prevention', () => {
         expect(txnCount).toBe(2);
     });
 
-    it('throws ALREADY_REFUNDED if refundedAt is set but status somehow differs', async () => {
+    it('repairs a stale refundedAt marker when no refund ledger exists', async () => {
         const customer = await createCustomer({ groupId: defaultGroup._id, walletBalance: 200 });
         const product = await createProduct({ basePrice: 50 });
 
         const { order } = await placeOrder({ userId: customer._id, productId: product._id });
 
-        // Manually simulate a state where status isn't FAILED but refundedAt is set
+        // Simulate the historic crash window: an order flag was persisted but
+        // no wallet refund ledger was ever committed. Ledger evidence, not the
+        // stale flag, determines whether a credit has already occurred.
         await Order.findByIdAndUpdate(order._id, {
             refundedAt: new Date(),
             status: 'PENDING', // unusual state — guard must still block
         });
 
-        await expect(orderService.markOrderAsFailed(order._id)).rejects.toMatchObject({
-            code: 'ALREADY_REFUNDED',
-        });
+        const failed = await orderService.markOrderAsFailed(order._id);
+
+        expect(failed.status).toBe(ORDER_STATUS.FAILED);
+        expect(failed.refunded).toBe(true);
+        expect((await freshUser(customer._id)).walletBalance).toBe(200);
+        expect(await WalletTransaction.countDocuments({
+            reference: order._id,
+            type: 'REFUND',
+            semanticType: 'ORDER_REFUND',
+        })).toBe(1);
     });
 });
 
