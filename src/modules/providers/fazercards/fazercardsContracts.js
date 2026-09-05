@@ -958,7 +958,7 @@ const parseCodeDeliveryResponse = (data = {}) => {
     const status = hasRecognizedCodePayload && parsed.status !== PARSED_STATUSES.FAILED
         ? PARSED_STATUSES.COMPLETED
         : parsed.status === PARSED_STATUSES.COMPLETED && !hasRecognizedCodePayload
-            ? PARSED_STATUSES.MANUAL_REVIEW
+            ? PARSED_STATUSES.PROCESSING
             : parsed.status;
     return {
         ...parsed,

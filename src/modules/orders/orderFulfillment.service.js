@@ -1584,6 +1584,52 @@ const processOrderStatusResult = async (order, statusResult) => {
     const now = new Date();
     const providerStatus = statusResult.providerStatus;
 
+    // FazerCards GiftCards/GameKeys require encrypted code storage before
+    // local COMPLETED. Only intercept provider COMPLETED here; pending/failed
+    // statuses keep the existing generic retry/failure behaviour.
+    const isFazerCardsCodeDeliveryCompletion =
+        normalizeProviderCode(order.providerCode).replace(/[-\s]+/g, '_') === PROVIDER_CODES.FAZER_CARDS
+        && String(order.fulfillmentMode || '').trim().toUpperCase() === FULFILLMENT_MODES.CODE_DELIVERY
+        && ['GIFTCARDS', 'GAME_KEYS'].includes(
+            String(order.familyKey || '').trim().toUpperCase()
+        )
+        && (
+            String(statusResult.normalizedStatus || '').trim().toUpperCase() === 'COMPLETED'
+            || String(providerStatus || '').trim().toLowerCase() === 'completed'
+        );
+
+    if (isFazerCardsCodeDeliveryCompletion) {
+        // Lazy require avoids the catalog-service <-> fulfillment-service cycle.
+        const fazerCardsCatalogSvc = require('../providers/fazercards/fazercardsCatalog.service');
+        const providerPayload = statusResult.rawProviderPayload
+            || statusResult.rawResponse
+            || {};
+
+        await fazerCardsCatalogSvc.applyProviderStatusPayloadToOrder(
+            order._id,
+            providerPayload,
+            { source: 'fulfillment_poll' }
+        );
+
+        const refreshed = await Order.findById(order._id);
+
+        if (refreshed?.status === ORDER_STATUS.COMPLETED) {
+            return { action: 'completed' };
+        }
+        if (
+            refreshed?.status === ORDER_STATUS.FAILED
+            || refreshed?.status === ORDER_STATUS.CANCELED
+            || refreshed?.status === ORDER_STATUS.PARTIAL
+        ) {
+            return { action: 'failed' };
+        }
+        if (refreshed?.status === ORDER_STATUS.MANUAL_REVIEW) {
+            return { action: 'manualReview' };
+        }
+
+        return { action: 'pending' };
+    }
+
     if (statusResult.manualReview === true) {
         await moveOrderToManualReview(order, statusResult);
         return { action: 'manualReview' };
