@@ -8,6 +8,7 @@ const {
 } = require('../modules/orders/order.model');
 const { Provider } = require('../modules/providers/provider.model');
 const { ProviderProduct } = require('../modules/providers/providerProduct.model');
+const { CanonicalB2BAdapter } = require('../modules/providers/adapters/canonicalB2B.adapter');
 const { executeOrder, pollProcessingOrders } = require('../modules/orders/orderFulfillment.service');
 const {
     connectTestDB,
@@ -255,6 +256,36 @@ describe('Canonical B2B fulfillment safety', () => {
         expect(adapter.placeOrder).toHaveBeenCalledTimes(1);
     });
 
+    it.each([
+        ['inactive', async (provider) => Provider.findByIdAndUpdate(provider._id, { $set: { isActive: false } })],
+        ['missing', async (provider) => Provider.findByIdAndDelete(provider._id)],
+    ])('moves an already-claimed Canonical uncertainty to manual review when its provider is %s', async (_state, changeProvider) => {
+        const { provider, product } = await makeCanonicalChain();
+        const order = await makeOrder(product, {
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            providerOrderId: null,
+        });
+        await Order.findByIdAndUpdate(order._id, {
+            $set: { providerIdempotencyKey: `provider:canonical-b2b:${order.orderNumber}` },
+        });
+        await changeProvider(provider);
+        const placeOrder = jest.spyOn(CanonicalB2BAdapter.prototype, 'placeOrder');
+        let result;
+        try {
+            // No adapter override: this exercises the generic provider
+            // resolution path that previously failed/refunded first.
+            result = await executeOrder(order._id);
+        } finally {
+            placeOrder.mockRestore();
+        }
+
+        expect(placeOrder).not.toHaveBeenCalled();
+        expect(result.order.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(result.order.providerStatus).toBe('PLACEMENT_UNCERTAIN');
+        expect(result.order.refunded).toBe(false);
+        expect(result.order.providerIdempotencyKey).toBe(`provider:canonical-b2b:${order.orderNumber}`);
+    });
+
     it('polls arbitrary-name, null-providerCode Canonical uncertainty by reference and persists a recovered upstream ID', async () => {
         const { provider, product } = await makeCanonicalChain({ provider: { providerCode: null } });
         const order = await makeOrder(product, {
@@ -357,6 +388,32 @@ describe('Canonical B2B fulfillment safety', () => {
         expect(stats.manualReview).toBe(1);
     });
 
+    it.each([
+        ['inactive', async (provider) => Provider.findByIdAndUpdate(provider._id, { $set: { isActive: false } })],
+        ['missing', async (provider) => Provider.findByIdAndDelete(provider._id)],
+    ])('moves Canonical reference polling to manual review when its provider is %s', async (_state, changeProvider) => {
+        const { provider, product } = await makeCanonicalChain();
+        const order = await makeOrder(product, {
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            providerOrderId: null,
+        });
+        await Order.findByIdAndUpdate(order._id, {
+            $set: { providerIdempotencyKey: `provider:canonical-b2b:${order.orderNumber}` },
+        });
+        await changeProvider(provider);
+        const adapter = makeAdapter();
+
+        const stats = await pollProcessingOrders(adapter);
+        const fresh = await Order.findById(order._id);
+
+        expect(adapter.placeOrder).not.toHaveBeenCalled();
+        expect(adapter.checkOrderByReference).not.toHaveBeenCalled();
+        expect(fresh.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(fresh.providerStatus).toBe('PLACEMENT_UNCERTAIN');
+        expect(fresh.refunded).toBe(false);
+        expect(stats.manualReview).toBe(1);
+    });
+
     it('does not opt a non-Canonical provider into the Canonical placement contract', async () => {
         const { product } = await makeCanonicalChain({ provider: { adapterType: null } });
         const order = await makeOrder(product);
@@ -373,5 +430,19 @@ describe('Canonical B2B fulfillment safety', () => {
         expect(call.productId).toBe('1000');
         expect(call.referenceId).not.toBe(String(order.orderNumber));
         expect(call.localOrderId).toBe(order._id.toString());
+    });
+
+    it.each([
+        ['inactive', async (provider) => Provider.findByIdAndUpdate(provider._id, { $set: { isActive: false } })],
+        ['missing', async (provider) => Provider.findByIdAndDelete(provider._id)],
+    ])('keeps generic non-Canonical provider resolution failure behavior when the provider is %s', async (_state, changeProvider) => {
+        const { provider, product } = await makeCanonicalChain({ provider: { adapterType: null } });
+        const order = await makeOrder(product);
+        await changeProvider(provider);
+
+        const result = await executeOrder(order._id);
+
+        expect(result.order.status).toBe(ORDER_STATUS.FAILED);
+        expect(result.order.refunded).toBe(true);
     });
 });

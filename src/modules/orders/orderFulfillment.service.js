@@ -279,6 +279,19 @@ const buildCanonicalProviderIdempotencyKey = (order) => (
     `provider:canonical-b2b:${String(order.orderNumber)}`
 );
 
+/**
+ * A durable Canonical placement claim is deliberately more specific than a
+ * providerStatus check. It identifies only an order for which a Canonical
+ * POST may already have reached the upstream supplier, including after a
+ * process crash. Never let such an order enter a generic failure/refund path.
+ */
+const hasCanonicalPlacementUncertainty = (order = {}) => (
+    order.status === ORDER_STATUS.PROCESSING
+    && !order.providerOrderId
+    && order.providerStatus === 'PLACEMENT_UNCERTAIN'
+    && order.providerIdempotencyKey === buildCanonicalProviderIdempotencyKey(order)
+);
+
 const isXenaFulfillmentOrder = (order = {}, providerDoc = null) => {
     const candidates = [
         order.providerCode,
@@ -1098,6 +1111,18 @@ const buildCanonicalUncertaintyRawResponse = (order, recovery) => ({
     placementDiagnostic: order.providerRawResponse?.placementDiagnostic ?? order.providerRawResponse ?? null,
 });
 
+const moveCanonicalUnavailablePlacementToManualReview = async (order, reason, message) => (
+    moveOrderToManualReview(order, {
+        providerOrderId: null,
+        providerStatus: 'PLACEMENT_UNCERTAIN',
+        providerIdempotencyKey: order.providerIdempotencyKey || buildCanonicalProviderIdempotencyKey(order),
+        providerErrorCode: reason,
+        providerErrorMessage: message,
+        rawResponse: buildCanonicalUncertaintyRawResponse(order, 'provider_unavailable'),
+        errorMessage: message,
+    }, { reason })
+);
+
 /**
  * Reconcile an already-claimed Canonical placement only by orderNumber.
  * This intentionally never calls placeOrder(), so it is safe after any
@@ -1210,6 +1235,47 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
 
     if (order.providerOrderId) {
         return { order, placed: false, refunded: order.refunded === true };
+    }
+
+    // This must run before generic provider resolution. A persisted Canonical
+    // claim means an upstream POST may already exist, so an inactive/deleted
+    // provider is not evidence of rejection and must never trigger a refund.
+    if (hasCanonicalPlacementUncertainty(order)) {
+        const claimedProvider = order.productId?.provider
+            ? await Provider.findById(order.productId.provider).catch(() => null)
+            : null;
+
+        if (!claimedProvider || !claimedProvider.isActive || !isCanonicalB2BProvider(claimedProvider)) {
+            const reason = !claimedProvider
+                ? 'CANONICAL_B2B_PROVIDER_MISSING'
+                : !claimedProvider.isActive
+                    ? 'CANONICAL_B2B_PROVIDER_INACTIVE'
+                    : 'CANONICAL_B2B_PROVIDER_UNAVAILABLE';
+            const message = !claimedProvider
+                ? 'Canonical B2B provider is no longer available for placement recovery.'
+                : !claimedProvider.isActive
+                    ? `Canonical B2B provider '${claimedProvider.name}' is inactive; placement requires manual review.`
+                    : 'Canonical B2B provider can no longer be used for placement recovery.';
+            const reviewOrder = await moveCanonicalUnavailablePlacementToManualReview(order, reason, message);
+            return { order: reviewOrder, placed: false, refunded: false };
+        }
+
+        try {
+            const adapter = provider || getProviderAdapter(claimedProvider);
+            const recovery = await recoverCanonicalUncertainPlacement(order, adapter);
+            return {
+                order: recovery.order || await Order.findById(orderId),
+                placed: false,
+                refunded: recovery.order?.refunded === true,
+            };
+        } catch (_) {
+            const reviewOrder = await moveCanonicalUnavailablePlacementToManualReview(
+                order,
+                'CANONICAL_B2B_PROVIDER_UNAVAILABLE',
+                'Canonical B2B provider cannot be used for placement recovery.'
+            );
+            return { order: reviewOrder, placed: false, refunded: false };
+        }
     }
 
     const actorId = auditContext?.actorId ?? order.userId;
@@ -2111,11 +2177,41 @@ const pollCanonicalUncertainPlacements = async (providerOverride, stats) => {
     const processedIds = new Set();
     for (const order of candidates) {
         const providerId = order.productId?.provider;
-        if (!providerId) continue;
+        if (!providerId) {
+            if (hasCanonicalPlacementUncertainty(order)) {
+                await moveCanonicalUnavailablePlacementToManualReview(
+                    order,
+                    'CANONICAL_B2B_PROVIDER_MISSING',
+                    'Canonical B2B provider is no longer available for placement recovery.'
+                );
+                processedIds.add(String(order._id));
+                stats.checked++;
+                stats.manualReview++;
+            }
+            continue;
+        }
 
         try {
             const providerDoc = await Provider.findById(providerId);
-            if (!providerDoc?.isActive || !isCanonicalB2BProvider(providerDoc)) continue;
+            if (!providerDoc?.isActive || !isCanonicalB2BProvider(providerDoc)) {
+                if (hasCanonicalPlacementUncertainty(order)) {
+                    const reason = !providerDoc
+                        ? 'CANONICAL_B2B_PROVIDER_MISSING'
+                        : !providerDoc.isActive
+                            ? 'CANONICAL_B2B_PROVIDER_INACTIVE'
+                            : 'CANONICAL_B2B_PROVIDER_UNAVAILABLE';
+                    const message = !providerDoc
+                        ? 'Canonical B2B provider is no longer available for placement recovery.'
+                        : !providerDoc.isActive
+                            ? `Canonical B2B provider '${providerDoc.name}' is inactive; placement requires manual review.`
+                            : 'Canonical B2B provider can no longer be used for placement recovery.';
+                    await moveCanonicalUnavailablePlacementToManualReview(order, reason, message);
+                    processedIds.add(String(order._id));
+                    stats.checked++;
+                    stats.manualReview++;
+                }
+                continue;
+            }
 
             const adapter = providerOverride || getProviderAdapter(providerDoc);
             const recovery = await recoverCanonicalUncertainPlacement(order, adapter, { countRetry: true });
