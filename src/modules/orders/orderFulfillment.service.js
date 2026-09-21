@@ -269,6 +269,16 @@ const normalizeProviderCode = (value) => String(value || '').trim().toUpperCase(
 
 const normalizeProviderSlug = (value) => String(value || '').trim().toLowerCase();
 
+const CANONICAL_B2B_ADAPTER_TYPE = 'canonical-b2b';
+
+const isCanonicalB2BProvider = (providerDoc = null) => (
+    providerDoc?.adapterType === CANONICAL_B2B_ADAPTER_TYPE
+);
+
+const buildCanonicalProviderIdempotencyKey = (order) => (
+    `provider:canonical-b2b:${String(order.orderNumber)}`
+);
+
 const isXenaFulfillmentOrder = (order = {}, providerDoc = null) => {
     const candidates = [
         order.providerCode,
@@ -1051,6 +1061,110 @@ const moveOrderToManualReview = async (order, statusResult = {}, { reason = 'PRO
     return manualReviewOrder;
 };
 
+const claimCanonicalPlacementAttempt = async (order) => {
+    const referenceId = String(order.orderNumber);
+    const providerIdempotencyKey = buildCanonicalProviderIdempotencyKey(order);
+    const now = new Date();
+
+    return Order.findOneAndUpdate(
+        {
+            _id: order._id,
+            status: ORDER_STATUS.PROCESSING,
+            providerOrderId: { $in: [null, ''] },
+            providerIdempotencyKey: { $in: [null, ''] },
+        },
+        {
+            $set: {
+                providerIdempotencyKey,
+                // Persist the conservative state before POST. If this process
+                // stops after dispatch, later work can only reconcile by the
+                // stable upstream reference; it must never re-place.
+                providerStatus: 'PLACEMENT_UNCERTAIN',
+                providerRawResponse: {
+                    placement: 'attempt_claimed',
+                    referenceId,
+                },
+                lastCheckedAt: now,
+            },
+        },
+        { new: true }
+    );
+};
+
+const buildCanonicalUncertaintyRawResponse = (order, recovery) => ({
+    placement: 'uncertain',
+    referenceId: String(order.orderNumber),
+    recovery,
+    placementDiagnostic: order.providerRawResponse?.placementDiagnostic ?? order.providerRawResponse ?? null,
+});
+
+/**
+ * Reconcile an already-claimed Canonical placement only by orderNumber.
+ * This intentionally never calls placeOrder(), so it is safe after any
+ * unknown placement outcome or process interruption.
+ */
+const recoverCanonicalUncertainPlacement = async (order, adapter, { countRetry = false } = {}) => {
+    const referenceId = String(order.orderNumber);
+    const defer = async (recovery) => {
+        const now = new Date();
+        const retryCount = Number(order.retryCount || 0) + (countRetry ? 1 : 0);
+        const statusResult = {
+            providerOrderId: null,
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            providerIdempotencyKey: order.providerIdempotencyKey || buildCanonicalProviderIdempotencyKey(order),
+            rawResponse: buildCanonicalUncertaintyRawResponse(order, recovery),
+            errorMessage: null,
+        };
+
+        if (countRetry && retryCount >= MAX_RETRY_COUNT) {
+            const reviewOrder = await moveOrderToManualReview(order, {
+                ...statusResult,
+                retryCount,
+            }, { reason: 'CANONICAL_B2B_PLACEMENT_UNRESOLVED' });
+            return { action: 'manualReview', order: reviewOrder };
+        }
+
+        const deferredOrder = await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                status: ORDER_STATUS.PROCESSING,
+                ...buildProviderResultUpdate(statusResult),
+                retryCount,
+                lastCheckedAt: now,
+            },
+        }, { new: true });
+        return { action: 'pending', order: deferredOrder };
+    };
+
+    if (typeof adapter?.checkOrderByReference !== 'function') {
+        return defer('unsupported');
+    }
+
+    try {
+        const result = await adapter.checkOrderByReference(referenceId);
+        if (!result?.found || result.providerOrderId === null || result.providerOrderId === undefined || result.providerOrderId === '') {
+            return defer('not_found');
+        }
+
+        const recoveredOrder = await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                ...buildProviderResultUpdate(result),
+                lastCheckedAt: new Date(),
+            },
+        }, { new: true });
+
+        // An immediate recovered wait is equivalent to a normal successful
+        // placement response: it should not consume a scheduled poll retry.
+        if (!countRetry && toInternalStatus(result.providerStatus) === ORDER_STATUS.PROCESSING) {
+            return { action: 'pending', order: recoveredOrder };
+        }
+
+        const processed = await processOrderStatusResult(recoveredOrder, result);
+        return { ...processed, order: await Order.findById(order._id) };
+    } catch (_) {
+        return defer('lookup_failed');
+    }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EXECUTE ORDER (called immediately after createOrder commits)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1186,6 +1300,13 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         resolvedProviderDoc = resolvedProvider.provider;
     }
 
+    // Test callers can inject an adapter directly. Canonical behavior must
+    // still be selected from the persisted Provider relationship, never from
+    // an adapter name, slug, or providerCode.
+    if (!resolvedProviderDoc && order.productId?.provider) {
+        resolvedProviderDoc = await Provider.findById(order.productId.provider).catch(() => null);
+    }
+
     // ── Resolve externalProductId via the 3-layer chain ─────────────────────
     // Order → Platform Product → ProviderProduct → externalProductId
     let externalProductId = null;
@@ -1208,6 +1329,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     const mappedCustomerFields = buildProviderParams(order, order.productId, providerProduct);
     const stableOrderUuid = order.idempotencyKey || order._id.toString();
     const isXenaOrder = isXenaFulfillmentOrder(order, resolvedProviderDoc);
+    const isCanonicalOrder = isCanonicalB2BProvider(resolvedProviderDoc);
 
     if (isXenaOrder && !externalProductId) {
         const providerIdempotencyKey = buildXenaProviderIdempotencyKey(order._id);
@@ -1244,6 +1366,37 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         }
     }
 
+    // A persisted Canonical claim means a POST may already have reached the
+    // upstream provider. Reconcile only by the stable orderNumber reference;
+    // never issue a replacement placement request.
+    if (isCanonicalOrder && (order.providerStatus === 'PLACEMENT_UNCERTAIN' || order.providerIdempotencyKey)) {
+        const recovery = await recoverCanonicalUncertainPlacement(order, resolvedProvider);
+        return {
+            order: recovery.order || await Order.findById(orderId),
+            placed: false,
+            refunded: recovery.order?.refunded === true,
+        };
+    }
+
+    let canonicalPlacementClaim = null;
+    if (isCanonicalOrder) {
+        canonicalPlacementClaim = await claimCanonicalPlacementAttempt(order);
+        if (!canonicalPlacementClaim) {
+            const currentOrder = await Order.findById(orderId);
+            if (currentOrder?.status === ORDER_STATUS.PROCESSING &&
+                !currentOrder.providerOrderId &&
+                (currentOrder.providerStatus === 'PLACEMENT_UNCERTAIN' || currentOrder.providerIdempotencyKey)) {
+                const recovery = await recoverCanonicalUncertainPlacement(currentOrder, resolvedProvider);
+                return {
+                    order: recovery.order || await Order.findById(orderId),
+                    placed: false,
+                    refunded: recovery.order?.refunded === true,
+                };
+            }
+            return { order: currentOrder, placed: false, refunded: currentOrder?.refunded === true };
+        }
+    }
+
     // ── Call the provider ──────────────────────────────────────────────────────
     console.log(`[Fulfillment] Placing order ${orderId} with provider…`);
 
@@ -1277,25 +1430,50 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             throw missingExternalIdError;
         }
 
-        result = await resolvedProvider.placeOrder({
-            productId: String(externalProductId),
-            externalProductId: String(externalProductId),
-            amount: order.quantity,
-            quantity: order.quantity,
-            localOrderId: order._id.toString(),
-            orderId: order._id.toString(),
-            orderNumber: order.orderNumber,
-            referenceId: stableOrderUuid,
-            idempotencyKey: order.idempotencyKey ?? null,
-            orderUuid: stableOrderUuid,
-            order_uuid: stableOrderUuid,
-            params: mappedCustomerFields,
-            product: order.productId,
-            providerProduct,
-            ...mappedCustomerFields,   // ← spread translated customer fields onto params
-        });
+        result = isCanonicalOrder
+            ? await resolvedProvider.placeOrder({
+                externalProductId: String(externalProductId),
+                quantity: order.quantity,
+                referenceId: String(order.orderNumber),
+                params: mappedCustomerFields,
+            })
+            : await resolvedProvider.placeOrder({
+                productId: String(externalProductId),
+                externalProductId: String(externalProductId),
+                amount: order.quantity,
+                quantity: order.quantity,
+                localOrderId: order._id.toString(),
+                orderId: order._id.toString(),
+                orderNumber: order.orderNumber,
+                referenceId: stableOrderUuid,
+                idempotencyKey: order.idempotencyKey ?? null,
+                orderUuid: stableOrderUuid,
+                order_uuid: stableOrderUuid,
+                params: mappedCustomerFields,
+                product: order.productId,
+                providerProduct,
+                ...mappedCustomerFields,   // ← spread translated customer fields onto params
+            });
         }
     } catch (err) {
+        if (isCanonicalOrder) {
+            // A thrown Canonical placement error has an unknown remote outcome.
+            // Keep diagnostics intentionally small and never retain request data.
+            result = {
+                success: true,
+                providerOrderId: null,
+                providerStatus: 'PLACEMENT_UNCERTAIN',
+                unifiedStatus: 'PENDING',
+                referenceId: String(order.orderNumber),
+                rawResponse: {
+                    placement: 'uncertain',
+                    referenceId: String(order.orderNumber),
+                    transportCode: typeof err?.code === 'string' ? err.code : null,
+                    httpStatus: Number(err?.response?.status ?? err?.statusCode) || null,
+                },
+                errorMessage: null,
+            };
+        } else {
         // Classify the error: transient (network/timeout) vs hard rejection.
         //
         // TRANSIENT → keep PROCESSING so the cron can retry later.
@@ -1332,6 +1510,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 errorMessage: err.message,
             };
         }
+        }
     }
 
     const logResult = isFazerCardsCodeDeliveryOrder(order.productId, providerProduct)
@@ -1361,6 +1540,27 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     let newStatus;
     let refundIssued = false;
     const now = new Date();
+
+    if (isCanonicalOrder && result?.providerStatus === 'PLACEMENT_UNCERTAIN' && !result.providerOrderId) {
+        const uncertainOrder = await Order.findByIdAndUpdate(orderId, {
+            $set: {
+                status: ORDER_STATUS.PROCESSING,
+                ...buildProviderResultUpdate({
+                    ...result,
+                    providerIdempotencyKey: canonicalPlacementClaim?.providerIdempotencyKey
+                        || order.providerIdempotencyKey
+                        || buildCanonicalProviderIdempotencyKey(order),
+                }),
+                lastCheckedAt: now,
+            },
+        }, { new: true });
+        const recovery = await recoverCanonicalUncertainPlacement(uncertainOrder, resolvedProvider);
+        return {
+            order: recovery.order || await Order.findById(orderId),
+            placed: false,
+            refunded: recovery.order?.refunded === true,
+        };
+    }
 
     if (result.manualReview === true) {
         const reviewOrder = await moveOrderToManualReview(order, result);
@@ -1526,6 +1726,25 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
 
     // ─── END OF TOP-LEVEL CRASH GUARD ──────────────────────────────────────
     } catch (fatalErr) {
+        // A Canonical placement claim is durable evidence that POST may have
+        // been dispatched. Even a local follow-up failure must not turn that
+        // unknown remote outcome into a refund; the reference poller owns its
+        // later reconciliation.
+        const claimedOrder = await Order.findById(orderId)
+            .populate('productId', 'provider')
+            .catch(() => null);
+        const claimedProvider = claimedOrder?.productId?.provider
+            ? await Provider.findById(claimedOrder.productId.provider).catch(() => null)
+            : null;
+        if (isCanonicalB2BProvider(claimedProvider) &&
+            claimedOrder?.status === ORDER_STATUS.PROCESSING &&
+            !claimedOrder.providerOrderId &&
+            claimedOrder.providerIdempotencyKey === buildCanonicalProviderIdempotencyKey(claimedOrder) &&
+            claimedOrder.providerStatus === 'PLACEMENT_UNCERTAIN') {
+            console.error(`[Fulfillment] Canonical recovery crash for order ${orderId}; retaining placement uncertainty:`, fatalErr.message);
+            return { order: claimedOrder, placed: false, refunded: claimedOrder.refunded === true };
+        }
+
         // Something completely unexpected crashed — mark FAILED + refund
         console.error(`[Fulfillment] FATAL crash in executeOrder for ${orderId}:`, fatalErr);
 
@@ -1876,6 +2095,46 @@ const processOrderStatusResult = async (order, statusResult) => {
 const _escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
+ * Poll only Canonical placement claims that have no upstream order ID. These
+ * orders cannot enter the normal provider-ID batch path, and are deliberately
+ * resolved through the current Product -> Provider relationship because their
+ * providerCode is allowed to be null or administrator-defined.
+ */
+const pollCanonicalUncertainPlacements = async (providerOverride, stats) => {
+    const candidates = await Order.find({
+        status: ORDER_STATUS.PROCESSING,
+        executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        providerStatus: 'PLACEMENT_UNCERTAIN',
+        providerOrderId: { $in: [null, ''] },
+    }).populate('productId', 'provider').sort({ lastCheckedAt: 1 }).limit(200);
+
+    const processedIds = new Set();
+    for (const order of candidates) {
+        const providerId = order.productId?.provider;
+        if (!providerId) continue;
+
+        try {
+            const providerDoc = await Provider.findById(providerId);
+            if (!providerDoc?.isActive || !isCanonicalB2BProvider(providerDoc)) continue;
+
+            const adapter = providerOverride || getProviderAdapter(providerDoc);
+            const recovery = await recoverCanonicalUncertainPlacement(order, adapter, { countRetry: true });
+            processedIds.add(String(order._id));
+            stats.checked++;
+            if (recovery.action === 'completed') stats.completed++;
+            else if (recovery.action === 'failed') stats.failed++;
+            else if (recovery.action === 'manualReview') stats.manualReview++;
+            else stats.pending++;
+        } catch (err) {
+            stats.errors.push(`[CANONICAL_UNCERTAIN:${order._id}] ${err.message}`);
+            stats.pending++;
+        }
+    }
+
+    return processedIds;
+};
+
+/**
  * pollProcessingOrders(providerOverride?)
  *
  * Called by the cron job every N minutes.
@@ -1899,6 +2158,8 @@ const _escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  */
 const pollProcessingOrders = async (providerOverride = null) => {
     const stats = { checked: 0, completed: 0, failed: 0, pending: 0, manualReview: 0, errors: [] };
+
+    const canonicalReferencePolledOrderIds = await pollCanonicalUncertainPlacements(providerOverride, stats);
 
     const xenaOrdersMissingProviderId = await Order.find({
         status: ORDER_STATUS.PROCESSING,
@@ -1926,11 +2187,18 @@ const pollProcessingOrders = async (providerOverride = null) => {
     }
 
     // ── 1. Fetch all PROCESSING automatic orders with a provider-side ID ──────
-    const processingOrders = await Order.find({
+    const normalPollingQuery = {
         status: ORDER_STATUS.PROCESSING,
         executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
         providerOrderId: { $ne: null },
-    }).sort({ lastCheckedAt: 1 }).limit(200);  // oldest-checked first, cap 200/run
+    };
+    // A reference recovery that just found a provider ID already applied this
+    // cycle's status; don't immediately count it again in the legacy batch.
+    if (canonicalReferencePolledOrderIds.size) {
+        normalPollingQuery._id = { $nin: [...canonicalReferencePolledOrderIds] };
+    }
+    const processingOrders = await Order.find(normalPollingQuery)
+        .sort({ lastCheckedAt: 1 }).limit(200);  // oldest-checked first, cap 200/run
 
     if (!processingOrders.length) return stats;
 
