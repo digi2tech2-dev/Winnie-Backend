@@ -7,7 +7,11 @@
  * Wraps the provider model with business rules + audit.
  */
 
-const { Provider, PROVIDER_AUTH_TYPES, PROVIDER_INTEGRATION_TYPES } = require('../providers/provider.model');
+const {
+    Provider,
+    PROVIDER_AUTH_TYPES,
+    PROVIDER_INTEGRATION_TYPES,
+} = require('../providers/provider.model');
 const { PROVIDER_CODES } = require('../providers/provider.constants');
 const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
@@ -65,10 +69,14 @@ const normalizeProviderPayload = (data = {}, { applyDefaults = false } = {}) => 
     const integrationType = data.integrationType !== undefined || data.providerType !== undefined || applyDefaults
         ? String(data.integrationType || data.providerType || PROVIDER_INTEGRATION_TYPES.API).toUpperCase()
         : undefined;
+    const adapterType = data.adapterType !== undefined
+        ? (String(data.adapterType || '').trim().toLowerCase() || null)
+        : undefined;
     const normalized = {
         ...data,
         slug: data.slug || data.code,
         providerCode: data.providerCode ? String(data.providerCode).toUpperCase() : undefined,
+        adapterType,
         integrationType,
         authType,
     };
@@ -149,11 +157,13 @@ const updateProvider = async (id, data, adminId) => {
         username,
         password,
         providerCode,
+        adapterType,
     } = normalizeProviderPayload(data);
 
     if (name !== undefined) provider.name = name;
     if (slug !== undefined) provider.slug = slug;
     if (providerCode !== undefined) provider.providerCode = providerCode;
+    if (adapterType !== undefined) provider.adapterType = adapterType;
     if (baseUrl !== undefined) provider.baseUrl = baseUrl;
     if (integrationType !== undefined) provider.integrationType = integrationType;
     if (authType !== undefined) provider.authType = authType;

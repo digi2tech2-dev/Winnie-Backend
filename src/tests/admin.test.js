@@ -874,6 +874,27 @@ describe('[4] Joi Validation Schemas', () => {
         expect(err).toBeNull();
     });
 
+    it('createProvider: accepts the optional canonical adapter type', () => {
+        expect(runBodyValidation(schemas.createProvider, {
+            name: 'Canonical Provider',
+            code: 'canonical-provider',
+            baseUrl: 'https://provider.example.com/client/api',
+            integrationType: 'API',
+            adapterType: 'canonical-b2b',
+            authType: 'API_KEY',
+            apiKey: 'secret-api-token',
+        })).toBeNull();
+    });
+
+    it('createProvider: rejects an unsupported explicit adapter type', () => {
+        expect(runBodyValidation(schemas.createProvider, {
+            name: 'Unsupported Provider',
+            code: 'unsupported-provider',
+            baseUrl: 'https://provider.example.com/client/api',
+            adapterType: 'mistyped-adapter',
+        })).not.toBeNull();
+    });
+
     it('createProvider: accepts conditional quick-create credential fields', () => {
         expect(runBodyValidation(schemas.createProvider, {
             name: 'API Key Provider',

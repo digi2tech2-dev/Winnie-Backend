@@ -18,6 +18,9 @@ const PROVIDER_AUTH_TYPES = Object.freeze({
     BEARER_TOKEN: 'BEARER_TOKEN',
     USERNAME_PASSWORD: 'USERNAME_PASSWORD',
 });
+const PROVIDER_ADAPTER_TYPES = Object.freeze({
+    CANONICAL_B2B: 'canonical-b2b',
+});
 
 /**
  * Provider — an external data source that supplies raw product inventory.
@@ -60,6 +63,23 @@ const providerSchema = new mongoose.Schema(
             trim: true,
             default: null,
             sparse: true,
+        },
+
+        /**
+         * Optional explicit adapter registry key. Existing providers continue
+         * to use their slug/name/providerCode resolution when it is absent.
+         */
+        adapterType: {
+            type: String,
+            trim: true,
+            lowercase: true,
+            enum: Object.values(PROVIDER_ADAPTER_TYPES),
+            set: (value) => {
+                if (value == null) return null;
+                const normalized = String(value).trim().toLowerCase();
+                return normalized || null;
+            },
+            default: null,
         },
 
         /**
@@ -273,4 +293,9 @@ providerSchema.index({ isActive: 1 });
 
 const Provider = mongoose.model('Provider', providerSchema);
 
-module.exports = { Provider, PROVIDER_AUTH_TYPES, PROVIDER_INTEGRATION_TYPES };
+module.exports = {
+    Provider,
+    PROVIDER_ADAPTER_TYPES,
+    PROVIDER_AUTH_TYPES,
+    PROVIDER_INTEGRATION_TYPES,
+};

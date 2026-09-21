@@ -6,8 +6,10 @@
  * Resolves the correct provider adapter for a given Provider document.
  *
  * ─── Lookup priority ──────────────────────────────────────────────────────────
- * 1. provider.slug   (preferred — URL-safe, e.g. "royal-crown")
- * 2. provider.name   (lowercased, trimmed  — e.g. "royal crown" → found via "royal crown")
+ * 1. provider.adapterType (explicit shared adapter key)
+ * 2. provider.slug   (preferred legacy key — URL-safe, e.g. "royal-crown")
+ * 3. provider.name   (lowercased, trimmed  — e.g. "royal crown" → found via "royal crown")
+ * 4. provider.providerCode
  *
  * Falls back to MockProviderAdapter if no match is found, which is
  * appropriate for development and test environments.
@@ -35,6 +37,7 @@ const { TorosfonAdapter } = require('./toros.adapter');
 const { AlkasrVipAdapter } = require('./alkasr.adapter');
 const { XenaRechargeAdapter } = require('./xenaRecharge.adapter');
 const { FazerCardsAdapter } = require('../fazercards/fazercards.adapter');
+const { CanonicalB2BAdapter } = require('./canonicalB2B.adapter');
 
 // ─── Registry ────────────────────────────────────────────────────────────────
 //
@@ -82,15 +85,44 @@ const registry = new Map([
     ['mock', MockProviderAdapter],
 ]);
 
+const adapterTypeRegistry = new Map([
+    ['canonical-b2b', CanonicalB2BAdapter],
+]);
+
+const unsupportedAdapterTypeError = (adapterType) => {
+    const error = new Error(`UNSUPPORTED_PROVIDER: Unsupported adapterType="${adapterType}".`);
+    error.code = 'UNSUPPORTED_PROVIDER';
+    return error;
+};
+
+const resolveAdapterClass = (provider) => {
+    const byAdapterType = (provider.adapterType ?? '').toLowerCase().trim();
+    if (byAdapterType) {
+        const AdapterClass = adapterTypeRegistry.get(byAdapterType);
+        if (!AdapterClass) throw unsupportedAdapterTypeError(byAdapterType);
+        return AdapterClass;
+    }
+
+    const bySlug = (provider.slug ?? '').toLowerCase().trim();
+    const byName = (provider.name ?? '').toLowerCase().trim();
+    const byCode = (provider.providerCode ?? '').toLowerCase().trim();
+    return registry.get(bySlug)
+        ?? registry.get(byName)
+        ?? registry.get(byCode.replace(/_/g, '-'))
+        ?? null;
+};
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 /**
  * Get an adapter instance for the given provider document.
  *
  * Lookup order:
- *   1. provider.slug  (exact match, lowercase)
- *   2. provider.name  (lowercase, trimmed)
- *   3. Fallback → MockProviderAdapter
+ *   1. provider.adapterType (exact match, lowercase)
+ *   2. provider.slug  (exact match, lowercase)
+ *   3. provider.name  (lowercase, trimmed)
+ *   4. provider.providerCode
+ *   5. Fallback → MockProviderAdapter
  *
  * @param {Object} provider          - Provider Mongoose document
  * @param {Object} [adapterOptions]  - extra options forwarded to adapter constructor
@@ -98,14 +130,7 @@ const registry = new Map([
  * @returns {BaseProviderAdapter}
  */
 const getAdapter = (provider, adapterOptions = {}) => {
-    const bySlug = (provider.slug ?? '').toLowerCase().trim();
-    const byName = (provider.name ?? '').toLowerCase().trim();
-    const byCode = (provider.providerCode ?? '').toLowerCase().trim();
-
-    const AdapterClass = registry.get(bySlug)
-        ?? registry.get(byName)
-        ?? registry.get(byCode.replace(/_/g, '-'))
-        ?? MockProviderAdapter;
+    const AdapterClass = resolveAdapterClass(provider) ?? MockProviderAdapter;
 
     return new AdapterClass(provider, adapterOptions);
 };
@@ -124,14 +149,13 @@ const getAdapter = (provider, adapterOptions = {}) => {
 const getProviderAdapter = (provider, options = {}) => {
     const bySlug = (provider.slug ?? '').toLowerCase().trim();
     const byName = (provider.name ?? '').toLowerCase().trim();
-    const byCode = (provider.providerCode ?? '').toLowerCase().trim();
-
-    const AdapterClass = registry.get(bySlug) ?? registry.get(byName) ?? registry.get(byCode.replace(/_/g, '-'));
+    const byAdapterType = (provider.adapterType ?? '').toLowerCase().trim();
+    const AdapterClass = resolveAdapterClass(provider);
 
     if (!AdapterClass) {
         if (options.strict) {
             throw new Error(
-                `UNSUPPORTED_PROVIDER: No adapter registered for slug="${bySlug}" / name="${byName}".`
+                `UNSUPPORTED_PROVIDER: No adapter registered for adapterType="${byAdapterType}" / slug="${bySlug}" / name="${byName}".`
             );
         }
         return new MockProviderAdapter(provider, options);

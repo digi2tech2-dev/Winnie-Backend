@@ -170,6 +170,10 @@ class BaseProviderAdapter {
             minQty: dto.minQty ?? 1,
             maxQty: dto.maxQty ?? 9999,
             isActive: dto.isActive ?? true,
+            ...(dto.category !== undefined ? { category: dto.category == null ? null : String(dto.category) } : {}),
+            ...(dto.categoryName !== undefined ? { categoryName: dto.categoryName == null ? null : String(dto.categoryName) } : {}),
+            ...(dto.currency !== undefined ? { currency: dto.currency == null ? null : String(dto.currency).toUpperCase() } : {}),
+            ...(dto.available !== undefined ? { available: Boolean(dto.available) } : {}),
             rawPayload: dto.rawPayload ?? dto,
         };
     }

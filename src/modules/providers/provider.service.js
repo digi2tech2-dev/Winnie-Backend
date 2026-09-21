@@ -15,11 +15,11 @@ const { hasSecretValue } = require('../../shared/utils/secretEncryption');
 // PROVIDER CRUD
 // =============================================================================
 
-const createProvider = async ({ name, baseUrl, apiKey, apiToken, syncInterval, isActive }) => {
+const createProvider = async ({ name, baseUrl, apiKey, apiToken, adapterType, syncInterval, isActive }) => {
     const existing = await Provider.findOne({ name: new RegExp(`^${name}$`, 'i') });
     if (existing) throw new ConflictError(`A provider named '${name}' already exists.`);
 
-    return Provider.create({ name, baseUrl, apiKey, apiToken, syncInterval, isActive });
+    return Provider.create({ name, baseUrl, apiKey, apiToken, adapterType, syncInterval, isActive });
 };
 
 const listProviders = async ({ includeInactive = false } = {}) => {
@@ -34,7 +34,7 @@ const getProviderById = async (providerId) => {
 };
 
 const updateProvider = async (providerId, updates) => {
-    const allowed = ['name', 'baseUrl', 'apiKey', 'apiToken', 'syncInterval', 'isActive']; 
+    const allowed = ['name', 'baseUrl', 'apiKey', 'apiToken', 'adapterType', 'syncInterval', 'isActive'];
     const safe = Object.fromEntries(
         Object.entries(updates).filter(([k]) => allowed.includes(k))
     );

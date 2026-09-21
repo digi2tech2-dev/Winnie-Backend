@@ -139,22 +139,27 @@ const runWithConcurrency = async (tasks, limit) => {
  * @returns {Promise<{ doc: Document, isNew: boolean }>}
  */
 const _upsertOne = async (providerId, dto, now) => {
+    const set = {
+        rawName: dto.rawName,
+        rawPrice: dto.rawPrice,
+        minQty: dto.minQty ?? 1,
+        maxQty: dto.maxQty ?? 9999,
+        isActive: dto.isActive ?? true,
+        rawPayload: dto.rawPayload ?? null,
+        lastSyncedAt: now,
+        // translatedName intentionally absent — admin-owned field
+    };
+    for (const field of ['category', 'categoryName', 'currency', 'available']) {
+        if (dto[field] !== undefined) set[field] = dto[field];
+    }
+
     const doc = await ProviderProduct.findOneAndUpdate(
         {
             provider: providerId,
             externalProductId: dto.externalProductId,
         },
         {
-            $set: {
-                rawName: dto.rawName,
-                rawPrice: dto.rawPrice,
-                minQty: dto.minQty ?? 1,
-                maxQty: dto.maxQty ?? 9999,
-                isActive: dto.isActive ?? true,
-                rawPayload: dto.rawPayload ?? null,
-                lastSyncedAt: now,
-                // translatedName intentionally absent — admin-owned field
-            },
+            $set: set,
         },
         {
             upsert: true,
