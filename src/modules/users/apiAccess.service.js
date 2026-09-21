@@ -56,6 +56,7 @@ const applyGeneratedApiKey = (user, now = new Date()) => {
 
     user.isApiEnabled = true;
     user.apiKeyHash = hashApiKey(apiKey);
+    user.apiKeyRevokedHash = null;
     user.apiKeyPrefix = getPrefix(apiKey);
     user.apiKeyLast4 = getLast4(apiKey);
     user.apiKeyCreatedAt = user.apiKeyCreatedAt || now;
@@ -69,6 +70,7 @@ const applyGeneratedApiKey = (user, now = new Date()) => {
 
 const revokeApiKey = (user, now = new Date()) => {
     user.isApiEnabled = false;
+    user.apiKeyRevokedHash = user.apiKeyHash || user.apiKeyRevokedHash || null;
     user.apiKeyHash = null;
     user.apiKeyRevokedAt = now;
     user.apiToken = null;

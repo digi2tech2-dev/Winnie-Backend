@@ -31,6 +31,8 @@ const whatsappCustomerRoutes = require('./modules/notifications/whatsapp/whatsap
 const whatsappAdminRoutes = require('./modules/notifications/whatsapp/whatsappAdmin.routes');
 const providerRoutes = require('./modules/providers/provider.routes');
 const clientRoutes = require('./modules/client/client.routes');
+const clientCompatRoutes = require('./modules/clientCompat/clientCompat.routes');
+const { clientCompatLimiter } = require('./modules/clientCompat/clientCompat.rateLimiter');
 const reviewRoutes = require('./modules/reviews/review.routes');
 const adminCatalogRoutes = require('./modules/admin/admin.catalog.routes');
 const adminRoutes = require('./modules/admin/admin.routes');    // ← dashboard router
@@ -128,8 +130,14 @@ app.use(API_PREFIX, (_req, res, next) => {
     next();
 });
 
-// Apply general rate limiter to all API routes (500 req / 15 min per IP)
-app.use(API_PREFIX, apiLimiter);
+// Keep the legacy /api limiter unchanged. The canonical alias has its own
+// documented 1000/IP response envelope and must not be consumed twice.
+app.use(API_PREFIX, (req, res, next) => {
+    if (req.path === '/client/api' || req.path.startsWith('/client/api/')) return next();
+    return apiLimiter(req, res, next);
+});
+
+app.use('/client/api', clientCompatLimiter, clientCompatRoutes);
 
 app.use(`${API_PREFIX}/auth`, authRoutes);
 app.use(`${API_PREFIX}/users`, userRoutes);
@@ -149,6 +157,7 @@ app.use(`${API_PREFIX}/notifications`, notificationRoutes);
 app.use(`${API_PREFIX}/me/notifications`, notificationRoutes);
 app.use(`${API_PREFIX}/me/whatsapp-notifications`, whatsappCustomerRoutes);
 app.use(`${API_PREFIX}/providers`, providerRoutes);
+app.use(`${API_PREFIX}/client/api`, clientCompatLimiter, clientCompatRoutes);
 app.use(`${API_PREFIX}/client`, clientRoutes);
 app.use(`${API_PREFIX}/public`, reviewRoutes.publicRouter);
 app.use(`${API_PREFIX}/reviews`, reviewRoutes.customerRouter);

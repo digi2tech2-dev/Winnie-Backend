@@ -45,6 +45,15 @@ const orderSchema = new mongoose.Schema(
             index: true,
         },
 
+        /** Opaque public identifier for canonical B2B order responses. */
+        compatOrderId: {
+            type: String,
+            trim: true,
+            unique: true,
+            sparse: true,
+            index: true,
+        },
+
         productId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'Product',

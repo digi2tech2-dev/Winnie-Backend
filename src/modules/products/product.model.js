@@ -1,6 +1,7 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { getNextSequence } = require('../orders/counter.model');
 const { computeMarkup, isPositive } = require('../../shared/utils/decimalPrecision');
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -72,6 +73,7 @@ const dynamicFieldSchema = new mongoose.Schema(
             trim: true,
             match: [/^[a-z][a-z0-9_]*$/, 'dynamicField.name must be lowercase snake_case'],
         },
+
         label: {
             type: String,
             required: [true, 'dynamicField.label is required'],
@@ -124,6 +126,14 @@ const productSchema = new mongoose.Schema(
             trim: true,
             minlength: [2, 'Product name must be at least 2 characters'],
             maxlength: [200, 'Product name cannot exceed 200 characters'],
+        },
+
+        /** Public numeric identifier used only by the canonical B2B API. */
+        compatProductId: {
+            type: Number,
+            unique: true,
+            sparse: true,
+            index: true,
         },
 
         description: {
@@ -658,6 +668,19 @@ productSchema.pre('validate', function (next) {
     }
 
     return next();
+});
+
+// Keep Mongo _id as the internal identifier. New products receive a public
+// compatibility ID; older documents are assigned lazily by clientCompat.
+productSchema.pre('save', async function (next) {
+    try {
+        if (this.isNew && !this.compatProductId) {
+            this.compatProductId = await getNextSequence('compatProductId', 999);
+        }
+        next();
+    } catch (err) {
+        next(err);
+    }
 });
 
 productSchema.index({ name: 1 });

@@ -204,6 +204,15 @@ const userSchema = new mongoose.Schema(
             default: false,
         },
 
+        /** Optional exact IP allowlist for canonical client API access. */
+        whitelistIps: {
+            type: [String],
+            default: [],
+            set: (ips) => [...new Set((Array.isArray(ips) ? ips : [])
+                .map((ip) => String(ip || '').trim())
+                .filter(Boolean))],
+        },
+
         apiToken: {
             type: String,
             trim: true,
@@ -212,6 +221,14 @@ const userSchema = new mongoose.Schema(
             index: true,
         },
         apiKeyHash: {
+            type: String,
+            trim: true,
+            default: null,
+            select: false,
+        },
+        // Retains only the hash of a revoked key so canonical auth can report
+        // disabled access without accepting the retired credential.
+        apiKeyRevokedHash: {
             type: String,
             trim: true,
             default: null,
@@ -719,6 +736,7 @@ userSchema.methods.toSafeObject = function () {
     delete obj.twoFactorTempTokenExpires;
     delete obj.apiToken;
     delete obj.apiKeyHash;
+    delete obj.apiKeyRevokedHash;
     delete obj.apiKeyLastUsedIp;
     if (obj.whatsappNotifications) {
         delete obj.whatsappNotifications.verificationCodeHash;
