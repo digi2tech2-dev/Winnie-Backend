@@ -22,7 +22,7 @@
  */
 
 const cron = require('node-cron');
-const { pollProcessingOrders } = require('../orders/orderFulfillment.service');
+const { pollProcessingOrders, reconcileFailedOrderRefunds } = require('../orders/orderFulfillment.service');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -59,9 +59,14 @@ const runOnce = async (providerOverride = null) => {
         //   • calls checkOrders() per provider group
         //   • processes each result, refunds on cancellation, retries on transient errors
         const stats = await pollProcessingOrders(providerOverride ?? null);
+        // Reuse the existing five-minute fulfillment cadence for a small,
+        // bounded repair pass. It only settles terminal FAILED orders and uses
+        // the same transactional/ledger idempotency safeguards as live failures.
+        const refundReconciliation = await reconcileFailedOrderRefunds({ limit: 100 });
         const elapsed = Date.now() - startedAt;
-        console.log(`[FulfillmentJob] Poll completed in ${elapsed}ms:`, stats);
-        return stats;
+        const result = { ...stats, refundReconciliation };
+        console.log(`[FulfillmentJob] Poll completed in ${elapsed}ms:`, result);
+        return result;
 
     } catch (err) {
         console.error('[FulfillmentJob] Unhandled error in polling cycle:', err.message);

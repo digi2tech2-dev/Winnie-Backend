@@ -9,13 +9,16 @@
 const mongoose = require('mongoose');
 const { Order, ORDER_STATUS } = require('../orders/order.model');
 const { Product } = require('../products/product.model');
+const { Provider } = require('../providers/provider.model');
+const { getProviderAdapter } = require('../providers/adapters/adapter.factory');
 const { markOrderAsFailed, processOrderRefund } = require('../orders/order.service');
 const { forcedDebitWallet } = require('../wallet/wallet.service');
 const {
+    WalletTransaction,
     LEDGER_TRANSACTION_TYPES,
     TRANSACTION_SOURCE_TYPES,
 } = require('../wallet/walletTransaction.model');
-const { executeOrder } = require('../orders/orderFulfillment.service');
+const { executeOrder, refundFailedOrder } = require('../orders/orderFulfillment.service');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
@@ -155,6 +158,18 @@ const retryOrder = async (orderId, adminId) => {
         );
     }
 
+    const completedRefund = order.refunded === true || await WalletTransaction.exists({
+        reference: order._id,
+        type: 'REFUND',
+        semanticType: LEDGER_TRANSACTION_TYPES.ORDER_REFUND,
+    });
+    if (completedRefund) {
+        throw new BusinessRuleError(
+            'A refunded order cannot be retried through the normal provider retry path.',
+            'REFUNDED_ORDER_NOT_RETRYABLE'
+        );
+    }
+
     if (!order.productId?.provider) {
         throw new BusinessRuleError('No provider linked to this order\'s product.', 'NO_PROVIDER');
     }
@@ -269,7 +284,7 @@ const refundOrder = async (orderId, adminId, remains = 0) => {
  *   'Pending'    → ORDER_STATUS.PROCESSING (no change if already PROCESSING)
  */
 const syncOrderProviderStatus = async (orderId, adminId) => {
-    const order = await Order.findById(orderId).populate('product');
+    const order = await Order.findById(orderId).populate('productId', 'provider');
     if (!order) throw new NotFoundError('Order');
 
     if (!order.providerOrderId) {
@@ -280,7 +295,7 @@ const syncOrderProviderStatus = async (orderId, adminId) => {
     }
 
     // Resolve the provider from the product's provider ref
-    const providerId = order.product?.provider;
+    const providerId = order.productId?.provider;
     if (!providerId) {
         throw new BusinessRuleError(
             'This order\'s product has no linked provider.',
@@ -377,6 +392,11 @@ const syncOrderProviderStatus = async (orderId, adminId) => {
         order.status = ORDER_STATUS.CANCELED;
         statusChanged = true;
         newStatus = 'CANCELED';
+    } else if (['failed', 'fail', 'rejected', 'reject', 'error'].includes(ps) && order.status !== ORDER_STATUS.FAILED) {
+        order.status = ORDER_STATUS.FAILED;
+        order.failedAt = new Date();
+        statusChanged = true;
+        newStatus = 'FAILED';
     } else if ((ps === 'partial' || ps === 'partially_completed') && order.status !== ORDER_STATUS.PARTIAL) {
         const remainsStr = statusResult.rawResponse?.remains
             || statusResult.rawResponse?.data?.remains
@@ -391,29 +411,38 @@ const syncOrderProviderStatus = async (orderId, adminId) => {
     await order.save();
 
     // ── Trigger refund if status changed to CANCELED or PARTIAL ──────────
-    if (statusChanged && (newStatus === 'CANCELED' || newStatus === 'PARTIAL')) {
+    if (statusChanged && (newStatus === 'CANCELED' || newStatus === 'PARTIAL' || newStatus === 'FAILED')) {
         const remains = newStatus === 'PARTIAL' ? (order.remains || 0) : 0;
         let refundIssued = false;
         let notificationOrder = null;
         try {
-            notificationOrder = await processOrderRefund(order._id, remains, {
-                actorId: adminId,
-                actorRole: ACTOR_ROLES.ADMIN,
-                notificationSource: 'admin_provider_sync',
-                notificationReason: newStatus === 'PARTIAL' ? 'PARTIAL_DELIVERY' : 'PROVIDER_CANCELLED',
-                providerRejected: newStatus === 'CANCELED',
-            });
-            refundIssued = true;
+            if (newStatus === 'FAILED') {
+                refundIssued = await refundFailedOrder(order, {
+                    source: 'admin_provider_sync',
+                    reason: 'PROVIDER_FAILED',
+                    providerRejected: true,
+                });
+                notificationOrder = await Order.findById(order._id);
+            } else {
+                notificationOrder = await processOrderRefund(order._id, remains, {
+                    actorId: adminId,
+                    actorRole: ACTOR_ROLES.ADMIN,
+                    notificationSource: 'admin_provider_sync',
+                    notificationReason: newStatus === 'PARTIAL' ? 'PARTIAL_DELIVERY' : 'PROVIDER_CANCELLED',
+                    providerRejected: newStatus === 'CANCELED',
+                });
+                refundIssued = true;
+            }
         } catch (refundErr) {
             // Don't break the sync — log the refund failure
             console.error(`[AdminOrders] Refund failed after sync for order ${orderId}:`, refundErr.message);
             notificationOrder = await Order.findById(order._id).catch(() => null);
         }
 
-        if (newStatus === 'CANCELED') {
+        if (newStatus === 'CANCELED' || newStatus === 'FAILED') {
             notifyOrderFailed(notificationOrder || order, {
                 source: 'admin_provider_sync',
-                reason: 'PROVIDER_CANCELLED',
+                reason: newStatus === 'FAILED' ? 'PROVIDER_FAILED' : 'PROVIDER_CANCELLED',
                 notifyUser: !(refundIssued || notificationOrder?.refunded === true),
             });
         }
