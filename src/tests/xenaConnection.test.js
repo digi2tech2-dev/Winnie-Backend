@@ -476,6 +476,83 @@ describe('Xena status and balance', () => {
     });
 });
 
+describe('Xena durable placement gate', () => {
+    const createConnectedProvider = async () => {
+        const provider = await createXenaProvider();
+        const state = await XenaConnection.create({ provider: provider._id, status: 'connected' });
+        state.setConnectionId('con_placement_gate');
+        await state.save();
+        return { provider, state };
+    };
+
+    it('atomically acquires, marks dispatching, and releases only for its owner token', async () => {
+        const { provider } = await createConnectedProvider();
+        const gate = await xenaService.acquirePlacementGate({ provider, orderId: 'order-a' });
+
+        expect(gate).toMatchObject({ acquired: true, orderId: 'order-a', phase: 'PREFLIGHT' });
+        await expect(xenaService.markPlacementGatePostDispatching({
+            provider,
+            orderId: 'order-a',
+            ownerToken: 'not-the-owner',
+        })).rejects.toMatchObject({ code: xenaService.XENA_PLACEMENT_GATE_LOST });
+
+        const dispatching = await xenaService.markPlacementGatePostDispatching({
+            provider,
+            orderId: 'order-a',
+            ownerToken: gate.ownerToken,
+        });
+        expect(dispatching.phase).toBe('POST_DISPATCHING');
+
+        await expect(xenaService.releasePlacementGate({
+            provider,
+            orderId: 'order-a',
+            ownerToken: 'not-the-owner',
+        })).resolves.toBe(false);
+        await expect(xenaService.releasePlacementGate({
+            provider,
+            orderId: 'order-a',
+            ownerToken: gate.ownerToken,
+        })).resolves.toBe(true);
+    });
+
+    it('reclaims only an expired PREFLIGHT lock and leaves stale POST_DISPATCHING for recovery', async () => {
+        const { provider } = await createConnectedProvider();
+        const expiredAt = new Date(Date.now() - 1000);
+
+        await XenaConnection.updateOne({ provider: provider._id }, {
+            $set: {
+                placementLock: {
+                    ownerToken: 'old-preflight-owner',
+                    orderId: 'old-preflight-order',
+                    phase: 'PREFLIGHT',
+                    acquiredAt: expiredAt,
+                    expiresAt: expiredAt,
+                },
+            },
+        });
+        const reclaimed = await xenaService.acquirePlacementGate({ provider, orderId: 'new-order' });
+        expect(reclaimed).toMatchObject({ acquired: true, orderId: 'new-order', phase: 'PREFLIGHT' });
+
+        await XenaConnection.updateOne({ provider: provider._id }, {
+            $set: {
+                placementLock: {
+                    ownerToken: 'old-post-owner',
+                    orderId: 'old-post-order',
+                    phase: 'POST_DISPATCHING',
+                    acquiredAt: expiredAt,
+                    expiresAt: expiredAt,
+                },
+            },
+        });
+        const blocked = await xenaService.acquirePlacementGate({ provider, orderId: 'later-order' });
+        expect(blocked).toMatchObject({
+            acquired: false,
+            stalePostDispatching: true,
+            lock: { ownerToken: 'old-post-owner', orderId: 'old-post-order', phase: 'POST_DISPATCHING' },
+        });
+    });
+});
+
 describe('Xena error mapping', () => {
     it('maps 401 challenge errors to provider auth failed without leaking Authorization values', async () => {
         const provider = await createXenaProvider();

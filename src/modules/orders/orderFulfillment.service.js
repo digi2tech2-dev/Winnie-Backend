@@ -49,6 +49,7 @@ const {
 } = require('../notifications/notification.events');
 const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
 const { storeDeliveredCodesForOrder, sanitizeProviderCodePayload } = require('../providers/fazercards/fazercardsDelivery.service');
+const xenaService = require('../providers/xena/xena.service');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IDEMPOTENT REFUND
@@ -352,6 +353,142 @@ const claimXenaFulfillmentAttempt = async ({ order, providerProduct, mappedCusto
 
     const current = await Order.findById(order._id);
     return { claimed: null, current, idempotencyKey };
+};
+
+const XENA_GATE_WAIT_TIMEOUT_MS = 120_000;
+const XENA_GATE_WAIT_INTERVAL_MS = 250;
+
+const waitFor = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const xenaPlacementIdentityFilter = (orderId) => ({
+    _id: orderId,
+    status: ORDER_STATUS.PROCESSING,
+    providerOrderId: { $in: [null, ''] },
+    providerIdempotencyKey: buildXenaProviderIdempotencyKey(orderId),
+    providerCode: 'xena-recharge',
+});
+
+const loadExactXenaPlacementOwner = async ({ provider, lock }) => {
+    if (!lock?.orderId || !lock?.ownerToken) return null;
+    const ownerOrder = await Order.findById(lock.orderId)
+        .populate('productId', 'provider providerCode')
+        .catch(() => null);
+    const ownerProviderId = ownerOrder?.productId?.provider?._id || ownerOrder?.productId?.provider;
+    if (!ownerOrder || !isXenaFulfillmentOrder(ownerOrder, provider) || String(ownerProviderId || '') !== String(provider?._id || '')) {
+        return null;
+    }
+    return ownerOrder;
+};
+
+// A local order status is never evidence that an already-dispatched Xena POST
+// did not execute. Until an authoritative manual-resolution workflow exists,
+// only a trusted persisted Xena recharge id can release POST_AMBIGUOUS.
+const xenaOwnerIsDurablyResolved = (ownerOrder) => Boolean(
+    typeof ownerOrder?.providerOrderId === 'string' && ownerOrder.providerOrderId.trim()
+);
+
+const blockNewXenaPlacementForAmbiguousGate = () => {
+    const err = new Error('Xena has an unresolved recharge dispatch and is temporarily unavailable for new placements.');
+    err.code = xenaService.XENA_PLACEMENT_GATE_AMBIGUOUS;
+    return err;
+};
+
+const recoverStaleXenaPostDispatchingLock = async ({ provider, lock }) => {
+    const ownerOrder = await loadExactXenaPlacementOwner({ provider, lock });
+    if (!ownerOrder) {
+        // A malformed/cross-provider lock must never modify an unrelated order
+        // or be opened simply because its timestamp elapsed.
+        return { released: false, blocked: true };
+    }
+
+    if (xenaOwnerIsDurablyResolved(ownerOrder)) {
+        const released = await xenaService.releasePlacementGate({
+            provider,
+            orderId: lock.orderId,
+            ownerToken: lock.ownerToken,
+            expectedPhase: lock.phase,
+        });
+        return { released, blocked: !released };
+    }
+
+    if (lock.phase === 'POST_AMBIGUOUS') {
+        return { released: false, blocked: true };
+    }
+
+    // Win the order-state race before fencing the gate. The old worker's
+    // post-dispatch persistence uses this same identity filter and therefore
+    // cannot resurrect this MANUAL_REVIEW state after this update succeeds.
+    const manualReviewOrder = await moveOrderToManualReview(ownerOrder, {
+        providerOrderId: null,
+        providerStatus: 'Unknown',
+        providerIdempotencyKey: buildXenaProviderIdempotencyKey(ownerOrder._id),
+        providerErrorCode: xenaService.XENA_STALE_POST_DISPATCHING_LOCK,
+        providerErrorMessage: 'Xena recharge dispatch was interrupted and requires manual review.',
+        rawResponse: {
+            errorCode: xenaService.XENA_STALE_POST_DISPATCHING_LOCK,
+            placementLockPhase: lock.phase,
+            placementLockExpiredAt: lock.expiresAt || null,
+        },
+        errorMessage: 'Xena recharge dispatch was interrupted and requires manual review.',
+    }, {
+        reason: xenaService.XENA_STALE_POST_DISPATCHING_LOCK,
+        filter: xenaPlacementIdentityFilter(ownerOrder._id),
+    });
+
+    if (!manualReviewOrder) {
+        // The owner may have persisted a trusted provider id between our read
+        // and CAS. Re-read; only durable resolution can release this exact lock.
+        const currentOwner = await loadExactXenaPlacementOwner({ provider, lock });
+        if (xenaOwnerIsDurablyResolved(currentOwner)) {
+            const released = await xenaService.releasePlacementGate({
+                provider,
+                orderId: lock.orderId,
+                ownerToken: lock.ownerToken,
+                expectedPhase: lock.phase,
+            });
+            return { released, blocked: !released };
+        }
+        if (currentOwner?.status === ORDER_STATUS.MANUAL_REVIEW) {
+            // Recovery may have won the owner CAS before a process died. Finish
+            // fencing this exact gate; it must never be released by age alone.
+            await xenaService.markPlacementGatePostAmbiguous({
+                provider,
+                orderId: lock.orderId,
+                ownerToken: lock.ownerToken,
+            }).catch(() => null);
+        }
+        return { released: false, blocked: true };
+    }
+
+    // Do not release after an uncertain POST. POST_AMBIGUOUS is durable
+    // evidence and blocks new Xena placements until the owner is resolved.
+    await xenaService.markPlacementGatePostAmbiguous({
+        provider,
+        orderId: lock.orderId,
+        ownerToken: lock.ownerToken,
+    });
+    return { released: false, blocked: true };
+};
+
+const acquireXenaPlacementGateWithWaiting = async ({ order, provider }) => {
+    const deadline = Date.now() + XENA_GATE_WAIT_TIMEOUT_MS;
+
+    while (Date.now() < deadline) {
+        const gate = await xenaService.acquirePlacementGate({ provider, orderId: order._id.toString() });
+        if (gate.acquired) return gate;
+
+        if ((gate.stalePostDispatching || gate.ambiguousPostDispatching) && gate.lock?.ownerToken && gate.lock?.orderId) {
+            const recovery = await recoverStaleXenaPostDispatchingLock({ provider, lock: gate.lock });
+            if (recovery.released) continue;
+            throw blockNewXenaPlacementForAmbiguousGate();
+        }
+
+        await waitFor(XENA_GATE_WAIT_INTERVAL_MS);
+    }
+
+    const err = new Error('Timed out waiting for the Xena placement gate before recharge dispatch.');
+    err.code = xenaService.XENA_PLACEMENT_GATE_BUSY;
+    throw err;
 };
 
 const isFazerCardsCodeDeliveryOrder = (product = {}, providerProduct = {}) => {
@@ -1038,9 +1175,9 @@ const buildProviderResultUpdate = (result = {}) => {
     return update;
 };
 
-const moveOrderToManualReview = async (order, statusResult = {}, { reason = 'PROVIDER_REQUIRES_MANUAL_REVIEW' } = {}) => {
+const moveOrderToManualReview = async (order, statusResult = {}, { reason = 'PROVIDER_REQUIRES_MANUAL_REVIEW', filter = null } = {}) => {
     const now = new Date();
-    const manualReviewOrder = await Order.findByIdAndUpdate(order._id, {
+    const manualReviewOrder = await Order.findOneAndUpdate({ _id: order._id, ...(filter || {}) }, {
         $set: {
             status: ORDER_STATUS.MANUAL_REVIEW,
             ...buildProviderResultUpdate(statusResult),
@@ -1051,6 +1188,8 @@ const moveOrderToManualReview = async (order, statusResult = {}, { reason = 'PRO
             lastCheckedAt: now,
         },
     }, { new: true });
+
+    if (!manualReviewOrder) return null;
 
     createAuditLog({
         actorId: order.userId,
@@ -1216,6 +1355,9 @@ const recoverCanonicalUncertainPlacement = async (order, adapter, { countRetry =
  * @returns {Promise<{ order: Order, placed: boolean, refunded: boolean }>}
  */
 const executeOrder = async (orderId, provider = null, auditContext = null) => {
+    let activeXenaPlacementGate = null;
+    let resolvedProviderDoc = null;
+    let releaseXenaPlacementGate = true;
     // ─── TOP-LEVEL CRASH GUARD ─────────────────────────────────────────────
     // Wraps the entire function so ANY crash (parsing, DB, provider resolution)
     // marks the order FAILED + refund instead of leaving it stuck in PROCESSING.
@@ -1285,7 +1427,6 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
 
     // ── Self-resolve provider adapter if none was passed ──────────────────
     let resolvedProvider = provider;
-    let resolvedProviderDoc = null;
     if (!resolvedProvider) {
         try {
             const productProviderId = order.productId?.provider;
@@ -1297,24 +1438,6 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 throw new Error(`Provider ${productProviderId} not found in DB.`);
             }
             if (!providerDoc.isActive) {
-                if (isXenaFulfillmentOrder(order, providerDoc)) {
-                    const providerIdempotencyKey = buildXenaProviderIdempotencyKey(order._id);
-                    const reviewOrder = await moveOrderToManualReview(order, {
-                        providerOrderId: null,
-                        providerStatus: 'Unknown',
-                        providerIdempotencyKey,
-                        providerErrorCode: 'XENA_PROVIDER_INACTIVE',
-                        providerErrorMessage: `Provider '${providerDoc.name}' is inactive.`,
-                        rawResponse: {
-                            errorCode: 'XENA_PROVIDER_INACTIVE',
-                            providerId: providerDoc._id.toString(),
-                            idempotencyKey: providerIdempotencyKey,
-                        },
-                        errorMessage: `Provider '${providerDoc.name}' is inactive.`,
-                    }, { reason: 'XENA_PROVIDER_INACTIVE' });
-
-                    return { order: reviewOrder, placed: false, refunded: false };
-                }
                 throw new Error(`Provider '${providerDoc.name}' is inactive.`);
             }
             resolvedProviderDoc = providerDoc;
@@ -1397,26 +1520,6 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     const isXenaOrder = isXenaFulfillmentOrder(order, resolvedProviderDoc);
     const isCanonicalOrder = isCanonicalB2BProvider(resolvedProviderDoc);
 
-    if (isXenaOrder && !externalProductId) {
-        const providerIdempotencyKey = buildXenaProviderIdempotencyKey(order._id);
-        const reviewOrder = await moveOrderToManualReview(order, {
-            providerOrderId: null,
-            providerStatus: 'Unknown',
-            providerIdempotencyKey,
-            providerErrorCode: 'XENA_PROVIDER_PRODUCT_MISSING',
-            providerErrorMessage: 'Xena provider product externalProductId is missing.',
-            rawResponse: {
-                errorCode: 'XENA_PROVIDER_PRODUCT_MISSING',
-                productId: order.productId?._id?.toString?.() ?? null,
-                providerProductId: order.productId?.providerProduct?.toString?.() ?? null,
-                idempotencyKey: providerIdempotencyKey,
-            },
-            errorMessage: 'Xena provider product externalProductId is missing.',
-        }, { reason: 'XENA_PROVIDER_PRODUCT_MISSING' });
-
-        return { order: reviewOrder, placed: false, refunded: false };
-    }
-
     if (isXenaOrder) {
         const claim = await claimXenaFulfillmentAttempt({
             order,
@@ -1430,6 +1533,14 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 refunded: claim.current?.refunded === true,
             };
         }
+
+        // The local order claim is intentionally acquired first. The durable
+        // provider gate then serializes every Xena preflight and dispatch across
+        // orders and processes without changing any other provider flow.
+        activeXenaPlacementGate = await acquireXenaPlacementGateWithWaiting({
+            order,
+            provider: resolvedProviderDoc,
+        });
     }
 
     // A persisted Canonical claim means a POST may already have reached the
@@ -1496,6 +1607,25 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             throw missingExternalIdError;
         }
 
+        const placementParams = {
+            productId: String(externalProductId),
+            externalProductId: String(externalProductId),
+            amount: order.quantity,
+            quantity: order.quantity,
+            localOrderId: order._id.toString(),
+            orderId: order._id.toString(),
+            orderNumber: order.orderNumber,
+            referenceId: stableOrderUuid,
+            idempotencyKey: order.idempotencyKey ?? null,
+            orderUuid: stableOrderUuid,
+            order_uuid: stableOrderUuid,
+            params: mappedCustomerFields,
+            product: order.productId,
+            providerProduct,
+            ...mappedCustomerFields,
+        };
+        if (isXenaOrder) placementParams.xenaPlacementGate = activeXenaPlacementGate;
+
         result = isCanonicalOrder
             ? await resolvedProvider.placeOrder({
                 externalProductId: String(externalProductId),
@@ -1503,23 +1633,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 referenceId: String(order.orderNumber),
                 params: mappedCustomerFields,
             })
-            : await resolvedProvider.placeOrder({
-                productId: String(externalProductId),
-                externalProductId: String(externalProductId),
-                amount: order.quantity,
-                quantity: order.quantity,
-                localOrderId: order._id.toString(),
-                orderId: order._id.toString(),
-                orderNumber: order.orderNumber,
-                referenceId: stableOrderUuid,
-                idempotencyKey: order.idempotencyKey ?? null,
-                orderUuid: stableOrderUuid,
-                order_uuid: stableOrderUuid,
-                params: mappedCustomerFields,
-                product: order.productId,
-                providerProduct,
-                ...mappedCustomerFields,   // ← spread translated customer fields onto params
-            });
+            : await resolvedProvider.placeOrder(placementParams);
         }
     } catch (err) {
         if (isCanonicalOrder) {
@@ -1538,6 +1652,26 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                     httpStatus: Number(err?.response?.status ?? err?.statusCode) || null,
                 },
                 errorMessage: null,
+            };
+        } else if (isXenaOrder && activeXenaPlacementGate?.phase === 'POST_DISPATCHING') {
+            // The durable marker was written immediately before the POST. Any
+            // subsequent throw has an ambiguous remote outcome and must not be
+            // converted into a retry or refund.
+            result = {
+                success: false,
+                manualReview: true,
+                providerOrderId: null,
+                providerStatus: 'Unknown',
+                providerIdempotencyKey: activeXenaPlacementGate.orderId
+                    ? buildXenaProviderIdempotencyKey(activeXenaPlacementGate.orderId)
+                    : null,
+                providerErrorCode: 'XENA_RECHARGE_UNKNOWN',
+                providerErrorMessage: 'Xena recharge outcome is uncertain and requires manual review.',
+                rawResponse: {
+                    errorCode: 'XENA_RECHARGE_UNKNOWN',
+                    placementLockPhase: activeXenaPlacementGate.phase,
+                },
+                errorMessage: 'Xena recharge outcome is uncertain and requires manual review.',
             };
         } else {
         // Classify the error: transient (network/timeout) vs hard rejection.
@@ -1629,9 +1763,30 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     }
 
     if (result.manualReview === true) {
-        const reviewOrder = await moveOrderToManualReview(order, result);
+        const fencedXenaDispatch = isXenaOrder && activeXenaPlacementGate?.phase === 'POST_DISPATCHING';
+        const reviewOrder = await moveOrderToManualReview(order, result, fencedXenaDispatch
+            ? { filter: xenaPlacementIdentityFilter(order._id) }
+            : undefined);
 
-        return { order: reviewOrder, placed: false, refunded: false };
+        if (fencedXenaDispatch) {
+            // A POST outcome that reaches MANUAL_REVIEW remains provider-wide
+            // ambiguous. Never let this worker's finally block reopen the gate.
+            releaseXenaPlacementGate = false;
+            if (reviewOrder) {
+                try {
+                    const ambiguousGate = await xenaService.markPlacementGatePostAmbiguous({
+                        provider: resolvedProviderDoc,
+                        orderId: activeXenaPlacementGate.orderId,
+                        ownerToken: activeXenaPlacementGate.ownerToken,
+                    });
+                    activeXenaPlacementGate.phase = ambiguousGate.phase;
+                } catch (gateErr) {
+                    console.error(`[Fulfillment] Failed to preserve ambiguous Xena gate for order ${orderId}:`, gateErr.message);
+                }
+            }
+        }
+
+        return { order: reviewOrder || await Order.findById(orderId), placed: false, refunded: false };
     }
 
     if (!result.success) {
@@ -1679,7 +1834,10 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     }
 
     if (newStatus === ORDER_STATUS.FAILED) {
-        await Order.findByIdAndUpdate(orderId, {
+        const failedOrder = await Order.findOneAndUpdate(
+            isXenaOrder && activeXenaPlacementGate?.phase === 'POST_DISPATCHING'
+                ? xenaPlacementIdentityFilter(order._id)
+                : { _id: orderId }, {
             $set: {
                 status: ORDER_STATUS.FAILED,
                 ...buildProviderResultUpdate(result),
@@ -1687,7 +1845,12 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 failedAt: now,
                 lastCheckedAt: now,
             },
-        });
+        }, { new: true });
+
+        if (!failedOrder && isXenaOrder && activeXenaPlacementGate?.phase === 'POST_DISPATCHING') {
+            releaseXenaPlacementGate = false;
+            return { order: await Order.findById(orderId), placed: false, refunded: false };
+        }
 
         // Audit: placement failed
         createAuditLog({
@@ -1733,12 +1896,20 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
 
     if (newStatus === ORDER_STATUS.PROCESSING) {
         // Case B: pending — save providerOrderId, cron will poll
-        await Order.findByIdAndUpdate(orderId, {
+        const pendingOrder = await Order.findOneAndUpdate(
+            isXenaOrder && activeXenaPlacementGate?.phase === 'POST_DISPATCHING'
+                ? xenaPlacementIdentityFilter(order._id)
+                : { _id: orderId }, {
             $set: {
                 ...buildProviderResultUpdate(result),
                 lastCheckedAt: now,
             },
-        });
+        }, { new: true });
+
+        if (!pendingOrder && isXenaOrder && activeXenaPlacementGate?.phase === 'POST_DISPATCHING') {
+            releaseXenaPlacementGate = false;
+            return { order: await Order.findById(orderId), placed: false, refunded: false };
+        }
 
         createAuditLog({
             actorId, actorRole, ipAddress, userAgent,
@@ -1811,6 +1982,44 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             return { order: claimedOrder, placed: false, refunded: claimedOrder.refunded === true };
         }
 
+        if (activeXenaPlacementGate?.phase === 'POST_DISPATCHING' || activeXenaPlacementGate?.phase === 'POST_AMBIGUOUS') {
+            // Set this before any local write. If MANUAL_REVIEW persistence is
+            // unavailable, the durable dispatch marker must remain blocking.
+            releaseXenaPlacementGate = false;
+            const xenaOrder = await Order.findById(orderId).catch(() => null);
+            if (xenaOrder?.status === ORDER_STATUS.PROCESSING && !xenaOrder.providerOrderId) {
+                const reviewOrder = await moveOrderToManualReview(xenaOrder, {
+                    providerOrderId: null,
+                    providerStatus: 'Unknown',
+                    providerIdempotencyKey: xenaOrder.providerIdempotencyKey || buildXenaProviderIdempotencyKey(xenaOrder._id),
+                    providerErrorCode: 'XENA_RECHARGE_UNKNOWN',
+                    providerErrorMessage: 'Xena recharge dispatch was interrupted and requires manual review.',
+                    rawResponse: {
+                        errorCode: 'XENA_RECHARGE_UNKNOWN',
+                        placementLockPhase: activeXenaPlacementGate.phase,
+                    },
+                    errorMessage: 'Xena recharge dispatch was interrupted and requires manual review.',
+                }, {
+                    reason: 'XENA_RECHARGE_UNKNOWN',
+                    filter: xenaPlacementIdentityFilter(xenaOrder._id),
+                });
+                if (reviewOrder && activeXenaPlacementGate.phase === 'POST_DISPATCHING') {
+                    try {
+                        const ambiguousGate = await xenaService.markPlacementGatePostAmbiguous({
+                            provider: resolvedProviderDoc,
+                            orderId: activeXenaPlacementGate.orderId,
+                            ownerToken: activeXenaPlacementGate.ownerToken,
+                        });
+                        activeXenaPlacementGate.phase = ambiguousGate.phase;
+                    } catch (gateErr) {
+                        console.error(`[Fulfillment] Failed to preserve ambiguous Xena gate after crash for order ${orderId}:`, gateErr.message);
+                    }
+                }
+                return { order: reviewOrder || await Order.findById(orderId), placed: false, refunded: false };
+            }
+            return { order: xenaOrder, placed: false, refunded: xenaOrder?.refunded === true };
+        }
+
         // Something completely unexpected crashed — mark FAILED + refund
         console.error(`[Fulfillment] FATAL crash in executeOrder for ${orderId}:`, fatalErr);
 
@@ -1844,6 +2053,21 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         }
 
         return { order: await Order.findById(orderId).catch(() => null), placed: false, refunded: false };
+    } finally {
+        // The lock is released only after this execution has persisted its
+        // terminal/pending/manual-review result. A process death before this
+        // point leaves POST_DISPATCHING durable for the stale-lock recovery.
+        if (releaseXenaPlacementGate && activeXenaPlacementGate?.ownerToken && activeXenaPlacementGate?.orderId && resolvedProviderDoc) {
+            try {
+                await xenaService.releasePlacementGate({
+                    provider: resolvedProviderDoc,
+                    orderId: activeXenaPlacementGate.orderId,
+                    ownerToken: activeXenaPlacementGate.ownerToken,
+                });
+            } catch (releaseErr) {
+                console.error(`[Fulfillment] Failed to release Xena placement gate for order ${orderId}:`, releaseErr.message);
+            }
+        }
     }
 };
 

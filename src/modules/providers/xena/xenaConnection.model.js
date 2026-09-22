@@ -17,6 +17,14 @@ const XENA_CONNECTION_STATUSES = Object.freeze({
     UNKNOWN: 'unknown',
 });
 
+const XENA_PLACEMENT_LOCK_PHASES = Object.freeze({
+    PREFLIGHT: 'PREFLIGHT',
+    POST_DISPATCHING: 'POST_DISPATCHING',
+    // A POST was dispatched but Winnie could not durably establish its result.
+    // This intentionally has no time-based escape hatch.
+    POST_AMBIGUOUS: 'POST_AMBIGUOUS',
+});
+
 const DEFAULT_XENA_SYNTHETIC_PRODUCT = Object.freeze({
     externalProductId: 'xena-dynamic-recharge',
     name: 'Xena Dynamic Recharge (Any Amount)',
@@ -102,6 +110,19 @@ const xenaConnectionSchema = new mongoose.Schema(
             trim: true,
             maxlength: 200,
             default: null,
+        },
+        // Stored with the unique provider connection so the safety-critical
+        // placement sequence is serialized across application processes.
+        placementLock: {
+            ownerToken: { type: String, trim: true, default: null },
+            orderId: { type: String, trim: true, default: null },
+            phase: {
+                type: String,
+                enum: Object.values(XENA_PLACEMENT_LOCK_PHASES),
+                default: null,
+            },
+            acquiredAt: { type: Date, default: null },
+            expiresAt: { type: Date, default: null },
         },
         productConfig: {
             externalProductId: {
@@ -212,5 +233,6 @@ const XenaConnection = mongoose.model('XenaConnection', xenaConnectionSchema);
 module.exports = {
     XenaConnection,
     XENA_CONNECTION_STATUSES,
+    XENA_PLACEMENT_LOCK_PHASES,
     DEFAULT_XENA_SYNTHETIC_PRODUCT,
 };

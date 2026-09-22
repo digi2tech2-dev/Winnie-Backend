@@ -56,8 +56,9 @@ const createXenaOrder = async ({
     quantity = 1000,
     walletDeducted = 50,
     fieldKey = 'target_uid',
+    providerOverrides = {},
 } = {}) => {
-    const provider = await createXenaProvider();
+    const provider = await createXenaProvider(providerOverrides);
     await connectXenaProvider(provider, 'con_recharge');
     const { customer, group } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
     const providerProduct = await ProviderProduct.create({
@@ -116,12 +117,50 @@ const createXenaOrder = async ({
     return { provider, customer, order, product, providerProduct };
 };
 
-const queueSuccessfulVerification = (client, uid = '001234') => {
+const createSiblingXenaOrder = async (order, suffix = 1) => Order.create({
+    userId: order.userId,
+    orderNumber: order.orderNumber + suffix,
+    productId: order.productId,
+    quantity: order.quantity,
+    unitPrice: order.unitPrice,
+    totalPrice: order.totalPrice,
+    basePriceSnapshot: order.basePriceSnapshot,
+    markupPercentageSnapshot: order.markupPercentageSnapshot,
+    finalPriceCharged: order.finalPriceCharged,
+    groupIdSnapshot: order.groupIdSnapshot,
+    walletDeducted: order.walletDeducted,
+    creditUsedAmount: order.creditUsedAmount,
+    status: ORDER_STATUS.PROCESSING,
+    executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+    providerCode: 'xena-recharge',
+    idempotencyKey: `xena-sibling-${order._id.toString()}-${suffix}`,
+    customerInput: order.customerInput,
+});
+
+const queueSuccessfulVerification = (client, uid = '001234', balance = 1000000) => {
     client.request.mockResolvedValueOnce({
         data: { uid, nickname: 'Safe nickname', country: 'EG' },
         status: 200,
         headers: { 'x-request-id': 'req-verify' },
     });
+    client.request.mockResolvedValueOnce({
+        data: { balance },
+        status: 200,
+        headers: { 'x-request-id': 'req-balance' },
+    });
+};
+
+const placeAdapterOrderWithGate = async ({ adapter, provider, order, params }) => {
+    const gate = await xenaService.acquirePlacementGate({ provider, orderId: order._id.toString() });
+    try {
+        return await adapter.placeOrder({ ...params, xenaPlacementGate: gate });
+    } finally {
+        await xenaService.releasePlacementGate({
+            provider,
+            orderId: gate.orderId,
+            ownerToken: gate.ownerToken,
+        });
+    }
 };
 
 const runDynamicFieldMiddleware = (body) => new Promise((resolve) => {
@@ -198,11 +237,9 @@ describe('Xena adapter recharge execution', () => {
             headers: { 'x-request-id': 'req-body-header' },
         });
 
-        const result = await adapter.placeOrder({
-            localOrderId: order._id.toString(),
-            amount: order.quantity,
-            params: { target_uid: '001234' },
-        });
+        const result = await placeAdapterOrderWithGate({ adapter, provider, order, params: {
+            localOrderId: order._id.toString(), amount: order.quantity, params: { target_uid: '001234' },
+        } });
 
         expect(result.success).toBe(true);
         expect(result.providerOrderId).toBe('rch_example');
@@ -219,7 +256,7 @@ describe('Xena adapter recharge execution', () => {
                 clientReference: `order:${order._id.toString()}`,
             },
         }));
-        expect(typeof client.request.mock.calls[1][0].data.targetUid).toBe('string');
+        expect(typeof client.request.mock.calls[2][0].data.targetUid).toBe('string');
     });
 
     it('invalid or missing target_uid prevents provider POST', async () => {
@@ -251,11 +288,9 @@ describe('Xena adapter recharge execution', () => {
             headers: {},
         });
 
-        const result = await adapter.placeOrder({
-            localOrderId: order._id.toString(),
-            amount: order.quantity,
-            params: { account_id: '0004454725' },
-        });
+        const result = await placeAdapterOrderWithGate({ adapter, provider, order, params: {
+            localOrderId: order._id.toString(), amount: order.quantity, params: { account_id: '0004454725' },
+        } });
 
         expect(result.success).toBe(true);
         expect(result.providerOrderId).toBe('rch_legacy');
@@ -267,7 +302,7 @@ describe('Xena adapter recharge execution', () => {
                 targetUid: '0004454725',
             }),
         }));
-        expect(typeof client.request.mock.calls[1][0].data.targetUid).toBe('string');
+        expect(typeof client.request.mock.calls[2][0].data.targetUid).toBe('string');
     });
 
     it('re-verifies target_uid before recharge and does not treat unavailable verification as invalid', async () => {
@@ -277,13 +312,11 @@ describe('Xena adapter recharge execution', () => {
         axios.create.mockReturnValue(client);
         client.request.mockRejectedValueOnce({ code: 'ECONNABORTED', message: 'timeout of 20000ms exceeded' });
 
-        const result = await adapter.placeOrder({
-            localOrderId: order._id.toString(),
-            amount: order.quantity,
-            params: { target_uid: '001234' },
-        });
+        const result = await placeAdapterOrderWithGate({ adapter, provider, order, params: {
+            localOrderId: order._id.toString(), amount: order.quantity, params: { target_uid: '001234' },
+        } });
 
-        expect(result.manualReview).toBe(true);
+        expect(result.manualReview).toBe(false);
         expect(result.providerErrorCode).toBe('XENA_VERIFICATION_UNAVAILABLE');
         expect(client.request).toHaveBeenCalledTimes(1);
     });
@@ -298,8 +331,8 @@ describe('Xena adapter recharge execution', () => {
         queueSuccessfulVerification(client);
         client.request.mockResolvedValueOnce({ data: { id: 'rch_1', status: 'processing' }, status: 200, headers: {} });
 
-        await adapter.placeOrder({ localOrderId: order._id.toString(), amount: order.quantity, params: { target_uid: '001234' } });
-        await adapter.placeOrder({ localOrderId: order._id.toString(), amount: order.quantity, params: { target_uid: '001234' } });
+        await placeAdapterOrderWithGate({ adapter, provider, order, params: { localOrderId: order._id.toString(), amount: order.quantity, params: { target_uid: '001234' } } });
+        await placeAdapterOrderWithGate({ adapter, provider, order, params: { localOrderId: order._id.toString(), amount: order.quantity, params: { target_uid: '001234' } } });
 
         const rechargeCalls = client.request.mock.calls
             .map(([call]) => call)
@@ -311,7 +344,78 @@ describe('Xena adapter recharge execution', () => {
 });
 
 describe('Xena fulfillment status mapping and refund behavior', () => {
-    it('XENA_RECHARGE_ENABLED=false moves fulfillment to manual review without Xena API calls or refund', async () => {
+    it('uses the fresh balance equal to the recharge amount and posts exactly once', async () => {
+        const { order } = await createXenaOrder({ quantity: 70000 });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        queueSuccessfulVerification(client, '001234', 70000);
+        client.request.mockResolvedValueOnce({ data: { id: 'rch_equal', status: 'processing' }, status: 200, headers: {} });
+
+        const { order: updated, refunded } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(updated.providerOrderId).toBe('rch_equal');
+        expect(refunded).toBe(false);
+        expect(client.request.mock.calls.filter(([call]) => call.url === '/v1/recharges')).toHaveLength(1);
+    });
+
+    it('fails and refunds once when fresh balance is insufficient, without a recharge POST', async () => {
+        const { order, customer } = await createXenaOrder({ quantity: 70000, walletDeducted: 50 });
+        const before = (await User.findById(customer._id)).walletBalance;
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        queueSuccessfulVerification(client, '001234', 69999);
+
+        const { order: updated } = await executeOrder(order._id);
+        await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.providerErrorCode).toBe('XENA_INSUFFICIENT_PROVIDER_BALANCE');
+        expect(updated.refunded).toBe(true);
+        expect((await WalletTransaction.find({ userId: customer._id, type: 'REFUND' }))).toHaveLength(1);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before + 50);
+        expect(client.request.mock.calls.filter(([call]) => call.url === '/v1/recharges')).toHaveLength(0);
+    });
+
+    it.each([
+        [{ code: 'ECONNABORTED', message: 'timeout' }, 'XENA_BALANCE_UNAVAILABLE'],
+        [{ response: { status: 500, data: {}, headers: {} }, message: 'server error' }, 'XENA_BALANCE_UNAVAILABLE'],
+    ])('fails and refunds when balance preflight cannot complete (%s)', async (upstreamError, expectedCode) => {
+        const { order, customer } = await createXenaOrder({ walletDeducted: 50 });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockResolvedValueOnce({
+            data: { uid: '001234', nickname: 'Safe nickname', country: 'EG' },
+            status: 200,
+            headers: {},
+        });
+        client.request.mockRejectedValueOnce(upstreamError);
+
+        const { order: updated } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.providerErrorCode).toBe(expectedCode);
+        expect(updated.refunded).toBe(true);
+        expect((await WalletTransaction.find({ userId: customer._id, type: 'REFUND' }))).toHaveLength(1);
+        expect(client.request.mock.calls.filter(([call]) => call.url === '/v1/recharges')).toHaveLength(0);
+    });
+
+    it('fails and refunds target verification transport failure before recharge POST', async () => {
+        const { order, customer } = await createXenaOrder({ walletDeducted: 50 });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockRejectedValueOnce({ code: 'ECONNABORTED', message: 'timeout' });
+
+        const { order: updated } = await executeOrder(order._id);
+
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.providerErrorCode).toBe('XENA_VERIFICATION_UNAVAILABLE');
+        expect(updated.refunded).toBe(true);
+        expect((await WalletTransaction.find({ userId: customer._id, type: 'REFUND' }))).toHaveLength(1);
+        expect(client.request.mock.calls.filter(([call]) => call.url === '/v1/recharges')).toHaveLength(0);
+    });
+
+    it('XENA_RECHARGE_ENABLED=false fails and refunds without Xena API calls', async () => {
         process.env.XENA_RECHARGE_ENABLED = 'false';
         const { order, customer } = await createXenaOrder({ walletDeducted: 50 });
         const before = (await User.findById(customer._id)).walletBalance;
@@ -320,12 +424,12 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
 
         const { order: updated, refunded } = await executeOrder(order._id);
 
-        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
         expect(updated.providerErrorCode).toBe('XENA_RECHARGE_DISABLED');
         expect(updated.providerIdempotencyKey).toBe(`provider:xena:${order._id.toString()}`);
-        expect(updated.refunded).toBe(false);
-        expect(refunded).toBe(false);
-        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+        expect(updated.refunded).toBe(true);
+        expect(refunded).toBe(true);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before + 50);
         expect(client.request).not.toHaveBeenCalled();
     });
 
@@ -338,15 +442,15 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
 
         const { order: updated, refunded } = await executeOrder(order._id);
 
-        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
         expect(updated.providerErrorCode).toBe('XENA_PROVIDER_AUTH_FAILED');
-        expect(updated.refunded).toBe(false);
-        expect(refunded).toBe(false);
-        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+        expect(updated.refunded).toBe(true);
+        expect(refunded).toBe(true);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before + 50);
         expect(client.request).not.toHaveBeenCalled();
     });
 
-    it('inactive Xena provider moves to manual review without provider calls or refund', async () => {
+    it('inactive Xena provider fails and refunds before provider calls', async () => {
         const { provider, order, customer } = await createXenaOrder({ walletDeducted: 50 });
         await provider.updateOne({ $set: { isActive: false } });
         const before = (await User.findById(customer._id)).walletBalance;
@@ -355,15 +459,14 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
 
         const { order: updated, refunded } = await executeOrder(order._id);
 
-        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
-        expect(updated.providerErrorCode).toBe('XENA_PROVIDER_INACTIVE');
-        expect(updated.refunded).toBe(false);
-        expect(refunded).toBe(false);
-        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
+        expect(updated.refunded).toBe(true);
+        expect(refunded).toBe(true);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before + 50);
         expect(client.request).not.toHaveBeenCalled();
     });
 
-    it('missing Xena provider product identifier moves to manual review without provider calls or refund', async () => {
+    it('missing Xena provider product identifier fails and refunds without provider calls', async () => {
         const { order, product, customer } = await createXenaOrder({ walletDeducted: 50 });
         await Product.findByIdAndUpdate(product._id, { $unset: { providerProduct: 1 } });
         const before = (await User.findById(customer._id)).walletBalance;
@@ -372,12 +475,11 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
 
         const { order: updated, refunded } = await executeOrder(order._id);
 
-        expect(updated.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
-        expect(updated.providerErrorCode).toBe('XENA_PROVIDER_PRODUCT_MISSING');
+        expect(updated.status).toBe(ORDER_STATUS.FAILED);
         expect(updated.providerIdempotencyKey).toBe(`provider:xena:${order._id.toString()}`);
-        expect(updated.refunded).toBe(false);
-        expect(refunded).toBe(false);
-        expect((await User.findById(customer._id)).walletBalance).toBe(before);
+        expect(updated.refunded).toBe(true);
+        expect(refunded).toBe(true);
+        expect((await User.findById(customer._id)).walletBalance).toBe(before + 50);
         expect(client.request).not.toHaveBeenCalled();
     });
 
@@ -409,6 +511,9 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
                     headers: { 'x-request-id': 'req-verify' },
                 };
             }
+            if (call.method === 'get' && call.url.endsWith('/balance')) {
+                return { data: { balance: 1000000 }, status: 200, headers: {} };
+            }
             if (call.method === 'post' && call.url === '/v1/recharges') {
                 await new Promise((resolve) => setTimeout(resolve, 50));
                 return {
@@ -433,6 +538,306 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
         expect(rechargeCalls[0].headers['Idempotency-Key']).toBe(`provider:xena:${order._id.toString()}`);
         expect(updated.providerOrderId).toBe('rch_concurrent');
         expect(updated.providerIdempotencyKey).toBe(`provider:xena:${order._id.toString()}`);
+    });
+
+    it('serializes two Xena orders so the second reads a new insufficient balance', async () => {
+        const { order: firstOrder } = await createXenaOrder({ quantity: 70000, walletDeducted: 50 });
+        const secondOrder = await Order.create({
+            userId: firstOrder.userId,
+            orderNumber: firstOrder.orderNumber + 1,
+            productId: firstOrder.productId,
+            quantity: 70000,
+            unitPrice: firstOrder.unitPrice,
+            totalPrice: firstOrder.totalPrice,
+            basePriceSnapshot: firstOrder.basePriceSnapshot,
+            markupPercentageSnapshot: firstOrder.markupPercentageSnapshot,
+            finalPriceCharged: firstOrder.finalPriceCharged,
+            groupIdSnapshot: firstOrder.groupIdSnapshot,
+            walletDeducted: 50,
+            creditUsedAmount: firstOrder.creditUsedAmount,
+            status: ORDER_STATUS.PROCESSING,
+            executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+            providerCode: 'xena-recharge',
+            idempotencyKey: `concurrent-xena-${firstOrder._id.toString()}`,
+            customerInput: firstOrder.customerInput,
+        });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        let balanceReads = 0;
+        let rechargePosts = 0;
+        let releaseFirstPost;
+        let signalFirstPost;
+        const firstPostStarted = new Promise((resolve) => { signalFirstPost = resolve; });
+        const firstPostRelease = new Promise((resolve) => { releaseFirstPost = resolve; });
+        client.request.mockImplementation(async (call) => {
+            if (call.method === 'get' && call.url.includes('/users/')) {
+                return { data: { uid: '001234', nickname: 'Safe nickname' }, status: 200, headers: {} };
+            }
+            if (call.method === 'get' && call.url.endsWith('/balance')) {
+                balanceReads += 1;
+                return { data: { balance: balanceReads === 1 ? 100000 : 30000 }, status: 200, headers: {} };
+            }
+            if (call.method === 'post' && call.url === '/v1/recharges') {
+                rechargePosts += 1;
+                if (rechargePosts === 1) {
+                    signalFirstPost();
+                    await firstPostRelease;
+                }
+                return { data: { id: 'rch_only_one', status: 'processing' }, status: 200, headers: {} };
+            }
+            throw new Error(`Unexpected Xena request ${call.method} ${call.url}`);
+        });
+
+        const firstExecution = executeOrder(firstOrder._id);
+        await firstPostStarted;
+
+        // A owns the durable provider gate while its POST is deliberately held.
+        // B may claim its own local order, but it must not read balance or POST.
+        const secondExecution = executeOrder(secondOrder._id);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(balanceReads).toBe(1);
+        expect(rechargePosts).toBe(1);
+
+        releaseFirstPost();
+        await Promise.all([firstExecution, secondExecution]);
+
+        const orders = await Order.find({ _id: { $in: [firstOrder._id, secondOrder._id] } });
+        const placed = orders.filter((order) => order.providerOrderId === 'rch_only_one');
+        const failed = orders.filter((order) => order.status === ORDER_STATUS.FAILED);
+        expect(balanceReads).toBe(2);
+        expect(rechargePosts).toBe(1);
+        expect(placed).toHaveLength(1);
+        expect(failed).toHaveLength(1);
+        expect(failed[0].providerErrorCode).toBe('XENA_INSUFFICIENT_PROVIDER_BALANCE');
+        expect(failed[0].refunded).toBe(true);
+    });
+
+    it.each([
+        ORDER_STATUS.MANUAL_REVIEW,
+        ORDER_STATUS.FAILED,
+        ORDER_STATUS.CANCELED,
+        ORDER_STATUS.PARTIAL,
+        ORDER_STATUS.COMPLETED,
+    ])('keeps POST_AMBIGUOUS blocked when the owner is locally %s without a provider id', async (ownerStatus) => {
+        const { provider, order: ownerOrder } = await createXenaOrder({ walletDeducted: 50 });
+        const contender = await createSiblingXenaOrder(ownerOrder, 1);
+        await Order.findByIdAndUpdate(ownerOrder._id, {
+            $set: { status: ownerStatus, providerOrderId: null },
+        });
+        await XenaConnection.updateOne({ provider: provider._id }, {
+            $set: {
+                placementLock: {
+                    ownerToken: `ambiguous-${ownerStatus}`,
+                    orderId: ownerOrder._id.toString(),
+                    phase: 'POST_AMBIGUOUS',
+                    acquiredAt: new Date(Date.now() - 1000),
+                    expiresAt: null,
+                },
+            },
+        });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: blocked } = await executeOrder(contender._id);
+        const owner = await Order.findById(ownerOrder._id);
+        const state = await XenaConnection.findOne({ provider: provider._id }).lean();
+
+        expect(blocked.status).toBe(ORDER_STATUS.FAILED);
+        expect(blocked.refunded).toBe(true);
+        expect(owner.status).toBe(ownerStatus);
+        expect(owner.providerOrderId).toBeNull();
+        expect(state.placementLock).toMatchObject({
+            ownerToken: `ambiguous-${ownerStatus}`,
+            orderId: ownerOrder._id.toString(),
+            phase: 'POST_AMBIGUOUS',
+        });
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('fences an expired POST_DISPATCHING owner and refunds the new order without admitting placement', async () => {
+        const { provider, order: ownerOrder } = await createXenaOrder({ quantity: 70000 });
+        const contender = await Order.create({
+            userId: ownerOrder.userId,
+            orderNumber: ownerOrder.orderNumber + 1,
+            productId: ownerOrder.productId,
+            quantity: 70000,
+            unitPrice: ownerOrder.unitPrice,
+            totalPrice: ownerOrder.totalPrice,
+            basePriceSnapshot: ownerOrder.basePriceSnapshot,
+            markupPercentageSnapshot: ownerOrder.markupPercentageSnapshot,
+            finalPriceCharged: ownerOrder.finalPriceCharged,
+            groupIdSnapshot: ownerOrder.groupIdSnapshot,
+            walletDeducted: ownerOrder.walletDeducted,
+            creditUsedAmount: ownerOrder.creditUsedAmount,
+            status: ORDER_STATUS.PROCESSING,
+            executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+            providerCode: 'xena-recharge',
+            idempotencyKey: `stale-lock-contender-${ownerOrder._id.toString()}`,
+            customerInput: ownerOrder.customerInput,
+        });
+        const expiredAt = new Date(Date.now() - 1000);
+        await XenaConnection.updateOne({ provider: provider._id }, {
+            $set: {
+                placementLock: {
+                    ownerToken: 'crashed-owner-token',
+                    orderId: ownerOrder._id.toString(),
+                    phase: 'POST_DISPATCHING',
+                    acquiredAt: expiredAt,
+                    expiresAt: expiredAt,
+                },
+            },
+        });
+        await Order.findByIdAndUpdate(ownerOrder._id, {
+            $set: { providerIdempotencyKey: `provider:xena:${ownerOrder._id.toString()}` },
+        });
+
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        client.request.mockImplementation(async (call) => {
+            if (call.method === 'get' && call.url.includes('/users/')) {
+                return { data: { uid: '001234', nickname: 'Safe nickname' }, status: 200, headers: {} };
+            }
+            if (call.method === 'get' && call.url.endsWith('/balance')) {
+                return { data: { balance: 100000 }, status: 200, headers: {} };
+            }
+            if (call.method === 'post' && call.url === '/v1/recharges') {
+                return { data: { id: 'rch_after_recovery', status: 'processing' }, status: 200, headers: {} };
+            }
+            throw new Error(`Unexpected Xena request ${call.method} ${call.url}`);
+        });
+
+        const { order: blocked } = await executeOrder(contender._id);
+        const recoveredOwner = await Order.findById(ownerOrder._id);
+        const connection = await XenaConnection.findOne({ provider: provider._id }).lean();
+
+        expect(recoveredOwner.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(recoveredOwner.refunded).toBe(false);
+        expect(recoveredOwner.providerErrorCode).toBe('XENA_STALE_POST_DISPATCHING_LOCK');
+        // Simulate the original worker returning after recovery. Its normal
+        // Pending/provider-id CAS cannot resurrect the fenced owner.
+        const lateWorkerWrite = await Order.findOneAndUpdate({
+            _id: ownerOrder._id,
+            status: ORDER_STATUS.PROCESSING,
+            providerOrderId: { $in: [null, ''] },
+            providerIdempotencyKey: `provider:xena:${ownerOrder._id.toString()}`,
+            providerCode: 'xena-recharge',
+        }, { $set: { providerOrderId: 'rch_late', providerStatus: 'Pending' } }, { new: true });
+        expect(lateWorkerWrite).toBeNull();
+        expect((await Order.findById(ownerOrder._id)).status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(blocked.status).toBe(ORDER_STATUS.FAILED);
+        expect(blocked.refunded).toBe(true);
+        expect(connection.placementLock).toMatchObject({
+            ownerToken: 'crashed-owner-token',
+            orderId: ownerOrder._id.toString(),
+            phase: 'POST_AMBIGUOUS',
+        });
+        expect(client.request).not.toHaveBeenCalled();
+
+        // A trusted owner recharge id is durable resolution. Only then may the
+        // exact ambiguous token be cleared and a later order start fresh.
+        await Order.findByIdAndUpdate(ownerOrder._id, {
+            $set: {
+                status: ORDER_STATUS.PROCESSING,
+                providerStatus: 'Pending',
+                providerOrderId: 'rch_reconciled',
+            },
+        });
+        // Conversely, once durable provider evidence exists, the stale-owner
+        // recovery CAS no longer matches and cannot replace it with review.
+        const staleRecoveryWrite = await Order.findOneAndUpdate({
+            _id: ownerOrder._id,
+            status: ORDER_STATUS.PROCESSING,
+            providerOrderId: { $in: [null, ''] },
+            providerIdempotencyKey: `provider:xena:${ownerOrder._id.toString()}`,
+            providerCode: 'xena-recharge',
+        }, { $set: { status: ORDER_STATUS.MANUAL_REVIEW } }, { new: true });
+        expect(staleRecoveryWrite).toBeNull();
+        expect((await Order.findById(ownerOrder._id)).providerOrderId).toBe('rch_reconciled');
+        const resumed = await Order.create({
+            userId: ownerOrder.userId,
+            orderNumber: ownerOrder.orderNumber + 2,
+            productId: ownerOrder.productId,
+            quantity: 70000,
+            unitPrice: ownerOrder.unitPrice,
+            totalPrice: ownerOrder.totalPrice,
+            basePriceSnapshot: ownerOrder.basePriceSnapshot,
+            markupPercentageSnapshot: ownerOrder.markupPercentageSnapshot,
+            finalPriceCharged: ownerOrder.finalPriceCharged,
+            groupIdSnapshot: ownerOrder.groupIdSnapshot,
+            walletDeducted: ownerOrder.walletDeducted,
+            creditUsedAmount: ownerOrder.creditUsedAmount,
+            status: ORDER_STATUS.PROCESSING,
+            executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+            providerCode: 'xena-recharge',
+            idempotencyKey: `resolved-lock-contender-${ownerOrder._id.toString()}`,
+            customerInput: ownerOrder.customerInput,
+        });
+        const { order: resumedOrder } = await executeOrder(resumed._id);
+        expect(resumedOrder.providerOrderId).toBe('rch_after_recovery');
+        expect((await XenaConnection.findOne({ provider: provider._id }).lean()).placementLock).toBeUndefined();
+    });
+
+    it('does not modify a cross-provider owner referenced by a malformed stale lock', async () => {
+        const { provider: providerA, order: orderA } = await createXenaOrder({ walletDeducted: 50 });
+        const { order: orderB } = await createXenaOrder({
+            walletDeducted: 50,
+            providerOverrides: { name: 'Xena Recharge B', code: 'xena-recharge-b' },
+        });
+        const expiredAt = new Date(Date.now() - 1000);
+        await XenaConnection.updateOne({ provider: providerA._id }, {
+            $set: {
+                placementLock: {
+                    ownerToken: 'wrong-provider-owner-token',
+                    orderId: orderB._id.toString(),
+                    phase: 'POST_DISPATCHING',
+                    acquiredAt: expiredAt,
+                    expiresAt: expiredAt,
+                },
+            },
+        });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const { order: blocked } = await executeOrder(orderA._id);
+        expect(blocked.status).toBe(ORDER_STATUS.FAILED);
+        expect(blocked.refunded).toBe(true);
+        expect((await Order.findById(orderB._id)).status).toBe(ORDER_STATUS.PROCESSING);
+        expect((await XenaConnection.findOne({ provider: providerA._id }).lean()).placementLock).toMatchObject({
+            ownerToken: 'wrong-provider-owner-token',
+            orderId: orderB._id.toString(),
+        });
+        expect(client.request).not.toHaveBeenCalled();
+    });
+
+    it('keeps POST_DISPATCHING blocked when MANUAL_REVIEW persistence fails after dispatch', async () => {
+        const { provider, order, customer } = await createXenaOrder({ walletDeducted: 50 });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        queueSuccessfulVerification(client);
+        client.request.mockRejectedValueOnce({ code: 'ECONNABORTED', message: 'timeout' });
+
+        const originalFindOneAndUpdate = Order.findOneAndUpdate.bind(Order);
+        const writeSpy = jest.spyOn(Order, 'findOneAndUpdate').mockImplementation((filter, update, ...args) => {
+            if (update?.$set?.status === ORDER_STATUS.MANUAL_REVIEW) {
+                return Promise.reject(new Error('simulated manual-review persistence failure'));
+            }
+            return originalFindOneAndUpdate(filter, update, ...args);
+        });
+        try {
+            await expect(executeOrder(order._id)).rejects.toThrow('simulated manual-review persistence failure');
+        } finally {
+            writeSpy.mockRestore();
+        }
+
+        const owner = await Order.findById(order._id);
+        const state = await XenaConnection.findOne({ provider: provider._id }).lean();
+        expect(owner.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(owner.refunded).toBe(false);
+        expect(await WalletTransaction.countDocuments({ userId: customer._id, type: 'REFUND' })).toBe(0);
+        expect(state.placementLock).toMatchObject({
+            orderId: order._id.toString(),
+            phase: 'POST_DISPATCHING',
+        });
     });
 
     it('recorded Xena idempotency key without providerOrderId prevents immediate duplicate placement', async () => {
@@ -625,6 +1030,13 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
             { response: { id: 'rch_unknown', status: 'mystery' }, code: 'XENA_RECHARGE_UNKNOWN' },
             { response: { status: 'processing' }, code: 'XENA_RECHARGE_ID_MISSING' },
             { error: { code: 'ECONNABORTED', message: 'timeout of 20000ms exceeded' }, code: 'XENA_RECHARGE_UNKNOWN' },
+            {
+                error: {
+                    response: { status: 500, data: { message: 'insufficient provider balance' }, headers: {} },
+                    message: 'insufficient provider balance',
+                },
+                code: 'XENA_INSUFFICIENT_PROVIDER_BALANCE',
+            },
         ]) {
             await clearCollections();
             const { order, customer } = await createXenaOrder();

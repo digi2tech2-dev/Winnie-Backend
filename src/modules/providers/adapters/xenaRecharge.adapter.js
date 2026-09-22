@@ -43,6 +43,23 @@ const buildManualReviewResult = ({
     errorMessage: providerErrorMessage,
 });
 
+const buildDefinitiveFailureResult = ({
+    providerIdempotencyKey,
+    providerErrorCode,
+    providerErrorMessage,
+    rawResponse = null,
+}) => ({
+    success: false,
+    manualReview: false,
+    providerOrderId: null,
+    providerStatus: 'Failed',
+    providerIdempotencyKey,
+    providerErrorCode,
+    providerErrorMessage,
+    rawResponse: rawResponse || { errorCode: providerErrorCode, message: providerErrorMessage },
+    errorMessage: providerErrorMessage,
+});
+
 const buildStatusPendingResult = ({
     providerOrderId,
     providerRequestId = null,
@@ -107,7 +124,7 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
         });
 
         if (!xenaService.isXenaRechargeEnabled()) {
-            return buildManualReviewResult({
+            return buildDefinitiveFailureResult({
                 providerIdempotencyKey,
                 providerErrorCode: xenaService.XENA_DISABLED_ERROR_CODE,
                 providerErrorMessage: 'Xena Recharge is disabled by environment configuration.',
@@ -157,28 +174,83 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
             };
         }
 
+        // Fulfillment obtains this durable, provider-wide gate only after the
+        // per-order Xena placement claim. Refusing to POST without it prevents
+        // callers from bypassing the balance preflight serialization.
+        const placementGate = params.xenaPlacementGate;
+        if (!placementGate?.ownerToken || placementGate.orderId !== orderId || placementGate.phase !== 'PREFLIGHT') {
+            return buildDefinitiveFailureResult({
+                providerIdempotencyKey,
+                providerErrorCode: 'XENA_PLACEMENT_GATE_REQUIRED',
+                providerErrorMessage: 'Xena placement gate was not acquired before recharge.',
+                rawResponse: buildAttemptMetadata({ reason: 'XENA_PLACEMENT_GATE_REQUIRED' }),
+            });
+        }
+
+        try {
+            await xenaService.assertPlacementConnectionUsable({ provider: this.provider });
+        } catch (err) {
+            return buildDefinitiveFailureResult({
+                providerIdempotencyKey,
+                providerErrorCode: err.code || 'XENA_CONNECTION_REQUIRED',
+                providerErrorMessage: err.message || 'Xena connection is unavailable before recharge.',
+                rawResponse: buildAttemptMetadata({
+                    reason: err.code || 'XENA_CONNECTION_REQUIRED',
+                    providerResponse: safeErrorPayload(err, err.code || 'XENA_CONNECTION_REQUIRED'),
+                }),
+            });
+        }
+
         let verification;
         try {
             verification = await xenaService.verifyTargetUser({ provider: this.provider, targetUid });
         } catch (err) {
-            if (err.code === 'XENA_TARGET_INVALID') {
-                return {
-                    success: false,
-                    providerOrderId: null,
-                    providerStatus: 'Cancelled',
-                    providerIdempotencyKey,
-                    providerErrorCode: 'XENA_TARGET_INVALID',
-                    providerErrorMessage: 'Xena target UID is invalid.',
-                    rawResponse: safeErrorPayload(err, 'XENA_TARGET_INVALID'),
-                    errorMessage: 'Xena target UID is invalid.',
-                };
-            }
-
-            return buildManualReviewResult({
+            return buildDefinitiveFailureResult({
                 providerIdempotencyKey,
                 providerErrorCode: err.code || 'XENA_VERIFICATION_UNAVAILABLE',
                 providerErrorMessage: 'Xena target verification could not be completed before recharge.',
                 rawResponse: safeErrorPayload(err, err.code || 'XENA_VERIFICATION_UNAVAILABLE'),
+            });
+        }
+
+        try {
+            // This always calls the live balance endpoint; lastBalance is only
+            // diagnostic state and is never used for placement decisions.
+            await xenaService.assertSufficientProviderBalance({
+                provider: this.provider,
+                quantity: amount,
+            });
+        } catch (err) {
+            return buildDefinitiveFailureResult({
+                providerIdempotencyKey,
+                providerErrorCode: err.code || 'XENA_BALANCE_UNAVAILABLE',
+                providerErrorMessage: err.message || 'Xena balance could not be confirmed before recharge.',
+                rawResponse: buildAttemptMetadata({
+                    targetUid,
+                    reason: err.code || 'XENA_BALANCE_UNAVAILABLE',
+                    providerResponse: safeErrorPayload(err, err.code || 'XENA_BALANCE_UNAVAILABLE'),
+                }),
+            });
+        }
+
+        try {
+            const dispatchedGate = await xenaService.markPlacementGatePostDispatching({
+                provider: this.provider,
+                orderId,
+                ownerToken: placementGate.ownerToken,
+            });
+            placementGate.phase = dispatchedGate.phase;
+            placementGate.expiresAt = dispatchedGate.expiresAt;
+        } catch (err) {
+            return buildDefinitiveFailureResult({
+                providerIdempotencyKey,
+                providerErrorCode: err.code || 'XENA_PLACEMENT_GATE_LOST',
+                providerErrorMessage: err.message || 'Xena placement gate was lost before recharge dispatch.',
+                rawResponse: buildAttemptMetadata({
+                    targetUid,
+                    reason: err.code || 'XENA_PLACEMENT_GATE_LOST',
+                    providerResponse: safeErrorPayload(err, err.code || 'XENA_PLACEMENT_GATE_LOST'),
+                }),
             });
         }
 
@@ -192,22 +264,10 @@ class XenaRechargeAdapter extends BaseProviderAdapter {
                 idempotencyKey: providerIdempotencyKey,
             });
         } catch (err) {
-            if (err.code === 'XENA_INSUFFICIENT_PROVIDER_BALANCE') {
-                return {
-                    success: false,
-                    providerOrderId: null,
-                    providerStatus: 'Failed',
-                    providerIdempotencyKey,
-                    providerErrorCode: err.code,
-                    providerErrorMessage: err.message,
-                    rawResponse: buildAttemptMetadata({
-                        targetUid,
-                        reason: err.code,
-                        providerResponse: safeErrorPayload(err, err.code),
-                    }),
-                    errorMessage: err.message,
-                };
-            }
+            // The durable POST_DISPATCHING marker already exists. Error codes
+            // inferred from an HTTP body (including insufficient balance) cannot
+            // prove that Xena did not receive the request, so they are never
+            // refundable placement failures here.
             return buildManualReviewResult({
                 providerIdempotencyKey,
                 providerErrorCode: err.code || 'XENA_RECHARGE_UNKNOWN',

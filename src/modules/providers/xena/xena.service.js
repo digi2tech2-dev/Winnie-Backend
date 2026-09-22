@@ -1,7 +1,12 @@
 'use strict';
 
+const { randomUUID } = require('crypto');
 const { Provider } = require('../provider.model');
-const { XenaConnection, XENA_CONNECTION_STATUSES } = require('./xenaConnection.model');
+const {
+    XenaConnection,
+    XENA_CONNECTION_STATUSES,
+    XENA_PLACEMENT_LOCK_PHASES,
+} = require('./xenaConnection.model');
 const { XenaClient, XENA_ERROR_CODES, safeMessageForCode } = require('./xena.client');
 const { NotFoundError, BusinessRuleError } = require('../../../shared/errors/AppError');
 const config = require('../../../config/config');
@@ -11,6 +16,11 @@ const Decimal = require('decimal.js');
 const XENA_PROVIDER_CODE = 'xena-recharge';
 
 const XENA_DISABLED_ERROR_CODE = 'XENA_RECHARGE_DISABLED';
+const XENA_PLACEMENT_GATE_BUSY = 'XENA_PLACEMENT_GATE_BUSY';
+const XENA_PLACEMENT_GATE_LOST = 'XENA_PLACEMENT_GATE_LOST';
+const XENA_STALE_POST_DISPATCHING_LOCK = 'XENA_STALE_POST_DISPATCHING_LOCK';
+const XENA_PLACEMENT_GATE_AMBIGUOUS = 'XENA_PLACEMENT_GATE_AMBIGUOUS';
+const XENA_PREFLIGHT_LOCK_LEASE_MS = 90_000;
 
 const isXenaProvider = (provider) => {
     const slug = String(provider?.slug || '').toLowerCase().trim();
@@ -303,6 +313,194 @@ const assertVerificationConnectionUsable = (state) => {
             XENA_ERROR_CODES.CONNECTION_REQUIRED
         );
     }
+};
+
+const placementLockResult = (state) => {
+    const lock = state?.placementLock;
+    if (!lock?.ownerToken || !lock?.phase) return null;
+
+    return {
+        ownerToken: lock.ownerToken,
+        orderId: lock.orderId || null,
+        phase: lock.phase,
+        acquiredAt: toIso(lock.acquiredAt),
+        expiresAt: toIso(lock.expiresAt),
+    };
+};
+
+const acquirePlacementGate = async ({ provider: providerOrId, orderId, leaseMs = XENA_PREFLIGHT_LOCK_LEASE_MS } = {}) => {
+    const provider = await loadProvider(providerOrId);
+    const normalizedOrderId = assertNonEmptyString(
+        String(orderId || ''),
+        XENA_ERROR_CODES.MALFORMED_RESPONSE,
+        'Xena placement gate requires a local order id.'
+    );
+    const now = new Date();
+    const normalizedLeaseMs = Number.isFinite(Number(leaseMs)) && Number(leaseMs) > 0
+        ? Number(leaseMs)
+        : XENA_PREFLIGHT_LOCK_LEASE_MS;
+    const expiresAt = new Date(now.getTime() + normalizedLeaseMs);
+    const ownerToken = randomUUID();
+
+    // Only an absent lock or expired PRE-FLIGHT lock is reclaimable. A stale
+    // POST_DISPATCHING lock remains evidence that a POST may have happened.
+    const claimed = await XenaConnection.findOneAndUpdate(
+        {
+            provider: provider._id,
+            $or: [
+                { 'placementLock.ownerToken': { $exists: false } },
+                { 'placementLock.ownerToken': null },
+                {
+                    'placementLock.phase': XENA_PLACEMENT_LOCK_PHASES.PREFLIGHT,
+                    'placementLock.expiresAt': { $lte: now },
+                },
+            ],
+        },
+        {
+            $set: {
+                placementLock: {
+                    ownerToken,
+                    orderId: normalizedOrderId,
+                    phase: XENA_PLACEMENT_LOCK_PHASES.PREFLIGHT,
+                    acquiredAt: now,
+                    expiresAt,
+                },
+            },
+        },
+        { new: true }
+    ).lean();
+
+    if (claimed) {
+        return {
+            acquired: true,
+            providerId: provider._id.toString(),
+            ownerToken,
+            orderId: normalizedOrderId,
+            phase: XENA_PLACEMENT_LOCK_PHASES.PREFLIGHT,
+            expiresAt: expiresAt.toISOString(),
+        };
+    }
+
+    const state = await XenaConnection.findOne({ provider: provider._id }).select('placementLock').lean();
+    if (!state) {
+        throw new BusinessRuleError(
+            safeMessageForCode(XENA_ERROR_CODES.CONNECTION_REQUIRED),
+            XENA_ERROR_CODES.CONNECTION_REQUIRED
+        );
+    }
+
+    const lock = placementLockResult(state);
+    const isStalePostDispatching = lock?.phase === XENA_PLACEMENT_LOCK_PHASES.POST_DISPATCHING
+        && lock.expiresAt
+        && new Date(lock.expiresAt).getTime() <= now.getTime();
+
+    return {
+        acquired: false,
+        providerId: provider._id.toString(),
+        lock,
+        stalePostDispatching: Boolean(isStalePostDispatching),
+        ambiguousPostDispatching: lock?.phase === XENA_PLACEMENT_LOCK_PHASES.POST_AMBIGUOUS,
+    };
+};
+
+const markPlacementGatePostDispatching = async ({ provider: providerOrId, orderId, ownerToken, leaseMs = XENA_PREFLIGHT_LOCK_LEASE_MS } = {}) => {
+    const provider = await loadProvider(providerOrId);
+    const normalizedOrderId = assertNonEmptyString(String(orderId || ''), XENA_ERROR_CODES.MALFORMED_RESPONSE, 'Xena placement gate requires a local order id.');
+    const normalizedOwnerToken = assertNonEmptyString(ownerToken, XENA_ERROR_CODES.MALFORMED_RESPONSE, 'Xena placement gate owner token is required.');
+    const now = new Date();
+    const normalizedLeaseMs = Number.isFinite(Number(leaseMs)) && Number(leaseMs) > 0 ? Number(leaseMs) : XENA_PREFLIGHT_LOCK_LEASE_MS;
+    const expiresAt = new Date(now.getTime() + normalizedLeaseMs);
+
+    const marked = await XenaConnection.findOneAndUpdate(
+        {
+            provider: provider._id,
+            'placementLock.ownerToken': normalizedOwnerToken,
+            'placementLock.orderId': normalizedOrderId,
+            'placementLock.phase': XENA_PLACEMENT_LOCK_PHASES.PREFLIGHT,
+        },
+        {
+            $set: {
+                'placementLock.phase': XENA_PLACEMENT_LOCK_PHASES.POST_DISPATCHING,
+                'placementLock.expiresAt': expiresAt,
+            },
+        },
+        { new: true }
+    ).lean();
+
+    if (!marked) {
+        throw new BusinessRuleError('Xena placement gate was lost before recharge dispatch.', XENA_PLACEMENT_GATE_LOST);
+    }
+
+    return {
+        ownerToken: normalizedOwnerToken,
+        orderId: normalizedOrderId,
+        phase: XENA_PLACEMENT_LOCK_PHASES.POST_DISPATCHING,
+        expiresAt: expiresAt.toISOString(),
+    };
+};
+
+const markPlacementGatePostAmbiguous = async ({ provider: providerOrId, orderId, ownerToken } = {}) => {
+    const provider = await loadProvider(providerOrId);
+    const normalizedOrderId = assertNonEmptyString(String(orderId || ''), XENA_ERROR_CODES.MALFORMED_RESPONSE, 'Xena placement gate requires a local order id.');
+    const normalizedOwnerToken = assertNonEmptyString(ownerToken, XENA_ERROR_CODES.MALFORMED_RESPONSE, 'Xena placement gate owner token is required.');
+
+    // This transition is a fence, not a lease renewal. Once a POST may have
+    // happened, only durable resolution of this exact owner may reopen the gate.
+    const marked = await XenaConnection.findOneAndUpdate(
+        {
+            provider: provider._id,
+            'placementLock.ownerToken': normalizedOwnerToken,
+            'placementLock.orderId': normalizedOrderId,
+            'placementLock.phase': XENA_PLACEMENT_LOCK_PHASES.POST_DISPATCHING,
+        },
+        {
+            $set: {
+                'placementLock.phase': XENA_PLACEMENT_LOCK_PHASES.POST_AMBIGUOUS,
+                'placementLock.expiresAt': null,
+            },
+        },
+        { new: true }
+    ).lean();
+
+    if (!marked) {
+        throw new BusinessRuleError('Xena placement gate was lost while recording an ambiguous recharge.', XENA_PLACEMENT_GATE_LOST);
+    }
+
+    return {
+        ownerToken: normalizedOwnerToken,
+        orderId: normalizedOrderId,
+        phase: XENA_PLACEMENT_LOCK_PHASES.POST_AMBIGUOUS,
+        expiresAt: null,
+    };
+};
+
+const releasePlacementGate = async ({ provider: providerOrId, orderId, ownerToken, expectedPhase = null } = {}) => {
+    const provider = await loadProvider(providerOrId);
+    const normalizedOrderId = assertNonEmptyString(String(orderId || ''), XENA_ERROR_CODES.MALFORMED_RESPONSE, 'Xena placement gate requires a local order id.');
+    const normalizedOwnerToken = assertNonEmptyString(ownerToken, XENA_ERROR_CODES.MALFORMED_RESPONSE, 'Xena placement gate owner token is required.');
+
+    const filter = {
+            provider: provider._id,
+            'placementLock.ownerToken': normalizedOwnerToken,
+            'placementLock.orderId': normalizedOrderId,
+    };
+    if (expectedPhase) filter['placementLock.phase'] = expectedPhase;
+
+    const released = await XenaConnection.findOneAndUpdate(
+        filter,
+        { $unset: { placementLock: 1 } },
+        { new: true }
+    ).lean();
+    return Boolean(released);
+};
+
+const assertPlacementConnectionUsable = async ({ provider: providerOrId }) => {
+    assertXenaRechargeEnabled();
+    const provider = await loadProvider(providerOrId);
+    const state = await loadState(provider._id);
+    assertVerificationConnectionUsable(state);
+    getConnectionIdOrThrow(state);
+    return { provider, state };
 };
 
 const buildClient = (provider) => {
@@ -955,6 +1153,11 @@ const getRecharge = async ({ provider: providerOrId, rechargeId }) => {
 module.exports = {
     XENA_PROVIDER_CODE,
     XENA_DISABLED_ERROR_CODE,
+    XENA_PLACEMENT_GATE_BUSY,
+    XENA_PLACEMENT_GATE_LOST,
+    XENA_STALE_POST_DISPATCHING_LOCK,
+    XENA_PLACEMENT_GATE_AMBIGUOUS,
+    XENA_PREFLIGHT_LOCK_LEASE_MS,
     XENA_ERROR_CODES,
     assertXenaRechargeEnabled,
     getGlobalSafetyStatus,
@@ -973,6 +1176,11 @@ module.exports = {
     reconnectConnection,
     verifyConnection,
     getConnectionStatus,
+    assertPlacementConnectionUsable,
+    acquirePlacementGate,
+    markPlacementGatePostDispatching,
+    markPlacementGatePostAmbiguous,
+    releasePlacementGate,
     refreshBalance,
     assertSufficientProviderBalance,
     verifyTargetUser,
