@@ -12,7 +12,7 @@ const {
     PRODUCT_STATUSES,
     computeFinalPrice,
 } = require('../../products/product.model');
-const { Order, ORDER_STATUS } = require('../../orders/order.model');
+const { Order, ORDER_STATUS, MAX_RETRY_COUNT } = require('../../orders/order.model');
 const { refundFailedOrder } = require('../../orders/orderFulfillment.service');
 const { Currency } = require('../../currency/currency.model');
 const { PROVIDER_CODES } = require('../provider.constants');
@@ -3694,6 +3694,70 @@ const storeDeliveredCodesFromProviderPayload = async (order, rawPayload) => {
     });
 };
 
+const keepFazerCardsCodeDeliveryPollable = async (
+    order,
+    {
+        update = {},
+        source = 'fazercards_status_sync',
+        storedEncrypted = false,
+    } = {}
+) => {
+    const currentRetry = Number(order.retryCount || 0);
+    const countRetry = !String(source || '').toLowerCase().includes('webhook');
+    const nextRetry = currentRetry + (countRetry ? 1 : 0);
+    const exhausted = nextRetry >= MAX_RETRY_COUNT;
+
+    const targetStatus = exhausted
+        ? ORDER_STATUS.MANUAL_REVIEW
+        : ORDER_STATUS.PROCESSING;
+
+    const providerErrorCode = exhausted
+        ? 'FAZERCARDS_CODE_DELIVERY_CODE_MISSING'
+        : 'FAZERCARDS_CODE_DELIVERY_CODE_PENDING';
+
+    const message = exhausted
+        ? 'Provider completed but delivered code payload was not recognized after reconciliation retries.'
+        : 'Provider completed; waiting for the delivered code payload to become available.';
+
+    const updated = await Order.findByIdAndUpdate(order._id, {
+        $set: {
+            ...update,
+            status: targetStatus,
+            retryCount: nextRetry,
+            providerErrorCode,
+            providerErrorMessage: message,
+            rejectionReason: exhausted ? message : null,
+            lastCheckedAt: new Date(),
+        },
+        $push: {
+            statusHistory: appendFazerCardsStatusHistory(
+                targetStatus,
+                message,
+                {
+                    source,
+                    providerOrderId: update.providerOrderId || order.providerOrderId,
+                    storedEncrypted,
+                    retryCount: nextRetry,
+                }
+            ),
+        },
+    }, { new: true });
+
+    if (exhausted) {
+        notifyOrderManualReview(updated, {
+            reason: providerErrorCode,
+            source,
+        });
+    }
+
+    return {
+        order: updated,
+        action: exhausted ? 'manualReview' : 'processing',
+        refunded: false,
+        deliveredCodeCount: 0,
+    };
+};
+
 const updateOrderFromFazerCardsStatus = async (order, result, { source = 'fazercards_status_sync' } = {}) => {
     const now = new Date();
     const update = buildProviderResultUpdate(result, order.providerOrderId);
@@ -3723,15 +3787,31 @@ const updateOrderFromFazerCardsStatus = async (order, result, { source = 'fazerc
     if (order.status === ORDER_STATUS.COMPLETED && normalizedStatus === NORMALIZED_STATUSES.COMPLETED) {
         let deliveredCodeCount = 0;
         if (isCodeDeliveryFazerCardsOrder(order)) {
-            await storeDeliveredCodesFromProviderPayload(order, result.rawProviderPayload || result.rawResponse);
+            const storedCodes = await storeDeliveredCodesFromProviderPayload(
+                order,
+                result.rawProviderPayload || result.rawResponse
+            );
             deliveredCodeCount = await getExistingDeliveredCodeCount(order._id);
+
+            if (deliveredCodeCount <= 0) {
+                return keepFazerCardsCodeDeliveryPollable(order, {
+                    update,
+                    source,
+                    storedEncrypted: storedCodes.storedEncrypted,
+                });
+            }
         }
+
         const updated = await Order.findByIdAndUpdate(order._id, {
             $set: {
                 ...update,
+                providerErrorCode: null,
+                providerErrorMessage: null,
+                rejectionReason: null,
                 lastCheckedAt: now,
             },
         }, { new: true });
+
         return {
             order: updated,
             action: 'completed',
@@ -3814,27 +3894,11 @@ const updateOrderFromFazerCardsStatus = async (order, result, { source = 'fazerc
         const storedCodes = await storeDeliveredCodesFromProviderPayload(order, result.rawProviderPayload || result.rawResponse);
         const deliveredCodeCount = await getExistingDeliveredCodeCount(order._id);
         if (deliveredCodeCount <= 0) {
-            const updated = await Order.findByIdAndUpdate(order._id, {
-                $set: {
-                    status: ORDER_STATUS.MANUAL_REVIEW,
-                    ...update,
-                    providerErrorCode: result.providerErrorCode || 'FAZERCARDS_CODE_DELIVERY_CODE_MISSING',
-                    providerErrorMessage: result.providerErrorMessage || 'Provider completed but code payload was not recognized.',
-                    rejectionReason: result.errorMessage || result.providerErrorMessage || 'Provider completed but code payload was not recognized.',
-                },
-                $push: {
-                    statusHistory: appendFazerCardsStatusHistory(ORDER_STATUS.MANUAL_REVIEW, 'Provider completed but code payload was not recognized.', {
-                        source,
-                        providerOrderId: update.providerOrderId,
-                        storedEncrypted: storedCodes.storedEncrypted,
-                    }),
-                },
-            }, { new: true });
-            notifyOrderManualReview(updated, {
-                reason: result.providerErrorCode || 'FAZERCARDS_CODE_DELIVERY_CODE_MISSING',
+            return keepFazerCardsCodeDeliveryPollable(order, {
+                update,
                 source,
+                storedEncrypted: storedCodes.storedEncrypted,
             });
-            return { order: updated, action: 'manualReview', refunded: false, deliveredCodeCount: 0 };
         }
     }
 
@@ -3842,6 +3906,9 @@ const updateOrderFromFazerCardsStatus = async (order, result, { source = 'fazerc
         $set: {
             status: ORDER_STATUS.COMPLETED,
             ...update,
+            providerErrorCode: null,
+            providerErrorMessage: null,
+            rejectionReason: null,
         },
         $push: {
             statusHistory: appendFazerCardsStatusHistory(ORDER_STATUS.COMPLETED, 'FazerCards provider order completed.', {

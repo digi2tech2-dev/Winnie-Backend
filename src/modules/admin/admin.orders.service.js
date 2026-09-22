@@ -291,6 +291,57 @@ const syncOrderProviderStatus = async (orderId, adminId) => {
     const provider = await Provider.findById(providerId);
     if (!provider) throw new NotFoundError('Provider');
 
+    const normalizedProviderIdentity = String(
+        provider.providerCode
+        || provider.code
+        || provider.slug
+        || provider.name
+        || ''
+    ).trim().toLowerCase().replace(/[\s_]+/g, '-');
+
+    const isFazerCardsCodeDeliveryOrder =
+        (normalizedProviderIdentity === 'fazer-cards' || normalizedProviderIdentity === 'fazercards')
+        && String(order.fulfillmentMode || '').trim().toUpperCase() === 'CODE_DELIVERY'
+        && ['GIFTCARDS', 'GAME_KEYS'].includes(
+            String(order.familyKey || '').trim().toUpperCase()
+        );
+
+    if (isFazerCardsCodeDeliveryOrder) {
+        const before = {
+            providerStatus: order.providerStatus,
+            status: order.status,
+        };
+
+        // Lazy require keeps provider-specific reconciliation isolated and
+        // guarantees code-delivery storage happens before local COMPLETED.
+        const fazerCardsCatalogSvc = require('../providers/fazercards/fazercardsCatalog.service');
+        await fazerCardsCatalogSvc.syncOrderStatus(order._id);
+
+        const refreshed = await Order.findById(order._id).populate('product');
+
+        createAuditLog({
+            actorId: adminId,
+            actorRole: ACTOR_ROLES.ADMIN,
+            action: ADMIN_ACTIONS.ORDER_RETRIED,
+            entityType: ENTITY_TYPES.ORDER,
+            entityId: order._id,
+            metadata: {
+                action: 'sync_provider_status',
+                provider: 'fazer-cards',
+                before,
+                after: {
+                    providerStatus: refreshed?.providerStatus,
+                    status: refreshed?.status,
+                },
+                providerOrderId: refreshed?.providerOrderId || order.providerOrderId,
+                statusChanged: before.status !== refreshed?.status,
+                newStatus: refreshed?.status || null,
+            },
+        });
+
+        return refreshed;
+    }
+
     const adapter = getProviderAdapter(provider);
 
     let statusResult;
