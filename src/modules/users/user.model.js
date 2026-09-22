@@ -52,17 +52,6 @@ const REFERRAL_STOP_REASONS = Object.freeze({
     OTHER: 'other',
 });
 
-const DEFAULT_WHATSAPP_EVENT_PREFERENCES = Object.freeze({
-    walletTopupCompleted: true,
-    manualDepositApproved: true,
-    manualDepositRejected: true,
-    orderCreated: true,
-    orderCompleted: true,
-    orderFailed: true,
-    identityVerificationRequired: true,
-    securityAlerts: true,
-});
-
 const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const REFERRAL_CODE_LENGTH = 8;
 
@@ -537,27 +526,6 @@ const userSchema = new mongoose.Schema(
             max: [100, 'Referral commission percent cannot exceed 100'],
         },
 
-        whatsappNotifications: {
-            enabled: { type: Boolean, default: false },
-            phone: { type: String, trim: true, default: null, maxlength: 30 },
-            phoneVerified: { type: Boolean, default: false },
-            verifiedAt: { type: Date, default: null },
-            verificationCodeHash: { type: String, default: null },
-            verificationCodeExpiresAt: { type: Date, default: null },
-            lastVerificationSentAt: { type: Date, default: null },
-            lastTestSentAt: { type: Date, default: null },
-            eventPreferences: {
-                walletTopupCompleted: { type: Boolean, default: true },
-                manualDepositApproved: { type: Boolean, default: true },
-                manualDepositRejected: { type: Boolean, default: true },
-                orderCreated: { type: Boolean, default: true },
-                orderCompleted: { type: Boolean, default: true },
-                orderFailed: { type: Boolean, default: true },
-                identityVerificationRequired: { type: Boolean, default: true },
-                securityAlerts: { type: Boolean, default: true },
-            },
-        },
-
         referredBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
@@ -738,10 +706,6 @@ userSchema.methods.toSafeObject = function () {
     delete obj.apiKeyHash;
     delete obj.apiKeyRevokedHash;
     delete obj.apiKeyLastUsedIp;
-    if (obj.whatsappNotifications) {
-        delete obj.whatsappNotifications.verificationCodeHash;
-        delete obj.whatsappNotifications.verificationCodeExpiresAt;
-    }
     delete obj.identityVerificationRequestedBy;
     delete obj.identityVerificationClearedBy;
     return obj;
@@ -751,4 +715,3 @@ const User = mongoose.model('User', userSchema);
 
 module.exports = { User, ROLES, USER_STATUS, SUB_AGENT_STATUS, AGENT_PROFILE_STATUS, REFERRAL_STOP_REASONS };
 module.exports.User = User; // CommonJS default export convenience
-module.exports.DEFAULT_WHATSAPP_EVENT_PREFERENCES = DEFAULT_WHATSAPP_EVENT_PREFERENCES;

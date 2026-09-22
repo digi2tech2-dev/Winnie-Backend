@@ -15,6 +15,10 @@ const {
     PAYMENT_RISK_LIMITS_SETTING_KEY,
     getDefaultPaymentRiskLimits,
 } = require('../modules/payments/paymentRisk.config');
+const {
+    claimPaymentFailureNotification,
+    finalizePaymentFailureNotification,
+} = require('../modules/whatsapp/paymentFailureNotificationDedupe.service');
 
 const {
     connectTestDB,
@@ -548,6 +552,35 @@ describe('Payments base module', () => {
         expect(second.alreadyProcessed).toBe(true);
         expect((await User.findById(customer._id)).walletBalance).toBe(150);
         expect(await WalletTransaction.countDocuments({ userId: customer._id })).toBe(1);
+        statusSpy.mockRestore();
+    });
+
+    it('closes a reconciliation-error notification episode after durable payment recovery', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 100, currency: 'USD' });
+        const payment = await createMockPayment(customer);
+        const failure = {
+            paymentId: String(payment._id),
+            status: payment.status,
+            stage: 'payment_reconciliation',
+            errorCode: 'GATEWAY_TIMEOUT',
+            providerStatus: 'UNKNOWN',
+        };
+        const firstClaim = await claimPaymentFailureNotification(failure);
+        await finalizePaymentFailureNotification({ ...firstClaim, delivered: true });
+
+        const statusSpy = jest
+            .spyOn(MockPaymentGateway.prototype, 'getPaymentStatus')
+            .mockResolvedValue({
+                status: PAYMENT_STATUSES.SUCCEEDED,
+                providerStatus: 'PAID',
+                gatewayPaymentId: payment.gatewayPaymentId,
+                gatewayReference: payment.gatewayReference,
+            });
+        const recovered = await paymentService.syncPaymentStatus(payment._id, { actor: await createAdmin() });
+        expect(recovered.payment.status).toBe(PAYMENT_STATUSES.SUCCEEDED);
+
+        const nextClaim = await claimPaymentFailureNotification(failure);
+        expect(nextClaim).toEqual(expect.objectContaining({ paymentId: String(payment._id) }));
         statusSpy.mockRestore();
     });
 

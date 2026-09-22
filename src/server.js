@@ -9,7 +9,8 @@ const connectDB = require('./config/database');
 const fulfillmentJob = require('./modules/orders/fulfillmentJob');
 const syncProvidersJob = require('./modules/providers/syncProvidersJob');
 const fazerCardsCatalogSyncJob = require('./modules/providers/fazercards/fazercardsCatalogSync.job');
-const whatsappNotificationQueue = require('./modules/notifications/whatsapp/whatsappNotification.queue');
+const providerBalanceMonitor = require('./modules/whatsapp/providerBalanceMonitor.job');
+const { initializeWhatsApp, destroyClient } = require('./modules/whatsapp/whatsapp.service');
 const {
     sendReadySignal,
     startBackgroundJobs,
@@ -20,7 +21,7 @@ const backgroundJobs = [
     fulfillmentJob,
     syncProvidersJob,
     fazerCardsCatalogSyncJob,
-    whatsappNotificationQueue,
+    providerBalanceMonitor,
 ];
 
 const startServer = async () => {
@@ -38,12 +39,18 @@ const startServer = async () => {
             console.log('');
             sendReadySignal();
             startBackgroundJobs(backgroundJobs);
+            if (process.env.WHATSAPP_AUTO_INIT === 'true') {
+                void initializeWhatsApp().catch((error) => {
+                    console.warn('[WhatsApp] Startup initialization failed:', error.message);
+                });
+            }
         });
 
         const gracefulShutdown = (signal) => {
             console.log(`\nReceived ${signal}. Shutting down gracefully...`);
 
             stopBackgroundJobs(backgroundJobs);
+            void destroyClient();
 
             server.close(async () => {
                 console.log('HTTP server closed.');

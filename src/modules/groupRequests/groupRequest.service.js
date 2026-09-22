@@ -259,7 +259,7 @@ const buildDateFilter = ({ from, to } = {}) => {
     return createdAt;
 };
 
-const emitCreatedSideEffects = ({ request, userId, actor = {} }) => {
+const emitCreatedSideEffects = ({ request, userId, requester = null, actor = {} }) => {
     if (!request) return;
 
     const requestId = request.id;
@@ -328,6 +328,15 @@ const emitCreatedSideEffects = ({ request, userId, actor = {} }) => {
             relatedEntityType: 'group_change_request',
             relatedEntityId: requestObjectId,
             idempotencyScope: 'created',
+            payload: {
+                requestId,
+                customerName: requester?.name || request.userId?.name || null,
+                email: requester?.email || request.userId?.email || null,
+                accountIdentifier: toIdString(userId),
+                requestedGroup: request.requestedGroup?.name || request.requestedGroup,
+                role: request.requestType,
+                status: request.status,
+            },
         }).catch((error) => {
             const message = error.message || '';
             if (!message.includes('client was closed') && !message.includes('connection was destroyed')) {
@@ -457,11 +466,13 @@ const createGroupRequest = async ({
 } = {}) => {
     const session = await mongoose.startSession();
     let createdRequestId;
+    let requester;
 
     try {
         session.startTransaction();
 
         const user = await getCustomerOrThrow(userId, { session });
+        requester = { name: user.name || null, email: user.email || null };
 
         if (requestType === GROUP_REQUEST_TYPES.SUB_AGENT && user.isSubAgent === true) {
             throw new BusinessRuleError('User is already an active sub-agent.', 'SUB_AGENT_ALREADY_ACTIVE');
@@ -556,7 +567,7 @@ const createGroupRequest = async ({
     }
 
     const formatted = await getFormattedRequestById(createdRequestId, { admin: false });
-    emitCreatedSideEffects({ request: formatted, userId, actor });
+    emitCreatedSideEffects({ request: formatted, userId, requester, actor });
     return formatted;
 };
 

@@ -47,6 +47,7 @@ const {
     notifyPaymentReconciliationFailed,
     notifyPaymentSucceeded,
 } = require('../notifications/notification.events');
+const { resolvePaymentFailureNotification } = require('../whatsapp/paymentFailureNotificationDedupe.service');
 const {
     escapeRegex,
     normalizeSubmittedCustomFields,
@@ -97,6 +98,21 @@ const normalizeCurrency = (currency) => String(currency || 'USD').trim().toUpper
 const normalizeIdempotencyKey = (key) => {
     const normalized = String(key || '').trim();
     return normalized ? normalized.slice(0, 160) : undefined;
+};
+
+const PAYMENT_FAILURE_STATUSES = new Set([
+    PAYMENT_STATUSES.FAILED,
+    PAYMENT_STATUSES.CANCELED,
+    PAYMENT_STATUSES.EXPIRED,
+]);
+const closeResolvedPaymentFailureEpisode = async (payment) => {
+    if (!payment?._id || PAYMENT_FAILURE_STATUSES.has(payment.status)) return;
+    try {
+        await resolvePaymentFailureNotification(payment._id);
+    } catch (error) {
+        // Notification dedupe cleanup is non-critical to reconciliation.
+        console.warn('[WhatsApp] Failed to close payment notification episode:', String(error?.message || error).slice(0, 300));
+    }
 };
 
 const normalizeOptionalPaymentMethodId = (value) => {
@@ -1371,6 +1387,7 @@ const syncPaymentStatus = async (paymentId, { actor, requestMeta = {}, source = 
                 source,
                 requestMeta,
             });
+            await closeResolvedPaymentFailureEpisode(result.payment);
             return result;
         }
 
@@ -1402,6 +1419,7 @@ const syncPaymentStatus = async (paymentId, { actor, requestMeta = {}, source = 
             source,
             requestMeta,
         });
+        await closeResolvedPaymentFailureEpisode(result.payment);
         return result;
     } catch (err) {
         auditPaymentReconciliation({

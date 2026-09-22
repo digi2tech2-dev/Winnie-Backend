@@ -6,6 +6,7 @@ const { createWorkbookBuffer } = require('./admin.financialReport.excel');
 const financialReportService = require('./admin.financialReport.service');
 const { createAuditLog } = require('../audit/audit.service');
 const { ADMIN_ACTIONS, ENTITY_TYPES, ACTOR_ROLES } = require('../audit/audit.constants');
+const whatsappService = require('../notifications/whatsapp/whatsappNotification.service');
 
 const getActorRole = (user) => ACTOR_ROLES[user?.role] || user?.role || ACTOR_ROLES.SYSTEM;
 
@@ -80,6 +81,21 @@ const closeDailyReport = catchAsync(async (req, res) => {
         },
         ipAddress: req.ip,
         userAgent: req.get('User-Agent'),
+    });
+
+    // The close document already exists at this point; a transport failure is
+    // deliberately isolated from the completed financial close.
+    void whatsappService.queueAdminEvent({
+        eventType: 'financial_day_closed',
+        payload: {
+            date: close.date,
+            timezone: close.timezone,
+            warningsCount: close.warnings?.length || 0,
+            transactionCount: close.summary?.transactionCount,
+            adminName: req.user?.name || req.user?.email,
+        },
+    }).catch((error) => {
+        console.warn('[WhatsApp] Failed to queue day-close notification:', String(error?.message || error).slice(0, 300));
     });
 
     sendSuccess(res, {
