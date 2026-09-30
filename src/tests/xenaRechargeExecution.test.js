@@ -13,7 +13,7 @@ const { XenaConnection } = require('../modules/providers/xena/xenaConnection.mod
 const xenaService = require('../modules/providers/xena/xena.service');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('../modules/orders/order.model');
 const { createOrder } = require('../modules/orders/order.service');
-const { executeOrder } = require('../modules/orders/orderFulfillment.service');
+const { executeOrder, pollProcessingOrders } = require('../modules/orders/orderFulfillment.service');
 const validateOrderDynamicFields = require('../modules/orders/validateOrderDynamicFields.middleware');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { User } = require('../modules/users/user.model');
@@ -538,6 +538,78 @@ describe('Xena fulfillment status mapping and refund behavior', () => {
         expect(rechargeCalls[0].headers['Idempotency-Key']).toBe(`provider:xena:${order._id.toString()}`);
         expect(updated.providerOrderId).toBe('rch_concurrent');
         expect(updated.providerIdempotencyKey).toBe(`provider:xena:${order._id.toString()}`);
+    });
+
+    it('does not let the missing-id sweep preempt a live POST_DISPATCHING owner', async () => {
+        const { provider, order, customer } = await createXenaOrder({ walletDeducted: 50 });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+        let releasePost;
+        let signalPostStarted;
+        let rechargePosts = 0;
+        const postStarted = new Promise((resolve) => { signalPostStarted = resolve; });
+        const postReleased = new Promise((resolve) => { releasePost = resolve; });
+        const debitCountBefore = await WalletTransaction.countDocuments({
+            reference: order._id,
+            semanticType: 'ORDER_DEBIT',
+        });
+
+        client.request.mockImplementation(async (call) => {
+            if (call.method === 'get' && call.url.includes('/users/')) {
+                return { data: { uid: '001234', nickname: 'Safe nickname' }, status: 200, headers: {} };
+            }
+            if (call.method === 'get' && call.url.endsWith('/balance')) {
+                return { data: { balance: 1000000 }, status: 200, headers: {} };
+            }
+            if (call.method === 'post' && call.url === '/v1/recharges') {
+                rechargePosts++;
+                signalPostStarted();
+                await postReleased;
+                return {
+                    data: { id: 'rch_race_safe', status: 'succeeded', requestId: 'req_race_safe' },
+                    status: 200,
+                    headers: { 'x-request-id': 'req_race_safe' },
+                };
+            }
+            throw new Error(`Unexpected Xena request ${call.method} ${call.url}`);
+        });
+
+        const execution = executeOrder(order._id);
+        await postStarted;
+
+        const duringPost = await Order.findById(order._id);
+        const dispatchingGate = await XenaConnection.findOne({ provider: provider._id }).lean();
+        expect(duringPost).toMatchObject({
+            status: ORDER_STATUS.PROCESSING,
+            providerOrderId: null,
+            providerIdempotencyKey: `provider:xena:${order._id.toString()}`,
+            providerStatus: 'PlacementStarted',
+        });
+        expect(dispatchingGate.placementLock).toMatchObject({
+            orderId: order._id.toString(),
+            phase: 'POST_DISPATCHING',
+        });
+
+        const pollStats = await pollProcessingOrders();
+        const afterSweep = await Order.findById(order._id);
+        expect(pollStats.manualReview).toBe(0);
+        expect(afterSweep.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(afterSweep.providerErrorCode).not.toBe('XENA_RECHARGE_ID_MISSING');
+
+        releasePost();
+        await execution;
+
+        const completedPlacement = await Order.findById(order._id);
+        expect(completedPlacement).toMatchObject({
+            status: ORDER_STATUS.PROCESSING,
+            providerOrderId: 'rch_race_safe',
+            providerRequestId: 'req_race_safe',
+            providerStatus: 'Pending',
+        });
+        expect((await XenaConnection.findOne({ provider: provider._id }).lean()).placementLock).toBeUndefined();
+        expect(rechargePosts).toBe(1);
+        expect(await WalletTransaction.countDocuments({ reference: order._id, semanticType: 'ORDER_DEBIT' })).toBe(debitCountBefore);
+        expect(await WalletTransaction.countDocuments({ userId: customer._id, type: 'REFUND' })).toBe(0);
     });
 
     it('serializes two Xena orders so the second reads a new insufficient balance', async () => {

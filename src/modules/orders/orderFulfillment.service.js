@@ -50,6 +50,10 @@ const {
 const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
 const { storeDeliveredCodesForOrder, sanitizeProviderCodePayload } = require('../providers/fazercards/fazercardsDelivery.service');
 const xenaService = require('../providers/xena/xena.service');
+const {
+    XenaConnection,
+    XENA_PLACEMENT_LOCK_PHASES,
+} = require('../providers/xena/xenaConnection.model');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // IDEMPOTENT REFUND
@@ -367,6 +371,42 @@ const xenaPlacementIdentityFilter = (orderId) => ({
     providerIdempotencyKey: buildXenaProviderIdempotencyKey(orderId),
     providerCode: 'xena-recharge',
 });
+
+const getXenaOrdersProtectedByPlacementGate = async (orders) => {
+    const orderById = new Map(orders.map((order) => [String(order._id), order]));
+    if (!orderById.size) return new Set();
+
+    const locks = await XenaConnection.find({
+        'placementLock.orderId': { $in: [...orderById.keys()] },
+        'placementLock.ownerToken': { $type: 'string' },
+        'placementLock.phase': {
+            $in: [
+                XENA_PLACEMENT_LOCK_PHASES.PREFLIGHT,
+                XENA_PLACEMENT_LOCK_PHASES.POST_DISPATCHING,
+                XENA_PLACEMENT_LOCK_PHASES.POST_AMBIGUOUS,
+            ],
+        },
+    }).select('provider placementLock').lean();
+
+    const now = Date.now();
+    const protectedOrderIds = new Set();
+    for (const connection of locks) {
+        const orderId = String(connection.placementLock.orderId);
+        const order = orderById.get(orderId);
+        const orderProviderId = order?.productId?.provider;
+        if (!order || String(orderProviderId || '') !== String(connection.provider || '')) continue;
+
+        const { phase, expiresAt } = connection.placementLock;
+        const activePreflight = phase === XENA_PLACEMENT_LOCK_PHASES.PREFLIGHT
+            && expiresAt
+            && new Date(expiresAt).getTime() > now;
+        if (activePreflight || phase === XENA_PLACEMENT_LOCK_PHASES.POST_DISPATCHING || phase === XENA_PLACEMENT_LOCK_PHASES.POST_AMBIGUOUS) {
+            protectedOrderIds.add(orderId);
+        }
+    }
+
+    return protectedOrderIds;
+};
 
 const loadExactXenaPlacementOwner = async ({ provider, lock }) => {
     if (!lock?.orderId || !lock?.ownerToken) return null;
@@ -2535,18 +2575,31 @@ const pollProcessingOrders = async (providerOverride = null) => {
             { providerOrderId: null },
             { providerOrderId: '' },
         ],
-    }).limit(200);
+    }).populate('productId', 'provider').limit(200);
+
+    // A Xena POST is fenced by a durable provider-wide gate. Its live owner
+    // may intentionally be PROCESSING without a recharge id while preflight or
+    // dispatch is in progress; only the gate state machine may resolve it.
+    const xenaGateProtectedOrderIds = await getXenaOrdersProtectedByPlacementGate(xenaOrdersMissingProviderId);
 
     for (const order of xenaOrdersMissingProviderId) {
+        if (xenaGateProtectedOrderIds.has(String(order._id))) continue;
         try {
-            await moveOrderToManualReview(order, {
+            const manualReviewOrder = await moveOrderToManualReview(order, {
                 providerOrderId: null,
                 providerStatus: 'Unknown',
                 providerErrorCode: 'XENA_RECHARGE_ID_MISSING',
                 providerErrorMessage: 'Xena recharge id is missing; order requires manual reconciliation.',
                 rawResponse: order.providerRawResponse || { errorCode: 'XENA_RECHARGE_ID_MISSING' },
-            }, { reason: 'XENA_RECHARGE_ID_MISSING' });
-            stats.manualReview++;
+            }, {
+                reason: 'XENA_RECHARGE_ID_MISSING',
+                filter: {
+                    status: ORDER_STATUS.PROCESSING,
+                    providerCode: 'xena-recharge',
+                    providerOrderId: { $in: [null, ''] },
+                },
+            });
+            if (manualReviewOrder) stats.manualReview++;
         } catch (err) {
             stats.errors.push(`[XENA_MISSING_ID:${order._id}] ${err.message}`);
         }

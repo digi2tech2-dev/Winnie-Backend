@@ -7,6 +7,7 @@ const axios = require('axios');
 const adminProviderService = require('../modules/admin/admin.providers.service');
 const { getProviderAdapter } = require('../modules/providers/adapters/adapter.factory');
 const xenaService = require('../modules/providers/xena/xena.service');
+const { XenaConnection } = require('../modules/providers/xena/xenaConnection.model');
 const { ProviderProduct } = require('../modules/providers/providerProduct.model');
 const { Product } = require('../modules/products/product.model');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES, MAX_RETRY_COUNT } = require('../modules/orders/order.model');
@@ -172,6 +173,41 @@ describe('Xena active polling behavior', () => {
         expect(updated.refunded).toBe(false);
         expect(client.request).not.toHaveBeenCalled();
         expect((await User.findById(customer._id)).walletBalance).toBe(before);
+    });
+
+    it('does not let the missing-id sweep alter a POST_AMBIGUOUS gate owner', async () => {
+        const { provider, order, customer } = await createXenaProcessingOrder({ providerOrderId: null });
+        await Order.findByIdAndUpdate(order._id, {
+            $set: { providerIdempotencyKey: `provider:xena:${order._id.toString()}` },
+        });
+        await XenaConnection.create({
+            provider: provider._id,
+            status: 'connected',
+            placementLock: {
+                ownerToken: 'ambiguous-missing-id-owner',
+                orderId: order._id.toString(),
+                phase: 'POST_AMBIGUOUS',
+                acquiredAt: new Date(),
+                expiresAt: null,
+            },
+        });
+        const client = makeClient();
+        axios.create.mockReturnValue(client);
+
+        const stats = await pollProcessingOrders();
+        const unchanged = await Order.findById(order._id);
+        const connection = await XenaConnection.findOne({ provider: provider._id }).lean();
+
+        expect(stats.manualReview).toBe(0);
+        expect(unchanged.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(unchanged.refunded).toBe(false);
+        expect(connection.placementLock).toMatchObject({
+            ownerToken: 'ambiguous-missing-id-owner',
+            orderId: order._id.toString(),
+            phase: 'POST_AMBIGUOUS',
+        });
+        expect(client.request).not.toHaveBeenCalled();
+        expect(await WalletTransaction.countDocuments({ userId: customer._id, type: 'REFUND' })).toBe(0);
     });
 
     it('Xena disabled moves status polling to MANUAL_REVIEW without calling Xena', async () => {
