@@ -65,6 +65,34 @@ const requirePermission = (...permissions) => (req, res, next) => {
     next();
 };
 
+/**
+ * Permission guard for high-risk, provider-specific operations.
+ *
+ * Unlike requirePermission, this intentionally does not give the ADMIN role
+ * an implicit bypass.  FazerCards execution placement controls require an
+ * explicit suppliers.manage assignment so an administrator who only manages
+ * the product catalogue cannot turn on provider-side fulfillment.
+ */
+const requireExplicitPermission = (...permissions) => (req, res, next) => {
+    if (!req.user) {
+        throw new AuthorizationError('Authentication required before authorization.');
+    }
+
+    const requiredPermissions = permissions
+        .flat()
+        .map((permission) => String(permission || '').trim())
+        .filter(Boolean);
+    const userPermissions = Array.isArray(req.user.permissions)
+        ? req.user.permissions
+        : [];
+
+    if (!requiredPermissions.every((permission) => userPermissions.includes(permission))) {
+        throw new AuthorizationError('You do not have permission to perform this action.');
+    }
+
+    next();
+};
+
 const requireAnyPermission = (...permissions) => (req, res, next) => {
     if (!req.user) {
         throw new AuthorizationError('Authentication required before authorization.');
@@ -103,4 +131,5 @@ const authorize = authorizeRoles;
 module.exports = authorize;
 module.exports.authorizeRoles = authorizeRoles;
 module.exports.requirePermission = requirePermission;
+module.exports.requireExplicitPermission = requireExplicitPermission;
 module.exports.requireAnyPermission = requireAnyPermission;

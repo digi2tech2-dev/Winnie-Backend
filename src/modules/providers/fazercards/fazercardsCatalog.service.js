@@ -1,9 +1,11 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 const config = require('../../../config/config');
 const { Provider } = require('../provider.model');
-const { ProviderProduct, FULFILLMENT_MODES, SUPPORT_LEVELS } = require('../providerProduct.model');
+const { ProviderProduct, FULFILLMENT_MODES, SUPPORT_LEVELS, SOURCE_AVAILABILITY } = require('../providerProduct.model');
+const { FazerCardsCatalogSnapshot, CATALOG_SNAPSHOT_STATUSES } = require('./fazerCardsCatalogSnapshot.model');
 const {
     Product,
     PRICING_MODES,
@@ -34,6 +36,10 @@ const {
 } = require('./fazercardsStatus.service');
 const { getFazerCardsFamily, listFazerCardsFamilies } = require('./fazercardsFamilies');
 const fazerCardsContracts = require('./fazercardsContracts');
+const {
+    evaluateFazerCardsReadiness,
+    READINESS_OPERATIONS,
+} = require('./fazercardsReadiness.service');
 const {
     buildFazerCardsSearchTermSpecs,
     normalizeSearchTerm,
@@ -93,6 +99,11 @@ let steamGiftIndexRefreshInProgress = false;
 
 const STEAM_GIFT_INDEX_RATE_LIMIT_MS = 3 * 60 * 1000;
 const FAZERCARDS_CATALOG_SYNC_MAX_PAGES = 1000;
+const AUTHORITATIVE_SNAPSHOT_FAMILIES = new Set(['TOPUPS', 'GIFTCARDS', 'GAME_KEYS']);
+const SOURCE_BLOCK_REASONS = Object.freeze({
+    [SOURCE_AVAILABILITY.EXPLICITLY_UNAVAILABLE]: 'FAZERCARDS_SOURCE_EXPLICITLY_UNAVAILABLE',
+    [SOURCE_AVAILABILITY.MISSING_CONFIRMED]: 'FAZERCARDS_SOURCE_MISSING_CONFIRMED',
+});
 
 const isFazerCardsRateLimitError = (error) => (
     Number(error?.statusCode || error?.httpStatus) === 429
@@ -233,11 +244,118 @@ const getBalance = async (adapterOptions = {}) => {
     return { provider: provider.name, providerId: provider._id, balance };
 };
 
-const upsertCatalogProduct = async (providerId, dto, now) => {
+const catalogFingerprint = (dto = {}) => crypto.createHash('sha256').update(JSON.stringify({
+    externalProductId: dto.externalProductId,
+    familyKey: dto.familyKey,
+    category: dto.category,
+    offerId: dto.offerId,
+    name: dto.name,
+    rawPrice: dto.rawPrice,
+    currency: dto.currency,
+    fulfillmentMode: dto.fulfillmentMode,
+    requiredFields: dto.requiredFields || [],
+})).digest('hex');
+
+const sourceStateForObservedDto = (dto) => dto.available === false
+    ? SOURCE_AVAILABILITY.EXPLICITLY_UNAVAILABLE
+    : SOURCE_AVAILABILITY.AVAILABLE;
+
+const blockLinkedProductsForSource = async (providerProduct, now) => {
+    const reason = SOURCE_BLOCK_REASONS[providerProduct.sourceAvailability];
+    if (!reason) return;
+    const products = await Product.find({ providerProduct: providerProduct._id, deletedAt: null })
+        .select('_id providerExecutionBlocked providerBlockReason sourceAvailabilityBlocked').lean();
+    for (const product of products) {
+        const set = {
+            status: PRODUCT_STATUSES.UNAVAILABLE,
+            customerPurchaseEnabled: false,
+            sourceAvailabilityBlocked: true,
+            sourceAvailabilityBlockReason: reason,
+            sourceAvailabilityBlockedAt: now,
+        };
+        // Do not overwrite a different administrator-owned execution block.
+        if (product.providerExecutionBlocked !== true || product.sourceAvailabilityBlocked === true) {
+            set.providerExecutionBlocked = true;
+            set.providerBlockReason = reason;
+        }
+        await Product.updateOne({
+            _id: product._id,
+            $or: [
+                { providerExecutionBlocked: product.providerExecutionBlocked },
+                { providerExecutionBlocked: { $exists: false } },
+            ],
+        }, { $set: set });
+    }
+};
+
+const recoverLinkedProductsFromSource = async (providerProduct, now) => {
+    if (providerProduct.sourceReappearanceReviewRequired === true) return;
+    // Only clear the execution block if it is demonstrably our own.  Customer
+    // visibility remains disabled until an administrator deliberately reviews it.
+    await Product.updateMany({
+        providerProduct: providerProduct._id,
+        sourceAvailabilityBlocked: true,
+        providerExecutionBlocked: true,
+        providerBlockReason: { $in: Object.values(SOURCE_BLOCK_REASONS) },
+    }, {
+        $set: { providerExecutionBlocked: false, providerBlockReason: null, sourceAvailabilityBlocked: false, sourceAvailabilityBlockReason: null },
+        $unset: { sourceAvailabilityBlockedAt: 1 },
+    });
+};
+
+// Restart-safe convergence pass for the small, indexed set of confirmed
+// source-unavailable offers. It never re-enables a Product.
+const repairSourceAvailabilityBlocks = async ({ limit = 100 } = {}) => {
+    const providerProducts = await ProviderProduct.find({
+        providerCode: PROVIDER_CODES.FAZER_CARDS,
+        sourceAvailability: { $in: [SOURCE_AVAILABILITY.MISSING_CONFIRMED, SOURCE_AVAILABILITY.EXPLICITLY_UNAVAILABLE] },
+    }).limit(Math.min(Math.max(Number(limit) || 100, 1), 500));
+    let repaired = 0;
+    for (const providerProduct of providerProducts) {
+        const needsRepair = await Product.exists({
+            providerProduct: providerProduct._id,
+            deletedAt: null,
+            $or: [
+                { sourceAvailabilityBlocked: { $ne: true } },
+                { customerPurchaseEnabled: true },
+                { status: PRODUCT_STATUSES.AVAILABLE },
+            ],
+        });
+        if (!needsRepair) continue;
+        await blockLinkedProductsForSource(providerProduct, new Date());
+        repaired++;
+    }
+    return { scanned: providerProducts.length, repaired };
+};
+
+const upsertCatalogProduct = async (providerId, dto, now, { snapshotId = null, snapshotOwnerJobId = null, snapshotLeaseToken = null } = {}) => {
+    await assertCatalogSnapshotLease({ snapshotId, ownerJobId: snapshotOwnerJobId, leaseToken: snapshotLeaseToken });
     const existed = await ProviderProduct.exists({
         provider: providerId,
         externalProductId: dto.externalProductId,
     });
+    const existing = existed ? await ProviderProduct.findOne({ provider: providerId, externalProductId: dto.externalProductId })
+        .select('sourceAvailability sourceMetadataFingerprint sourceReappearanceReviewRequired sourceLastSeenSnapshotId') : null;
+    const fingerprint = catalogFingerprint(dto);
+    const observedState = sourceStateForObservedDto(dto);
+    const changedIdentity = Boolean(existing
+        && [SOURCE_AVAILABILITY.MISSING_PENDING, SOURCE_AVAILABILITY.MISSING_CONFIRMED].includes(existing.sourceAvailability)
+        && existing.sourceMetadataFingerprint && existing.sourceMetadataFingerprint !== fingerprint);
+    const sourceSet = {
+        sourceAvailability: observedState,
+        sourceAvailabilityReason: observedState === SOURCE_AVAILABILITY.EXPLICITLY_UNAVAILABLE
+            ? SOURCE_BLOCK_REASONS[SOURCE_AVAILABILITY.EXPLICITLY_UNAVAILABLE] : null,
+        sourceAvailabilityChangedAt: now,
+        sourceLastSeenAt: now,
+        // An ad-hoc refresh must not erase a marker written by an active
+        // authoritative cursor snapshot in another worker.
+        sourceLastSeenSnapshotId: snapshotId || existing?.sourceLastSeenSnapshotId || null,
+        sourceLastMissingSnapshotId: null,
+        sourceMissingSince: null,
+        sourceConsecutiveMissingSnapshots: 0,
+        sourceMetadataFingerprint: fingerprint,
+        sourceReappearanceReviewRequired: changedIdentity,
+    };
     const doc = await ProviderProduct.findOneAndUpdate(
         {
             provider: providerId,
@@ -273,12 +391,90 @@ const upsertCatalogProduct = async (providerId, dto, now) => {
                 isBlocked: dto.isBlocked,
                 blockReason: dto.blockReason,
                 requiredFields: dto.requiredFields,
+                ...sourceSet,
             },
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
+    if ([SOURCE_AVAILABILITY.EXPLICITLY_UNAVAILABLE].includes(doc.sourceAvailability)) {
+        await blockLinkedProductsForSource(doc, now);
+    } else if (existing && [SOURCE_AVAILABILITY.MISSING_PENDING, SOURCE_AVAILABILITY.MISSING_CONFIRMED, SOURCE_AVAILABILITY.EXPLICITLY_UNAVAILABLE].includes(existing.sourceAvailability)) {
+        await recoverLinkedProductsFromSource(doc, now);
+    }
     return { doc, isNew: !existed };
+};
+
+const ensureCatalogSnapshot = async ({ providerId, family, snapshotId, ownerJobId, leaseToken, now }) => {
+    if (!snapshotId || !AUTHORITATIVE_SNAPSHOT_FAMILIES.has(family)) return null;
+    const snapshot = await FazerCardsCatalogSnapshot.findOneAndUpdate({ snapshotId }, {
+        $setOnInsert: { provider: providerId, family, ownerJobId: ownerJobId || null, startedAt: now },
+    }, { upsert: true, new: true, setDefaultsOnInsert: true });
+    if (!leaseToken) return snapshot;
+    const claimed = await FazerCardsCatalogSnapshot.findOneAndUpdate({
+        _id: snapshot._id,
+        ownerJobId,
+        status: { $in: [CATALOG_SNAPSHOT_STATUSES.COLLECTING, CATALOG_SNAPSHOT_STATUSES.COMPLETED] },
+        $or: [{ leaseUntil: null }, { leaseUntil: { $lte: now } }, { leaseToken }],
+    }, { $set: { leaseToken, leaseUntil: new Date(now.getTime() + (5 * 60 * 1000)) } }, { new: true });
+    if (!claimed) throw new BusinessRuleError('Catalog snapshot lease is owned by another worker.', 'FAZERCARDS_SNAPSHOT_LEASE_CONFLICT');
+    return claimed;
+};
+
+const assertCatalogSnapshotLease = async ({ snapshotId, ownerJobId, leaseToken }) => {
+    if (!snapshotId) return;
+    const valid = await FazerCardsCatalogSnapshot.exists({
+        snapshotId, ownerJobId, leaseToken,
+        status: CATALOG_SNAPSHOT_STATUSES.COLLECTING,
+        leaseUntil: { $gt: new Date() },
+    });
+    if (!valid) throw new BusinessRuleError('Catalog snapshot lease has expired or changed.', 'FAZERCARDS_SNAPSHOT_LEASE_LOST');
+};
+
+const invalidateCatalogSnapshot = async ({ snapshotId, reason }) => {
+    if (!snapshotId) return null;
+    return FazerCardsCatalogSnapshot.findOneAndUpdate({ snapshotId, status: CATALOG_SNAPSHOT_STATUSES.COLLECTING }, {
+        $set: { status: CATALOG_SNAPSHOT_STATUSES.INVALID, invalidAt: new Date(), invalidReason: String(reason || 'Incomplete catalog snapshot').slice(0, 1000) },
+    }, { new: true });
+};
+
+const reconcileCompletedCatalogSnapshot = async ({ providerId, family, snapshotId, ownerJobId, leaseToken }) => {
+    if (!snapshotId || !AUTHORITATIVE_SNAPSHOT_FAMILIES.has(family)) return { reconciled: 0, confirmed: 0 };
+    const completed = await FazerCardsCatalogSnapshot.exists({ snapshotId, provider: providerId, family, ownerJobId, status: CATALOG_SNAPSHOT_STATUSES.COMPLETED });
+    if (completed) return { reconciled: 0, confirmed: 0, alreadyCompleted: true };
+    const snapshot = await FazerCardsCatalogSnapshot.findOne({ snapshotId, provider: providerId, family, ownerJobId, status: CATALOG_SNAPSHOT_STATUSES.COLLECTING, leaseToken, leaseUntil: { $gt: new Date() } });
+    if (!snapshot) throw new BusinessRuleError('Catalog snapshot ownership/completeness could not be verified.', 'FAZERCARDS_SNAPSHOT_NOT_OWNED');
+    const now = new Date();
+    const candidates = await ProviderProduct.find({
+        provider: providerId,
+        familyKey: family,
+        sourceAvailability: { $in: [SOURCE_AVAILABILITY.AVAILABLE, SOURCE_AVAILABILITY.MISSING_PENDING, SOURCE_AVAILABILITY.MISSING_CONFIRMED] },
+        sourceLastSeenSnapshotId: { $ne: snapshotId },
+    });
+    let confirmed = 0;
+    for (const product of candidates) {
+        if (product.sourceLastMissingSnapshotId === snapshotId) continue;
+        const count = Number(product.sourceConsecutiveMissingSnapshots || 0) + 1;
+        const state = count >= 2 ? SOURCE_AVAILABILITY.MISSING_CONFIRMED : SOURCE_AVAILABILITY.MISSING_PENDING;
+        product.sourceAvailability = state;
+        product.sourceAvailabilityReason = state === SOURCE_AVAILABILITY.MISSING_CONFIRMED
+            ? SOURCE_BLOCK_REASONS[state] : 'FAZERCARDS_SOURCE_MISSING_PENDING';
+        product.sourceAvailabilityChangedAt = now;
+        product.sourceLastMissingSnapshotId = snapshotId;
+        product.sourceMissingSince = product.sourceMissingSince || now;
+        product.sourceConsecutiveMissingSnapshots = count;
+        await assertCatalogSnapshotLease({ snapshotId, ownerJobId, leaseToken });
+        await product.save();
+        if (state === SOURCE_AVAILABILITY.MISSING_CONFIRMED) {
+            confirmed++;
+            await blockLinkedProductsForSource(product, now);
+        }
+    }
+    const completion = await FazerCardsCatalogSnapshot.updateOne({ _id: snapshot._id, status: CATALOG_SNAPSHOT_STATUSES.COLLECTING, leaseToken }, {
+        $set: { status: CATALOG_SNAPSHOT_STATUSES.COMPLETED, completedAt: now, leaseUntil: null, observedCount: await ProviderProduct.countDocuments({ provider: providerId, familyKey: family, sourceLastSeenSnapshotId: snapshotId }) },
+    });
+    if (completion.modifiedCount !== 1) throw new BusinessRuleError('Catalog snapshot completion lease was lost.', 'FAZERCARDS_SNAPSHOT_LEASE_LOST');
+    return { reconciled: candidates.length, confirmed };
 };
 
 const mergeCategoryFromOfferResponse = (category, offerPage) => ({
@@ -290,7 +486,7 @@ const mergeCategoryFromOfferResponse = (category, offerPage) => ({
 
 const getCategoryId = (category = {}) => String(category.category_id || category.categoryId || category.id || '').trim();
 
-const syncCatalogPage = async ({ limit = 100, cursor, category, maxPages = FAZERCARDS_CATALOG_SYNC_MAX_PAGES } = {}, adapterOptions = {}) => {
+const syncCatalogPage = async ({ limit = 100, cursor, category, maxPages = FAZERCARDS_CATALOG_SYNC_MAX_PAGES, snapshotId, snapshotOwnerJobId, snapshotLeaseToken } = {}, adapterOptions = {}) => {
     const normalizedLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
     const { provider, adapter } = await getConfiguredAdapter(adapterOptions);
 
@@ -299,6 +495,7 @@ const syncCatalogPage = async ({ limit = 100, cursor, category, maxPages = FAZER
     }
 
     const now = new Date();
+    await ensureCatalogSnapshot({ providerId: provider._id, family: 'TOPUPS', snapshotId, ownerJobId: snapshotOwnerJobId, leaseToken: snapshotLeaseToken, now });
     let providerProductsCreated = 0;
     let providerProductsUpdated = 0;
     let offersFetched = 0;
@@ -396,7 +593,7 @@ const syncCatalogPage = async ({ limit = 100, cursor, category, maxPages = FAZER
                 });
                 if (dto.isBlocked) blocked++;
                 if (!dto.isSupported) unsupported++;
-                const { isNew } = await upsertCatalogProduct(provider._id, dto, now);
+                const { isNew } = await upsertCatalogProduct(provider._id, dto, now, { snapshotId, snapshotOwnerJobId, snapshotLeaseToken });
                 if (isNew) providerProductsCreated++;
                 else providerProductsUpdated++;
             } catch (err) {
@@ -427,6 +624,9 @@ const syncCatalogPage = async ({ limit = 100, cursor, category, maxPages = FAZER
         deleted: 0,
         deactivated: 0,
         errors,
+        // A cursor job deliberately requests one page at a time.  "batch
+        // limit reached" is progress, unlike a missing cursor/malformed page.
+        snapshotInvalid: productsSkipped > 0 || errors.some((error) => !String(error).includes('page batch limit')),
         meta: mergePagedMeta({
             meta: lastMeta,
             limit: normalizedLimit,
@@ -479,6 +679,23 @@ const extractCatalogItems = (data = {}, keys = ['items']) => {
     return [];
 };
 
+const extractStrictCatalogItems = (data, keys = ['items'], context = 'catalog') => {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new BusinessRuleError(`FazerCards ${context} response is malformed.`, 'FAZERCARDS_MALFORMED_RESPONSE');
+    }
+    for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(data, key)) {
+            if (!Array.isArray(data[key])) throw new BusinessRuleError(`FazerCards ${context}.${key} must be an array.`, 'FAZERCARDS_MALFORMED_RESPONSE');
+            return data[key];
+        }
+        if (data.data && typeof data.data === 'object' && Object.prototype.hasOwnProperty.call(data.data, key)) {
+            if (!Array.isArray(data.data[key])) throw new BusinessRuleError(`FazerCards ${context}.data.${key} must be an array.`, 'FAZERCARDS_MALFORMED_RESPONSE');
+            return data.data[key];
+        }
+    }
+    throw new BusinessRuleError(`FazerCards ${context} response is missing its collection.`, 'FAZERCARDS_MALFORMED_RESPONSE');
+};
+
 const mergePagedMeta = ({ meta = {}, limit, pagesFetched, itemsFetched, hasMore, nextCursor }) => ({
     ...meta,
     limit: meta.limit ?? limit ?? null,
@@ -514,7 +731,7 @@ const fetchCatalogPathPages = async (adapter, path, {
         pagesFetched++;
         if (page.requestId) requestIds.push(page.requestId);
 
-        const pageItems = extractCatalogItems(page.data, itemKeys);
+        const pageItems = extractStrictCatalogItems(page.data, itemKeys, context);
         items.push(...pageItems);
         lastMeta = normalizeMeta(page.data, pageParams);
 
@@ -574,7 +791,9 @@ const makeBlockedFamilyProduct = (family, overrides = {}) => ({
     isBlocked: true,
     blockReason: family.blockReason || 'EXECUTION_NOT_IMPLEMENTED',
     isActive: true,
-    available: overrides.available ?? true,
+    // Most non-top-up endpoints do not document an availability bit.  Absence
+    // of that bit must remain unknown, not be synthesized as "available".
+    available: overrides.available ?? null,
     minQty: overrides.minQty || 1,
     maxQty: overrides.maxQty || 9999,
     stock: overrides.stock ?? null,
@@ -845,7 +1064,7 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName,
                 continue;
             }
             const cards = await adapter.fetchCatalogPath('/giftcards/cards', { category_id: categoryId }, 'giftcards_cards');
-            const offers = extractCatalogItems(cards.data, ['offers', 'cards', 'items']);
+            const offers = extractStrictCatalogItems(cards.data, ['offers', 'cards', 'items'], 'giftcards_cards');
             for (const offer of offers) products.push(normalizeGiftCardProduct({ ...category, ...cards.data }, offer));
         }
         if (page.maxPagesReached) {
@@ -890,7 +1109,7 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName,
                 continue;
             }
             const keys = await adapter.fetchCatalogPath('/gamekeys/keys', { game_id: gameId }, 'gamekeys_keys');
-            const keyItems = extractCatalogItems(keys.data, ['keys', 'items', 'offers']);
+            const keyItems = extractStrictCatalogItems(keys.data, ['keys', 'items', 'offers'], 'gamekeys_keys');
             const mergedGame = { ...game, ...keys.data };
             for (const key of keyItems) products.push(normalizeGameKeyProduct(mergedGame, key));
         }
@@ -1003,13 +1222,14 @@ const syncFamilyDtos = async (family, adapter, { limit, cursor, appid, gameName,
     throw new BusinessRuleError(`FazerCards family '${family.familyKey}' is not syncable yet.`, 'FAZERCARDS_FAMILY_DISCOVERY_UNCONFIRMED');
 };
 
-const syncCatalogFamily = async ({ family, limit = 20, cursor, appid, gameName, maxPages } = {}, adapterOptions = {}) => {
+const syncCatalogFamily = async ({ family, limit = 20, cursor, appid, gameName, maxPages, snapshotId, snapshotOwnerJobId, snapshotLeaseToken } = {}, adapterOptions = {}) => {
     const registryEntry = getFazerCardsFamily(family);
     if (!registryEntry || registryEntry.familyKey === 'UNKNOWN') {
         throw new BusinessRuleError('Unknown FazerCards catalog family.', 'FAZERCARDS_UNKNOWN_FAMILY');
     }
     if (registryEntry.familyKey === 'TOPUPS') {
-        return syncCatalogPage({ limit, cursor, maxPages }, adapterOptions);
+        const result = await syncCatalogPage({ limit, cursor, maxPages, snapshotId, snapshotOwnerJobId, snapshotLeaseToken }, adapterOptions);
+        return result;
     }
 
     const { provider, adapter } = await getConfiguredAdapter(adapterOptions);
@@ -1018,6 +1238,7 @@ const syncCatalogFamily = async ({ family, limit = 20, cursor, appid, gameName, 
     }
 
     const now = new Date();
+    await ensureCatalogSnapshot({ providerId: provider._id, family: registryEntry.familyKey, snapshotId, ownerJobId: snapshotOwnerJobId, leaseToken: snapshotLeaseToken, now });
     const {
         products,
         categoriesFetched,
@@ -1033,7 +1254,7 @@ const syncCatalogFamily = async ({ family, limit = 20, cursor, appid, gameName, 
     let providerProductsCreated = 0;
     let providerProductsUpdated = 0;
     for (const dto of products) {
-        const { isNew } = await upsertCatalogProduct(provider._id, dto, now);
+        const { isNew } = await upsertCatalogProduct(provider._id, dto, now, { snapshotId, snapshotOwnerJobId, snapshotLeaseToken });
         if (isNew) providerProductsCreated++;
         else providerProductsUpdated++;
     }
@@ -1058,6 +1279,7 @@ const syncCatalogFamily = async ({ family, limit = 20, cursor, appid, gameName, 
         deleted: 0,
         deactivated: 0,
         errors,
+        snapshotInvalid: productsSkipped > 0 || errors.some((error) => !String(error).includes('maximum page limit')) || Boolean(meta?.paginationIncomplete && !meta?.next_cursor),
         meta,
         requestId,
         requestIds,
@@ -1713,6 +1935,7 @@ const listProviderProducts = async ({
     explicitFamily,
     supportLevel,
     blockReason,
+    sourceAvailability,
 } = {}) => {
     const query = await buildFazerCardsProviderProductScope();
     const searchText = search || q || queryText;
@@ -1728,6 +1951,7 @@ const listProviderProducts = async ({
     if (shouldApplyFamilyFilter) addAndCondition(query, buildFamilyFilter(familyKey));
     if (supportLevel) query.supportLevel = String(supportLevel).trim().toUpperCase();
     if (blockReason) query.blockReason = String(blockReason).trim().toUpperCase();
+    if (sourceAvailability) query.sourceAvailability = String(sourceAvailability).trim().toUpperCase();
 
     const availableFilter = parseBooleanFilter(available);
     if (availableFilter !== undefined) query.available = availableFilter;
@@ -1811,7 +2035,7 @@ const listProviderProducts = async ({
 
 const getCatalogSummary = async () => {
     const products = await ProviderProduct.find({ providerCode: PROVIDER_CODES.FAZER_CARDS })
-        .select('_id providerCode externalProductId familyKey fulfillmentMode rawPayload isSupported isBlocked')
+        .select('_id providerCode externalProductId familyKey fulfillmentMode rawPayload isSupported isBlocked sourceAvailability')
         .lean();
     const importedProducts = await Product.find({
         providerProduct: { $in: products.map((product) => product._id) },
@@ -1821,16 +2045,18 @@ const getCatalogSummary = async () => {
     const byFamily = {};
 
     for (const family of listFazerCardsFamilies()) {
-        byFamily[family.familyKey] = { total: 0, supported: 0, blocked: 0, imported: 0 };
+        byFamily[family.familyKey] = { total: 0, supported: 0, blocked: 0, imported: 0, sourceUnavailable: 0, missingPending: 0 };
     }
 
     for (const product of products) {
         const familyKey = inferFazerCardsFamilyKey(product);
-        if (!byFamily[familyKey]) byFamily[familyKey] = { total: 0, supported: 0, blocked: 0, imported: 0 };
+        if (!byFamily[familyKey]) byFamily[familyKey] = { total: 0, supported: 0, blocked: 0, imported: 0, sourceUnavailable: 0, missingPending: 0 };
         byFamily[familyKey].total++;
         if (product.isSupported === true) byFamily[familyKey].supported++;
         if (product.isBlocked === true) byFamily[familyKey].blocked++;
         if (importedIds.has(String(product._id))) byFamily[familyKey].imported++;
+        if ([SOURCE_AVAILABILITY.EXPLICITLY_UNAVAILABLE, SOURCE_AVAILABILITY.MISSING_CONFIRMED].includes(product.sourceAvailability)) byFamily[familyKey].sourceUnavailable++;
+        if (product.sourceAvailability === SOURCE_AVAILABILITY.MISSING_PENDING) byFamily[familyKey].missingPending++;
     }
 
     const nextRecommendedFamilies = listFazerCardsFamilies()
@@ -3821,6 +4047,28 @@ const updateOrderFromFazerCardsStatus = async (order, result, { source = 'fazerc
         };
     }
 
+    // A delivered completion is financially terminal. A later failed/refund
+    // notification can be real upstream evidence, but it must enter audited
+    // reconciliation rather than revoke delivery or credit the customer twice.
+    if (order.status === ORDER_STATUS.COMPLETED && [NORMALIZED_STATUSES.FAILED, NORMALIZED_STATUSES.REFUNDED].includes(normalizedStatus)) {
+        const updated = await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                ...update,
+                lastCheckedAt: now,
+            },
+            $push: {
+                statusHistory: appendFazerCardsStatusHistory(order.status, 'Ignored conflicting late FazerCards terminal failure/refund after local delivery; reconciliation required.', {
+                    source,
+                    providerOrderId: update.providerOrderId || order.providerOrderId,
+                    providerStatus: result.providerStatus,
+                    normalizedStatus,
+                    reconciliationRequired: true,
+                }),
+            },
+        }, { new: true });
+        return { order: updated, action: 'conflictingTerminalEvidence', refunded: updated?.refunded === true };
+    }
+
     if (normalizedStatus === NORMALIZED_STATUSES.UNKNOWN || result.manualReview === true) {
         const updated = await Order.findByIdAndUpdate(order._id, {
             $set: {
@@ -4564,6 +4812,7 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
     const requestedMode = updates.providerExecutionMode || product.providerExecutionMode || fazerCardsContracts.getDefaultExecutionMode(familyKey);
     const modeValidation = fazerCardsContracts.validateExecutionModeForFamily(familyKey, requestedMode);
     const errors = [];
+    let readiness = null;
     const validatedMode = modeValidation.ok ? modeValidation.mode : String(requestedMode || '').trim().toUpperCase();
     const simulatedProduct = {
         ...product,
@@ -4585,6 +4834,8 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
         || enablingCustomerPurchase;
     const enablingAutoProvider = validatedMode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER
         && updates.providerExecutionEnabled === true;
+    const sourceUnavailable = [SOURCE_AVAILABILITY.MISSING_CONFIRMED, SOURCE_AVAILABILITY.EXPLICITLY_UNAVAILABLE]
+        .includes(providerProduct?.sourceAvailability);
 
     if (!modeValidation.ok) {
         errors.push({ code: modeValidation.code, message: modeValidation.message, allowedModes: modeValidation.allowedModes });
@@ -4605,6 +4856,12 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
     if (enablingCustomerPurchase && contract.canCustomerPurchase !== true) {
         errors.push({ code: 'CUSTOMER_PURCHASE_NOT_ALLOWED', message: 'Customer purchase is not allowed for this FazerCards family contract.' });
     }
+    if (sourceUnavailable && (enablingVisibility || enablingAutoProvider || updates.providerExecutionBlocked === false)) {
+        errors.push({
+            code: 'FAZERCARDS_SOURCE_UNAVAILABLE_LOCKED',
+            message: providerProduct.sourceAvailabilityReason || 'This FazerCards source is confirmed unavailable and cannot be launched.',
+        });
+    }
     if (enablingAutoProvider && !launchingForCustomers) {
         errors.push({
             code: 'AUTO_PROVIDER_REQUIRES_CUSTOMER_VISIBLE_PRODUCT',
@@ -4612,13 +4869,13 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
         });
     }
     if (modeValidation.ok && modeValidation.mode === fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
-        const autoReadiness = fazerCardsContracts.validateAutoProviderReadinessForProduct({
+        readiness = evaluateFazerCardsReadiness({
             product: simulatedProduct,
             providerProduct,
-            familyKey,
-            requireCustomerVisible: true,
+            provider: product.provider,
+            operation: READINESS_OPERATIONS.ADMIN_AUTO_CONFIGURATION,
         });
-        if (!autoReadiness.ok) errors.push(...autoReadiness.errors);
+        if (!readiness.ready) errors.push(...readiness.reasons);
     }
     const manualFieldValidation = fazerCardsContracts.validateManualCustomerFieldsForProduct({
         product: simulatedProduct,
@@ -4645,6 +4902,7 @@ const validateBulkLaunchProductUpdate = (product, updates) => {
             allowedModes: modeValidation.allowedModes || fazerCardsContracts.getAllowedExecutionModes(familyKey),
         },
         requestedMode: validatedMode,
+        readiness,
         errors,
     };
 };
@@ -4788,7 +5046,8 @@ const bulkUpdateLaunchControls = async (payload = {}, adminId = null, auditConte
 
     const dryRun = payload.dryRun === true;
     const products = await Product.find({ _id: { $in: productIds }, deletedAt: null })
-        .populate('providerProduct', 'providerCode familyKey fulfillmentMode externalProductId rawName category categoryName offerId offerName requiredFields rawPayload minQty maxQty stock costPrice rawPrice currency isSupported isBlocked executionBlocked blockReason region platform')
+        .populate('provider', 'name slug providerCode isActive')
+        .populate('providerProduct', 'provider providerCode familyKey fulfillmentMode externalProductId rawName category categoryName offerId offerName requiredFields rawPayload minQty maxQty stock costPrice rawPrice currency isSupported isBlocked executionBlocked blockReason region platform sourceAvailability sourceAvailabilityReason sourceReappearanceReviewRequired')
         .lean();
     const productsById = new Map(products.map((product) => [product._id.toString(), product]));
     const results = [];
@@ -4817,6 +5076,7 @@ const bulkUpdateLaunchControls = async (payload = {}, adminId = null, auditConte
             familyKey: validation.familyKey,
             requestedMode: validation.requestedMode,
             contract: validation.contract,
+            readiness: validation.readiness,
             errors: validation.errors,
             changedFields,
             visibleToCustomer: visibility.visibleToCustomer,
@@ -4828,11 +5088,17 @@ const bulkUpdateLaunchControls = async (payload = {}, adminId = null, auditConte
 
     if (!dryRun) {
         for (const result of results.filter((item) => item.ok)) {
-            const updatedProduct = await Product.findByIdAndUpdate(
-                result.productId,
+            const updatedProduct = await Product.findOneAndUpdate(
+                { _id: result.productId, updatedAt: productsById.get(result.productId).updatedAt },
                 { $set: result.update },
                 { new: true, runValidators: true }
             ).lean();
+            if (!updatedProduct) {
+                result.ok = false;
+                result.success = false;
+                result.errors = [{ code: 'FAZERCARDS_LAUNCH_CONFLICT', message: 'Product changed while Launch Ops was validating it. Refresh and retry.' }];
+                continue;
+            }
             const visibility = buildCustomerVisibilityStatus(updatedProduct);
             result.visibleToCustomer = visibility.visibleToCustomer;
             result.visibilityReasons = visibility.reasons;
@@ -4877,6 +5143,11 @@ const updateSingleProductLaunchControls = async (productId, payload = {}, adminI
     const productResult = result.results[0];
     if (!productResult?.ok) {
         const firstError = productResult?.errors?.[0] || {};
+        if (firstError.code === 'FAZERCARDS_LAUNCH_CONFLICT') {
+            const conflict = new ConflictError(firstError.message);
+            conflict.code = firstError.code;
+            throw conflict;
+        }
         throw new BusinessRuleError(
             firstError.message || 'FazerCards product launch settings are invalid.',
             firstError.code || 'FAZERCARDS_LAUNCH_UPDATE_INVALID'
@@ -4888,6 +5159,7 @@ const updateSingleProductLaunchControls = async (productId, payload = {}, adminI
         product: productResult.importedProduct,
         result: productResult,
         launchStatus: productResult.customerVisibilityStatus,
+        readiness: productResult.readiness,
     };
 };
 
@@ -5029,6 +5301,9 @@ module.exports = {
     getContract,
     getContractsSummary,
     syncCatalogPage,
+    invalidateCatalogSnapshot,
+    reconcileCompletedCatalogSnapshot,
+    repairSourceAvailabilityBlocks,
     listFamilies,
     syncCatalogFamily,
     syncAllCatalogFamilies,

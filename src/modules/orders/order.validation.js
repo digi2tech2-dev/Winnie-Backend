@@ -11,6 +11,10 @@ const createOrderValidation = [
         .notEmpty().withMessage('Quantity is required')
         .isInt({ min: 1 }).withMessage('Quantity must be a positive integer'),
 
+    body('quoteId')
+        .optional()
+        .isMongoId().withMessage('Invalid checkout quote'),
+
     // orderFieldsValues is optional at the HTTP layer.
     // Deep field-by-field validation happens inside orderFields.validator.js
     // using the product's own orderFields definition.

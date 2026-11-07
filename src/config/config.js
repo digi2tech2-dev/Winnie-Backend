@@ -153,6 +153,11 @@ const config = {
                 : parseFloat(process.env.FAZERCARDS_CODE_DELIVERY_MAX_ORDER_USD),
             webhookEnabled: process.env.FAZERCARDS_WEBHOOK_ENABLED === 'true',
             webhookSecret: process.env.FAZERCARDS_WEBHOOK_SECRET || '',
+            // Explicit opt-in: recovery never runs merely because the provider
+            // is enabled. Operations must deliberately enable it after review.
+            recoveryEnabled: process.env.FAZERCARDS_RECOVERY_ENABLED === 'true',
+            recoveryBatchSize: Math.min(200, Math.max(1, parseInt(process.env.FAZERCARDS_RECOVERY_BATCH_SIZE || '25', 10) || 25)),
+            recoveryLeaseMs: Math.min(30 * 60 * 1000, Math.max(30 * 1000, parseInt(process.env.FAZERCARDS_RECOVERY_LEASE_MS || '300000', 10) || 300000)),
             steamGiftsIndexMaxResults: process.env.FAZERCARDS_STEAM_GIFTS_INDEX_MAX_RESULTS === undefined
                 ? null
                 : parseInt(process.env.FAZERCARDS_STEAM_GIFTS_INDEX_MAX_RESULTS, 10),

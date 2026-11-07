@@ -1,12 +1,13 @@
 'use strict';
 
 const mongoose = require('mongoose');
-const { Product, computeFinalPrice, PROVIDER_EXECUTION_MODES } = require('../products/product.model');
+const { Product, PROVIDER_EXECUTION_MODES } = require('../products/product.model');
 const { Provider } = require('../providers/provider.model');
 const { ProviderProduct, FULFILLMENT_MODES } = require('../providers/providerProduct.model');
 const { ProviderDeliveredCode, DELIVERY_STATUSES } = require('../providers/fazercards/providerDeliveredCode.model');
 const { PROVIDER_CODES } = require('../providers/provider.constants');
 const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('./order.model');
+const { CheckoutQuote, CHECKOUT_QUOTE_STATUS } = require('./checkoutQuote.model');
 const { Review } = require('../reviews/review.model');
 const { getNextSequence } = require('./counter.model');
 const { debitWalletAtomic, refundWalletAtomic } = require('../wallet/wallet.service');
@@ -39,12 +40,19 @@ const {
     notifyOrderFailed,
     notifyOrderRefunded,
 } = require('../notifications/notification.events');
-const { getLivePrice, invalidate: invalidatePriceCache } = require('../providers/providerPriceCache');
+const { getLivePrice } = require('../providers/providerPriceCache');
+const { applyLiveProviderPrice } = require('../providers/providerProductSync.service');
 const { toDecimal, toStr, toFiat, multiply, subtract, add, isPositive, compare } = require('../../shared/utils/decimalPrecision');
 const config = require('../../config/config');
 const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
+const {
+    evaluateFazerCardsReadiness,
+    READINESS_OPERATIONS,
+} = require('../providers/fazercards/fazercardsReadiness.service');
 
 const XENA_EXTERNAL_PRODUCT_ID = 'xena-dynamic-recharge';
+const CHECKOUT_QUOTE_TTL_MS = 10 * 60 * 1000;
+const serializeDecimal = (value) => toStr(toDecimal(value));
 const XENA_TARGET_FIELD_KEY = 'target_uid';
 const XENA_LEGACY_TARGET_FIELD_KEY = 'account_id';
 const FAZER_CARDS_CODE_DELIVERY_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
@@ -108,47 +116,8 @@ const _canonicalizeXenaOrderFields = async ({ product, orderFieldsValues, sessio
 };
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// JIT PRICE AUTO-UPDATE HELPER
+// PRE-DEBIT PROVIDER PRICE GUARD
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-/**
- * Fire-and-forget: update the product's providerPrice, basePrice, and
- * finalPrice when a JIT check detects the provider has raised the price.
- *
- * Uses the same formula as the sync engine (providerProductSync.service.js)
- * so prices remain consistent.
- *
- * Runs OUTSIDE any transaction â€” it is OK if this fails; the next sync
- * cycle will correct it anyway. The important thing is that the ORDER
- * was already aborted.
- *
- * @param {ObjectId}           productId
- * @param {number}             newProviderPrice   - live rawPrice from provider
- * @param {'percentage'|'fixed'} markupType
- * @param {number}             markupValue
- * @private
- */
-const _autoUpdateProductPrice = (productId, newProviderPrice, markupType, markupValue) => {
-    // Intentionally NOT awaited â€” fire-and-forget
-    (async () => {
-        try {
-            const safeProviderPrice = String(newProviderPrice);
-            const newFinalPrice = computeFinalPrice(safeProviderPrice, markupType, markupValue);
-            const newBasePrice = newFinalPrice ?? safeProviderPrice;
-
-            await Product.findByIdAndUpdate(productId, {
-                $set: {
-                    providerPrice: safeProviderPrice,
-                    finalPrice: newFinalPrice,
-                    basePrice: newBasePrice,
-                },
-            });
-        } catch (err) {
-            // Swallow â€” the sync engine will correct this on its next run.
-            // A failed auto-update must never crash the process.
-        }
-    })();
-};
 
 const _assertProductAvailable = (product) => {
     if (!product) throw new NotFoundError('Product');
@@ -484,7 +453,28 @@ const quoteOrder = async ({ userId, productId, quantity }) => {
     });
     const quantityValidation = _getQuantityValidation(quote.qty, product);
 
+    const createdAt = new Date();
+    const checkoutQuote = await CheckoutQuote.create({
+        userId,
+        productId: product._id,
+        quantity: quote.qty,
+        currency: quote.userCurrency,
+        payableAmount: quote.chargedAmount.toFixed(2),
+        totalUsd: serializeDecimal(quote.usdTotalPrice),
+        customerUnitPriceUsd: serializeDecimal(quote.pricing.customerUnitPriceUsd),
+        basePriceSnapshot: serializeDecimal(quote.pricing.basePrice),
+        markupPercentage: serializeDecimal(quote.pricing.markupPercentage || 0),
+        groupId: quote.pricing.groupId || null,
+        groupPercentage: serializeDecimal(quote.pricing.groupPercentage || 0),
+        purchaseRateSnapshot: serializeDecimal(quote.purchaseRateSnapshot),
+        rateType: quote.rateType,
+        expiresAt: new Date(createdAt.getTime() + CHECKOUT_QUOTE_TTL_MS),
+    });
+
     return {
+        quoteId: checkoutQuote._id.toString(),
+        quoteCreatedAt: createdAt,
+        quoteExpiresAt: checkoutQuote.expiresAt,
         productId: product._id.toString(),
         quantity: quote.qty,
         minQty: product.minQty,
@@ -555,6 +545,8 @@ const createOrder = async ({
     source = 'web',
     apiKeyPrefix = null,
     externalOrderId = null,
+    quoteId = null,
+    requireQuoteConsent = false,
 }) => {
     const actionUser = await User.findById(userId).select('identityVerificationRequired');
     if (!actionUser) throw new NotFoundError('User');
@@ -640,6 +632,8 @@ const createOrder = async ({
         source,
         apiKeyPrefix,
         externalOrderId,
+        quoteId,
+        requireQuoteConsent,
     });
 
 };
@@ -663,6 +657,8 @@ const _attemptCreateOrder = async (
         source = 'web',
         apiKeyPrefix = null,
         externalOrderId = null,
+        quoteId = null,
+        requireQuoteConsent = false,
     },
     isRetry = false
 ) => {
@@ -690,6 +686,26 @@ const _attemptCreateOrder = async (
         // â”€â”€ 2. Validate Quantity Bounds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const qty = _normaliseOrderQuantity(quantity, product);
 
+        let acceptedQuote = null;
+        if (requireQuoteConsent) {
+            if (!quoteId || !mongoose.Types.ObjectId.isValid(quoteId)) {
+                throw new BusinessRuleError('Please review the current price before ordering.', 'QUOTE_REQUIRED');
+            }
+            acceptedQuote = await CheckoutQuote.findOne({
+                _id: quoteId,
+                userId,
+                productId: product._id,
+                quantity: qty,
+                status: CHECKOUT_QUOTE_STATUS.ACTIVE,
+            }).session(session);
+            if (!acceptedQuote) {
+                throw new BusinessRuleError('This checkout quote is no longer available. Please review the current price.', 'QUOTE_INVALID');
+            }
+            if (acceptedQuote.expiresAt.getTime() <= Date.now()) {
+                throw new BusinessRuleError('This checkout quote has expired. Please review the current price.', 'QUOTE_EXPIRED');
+            }
+        }
+
         // â”€â”€ 2b. Validate / capture dynamic order fields â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Runs BEFORE any financial mutation so a bad field value costs nothing.
         //
@@ -715,6 +731,35 @@ const _attemptCreateOrder = async (
         }
         assertFazerCardsManualCustomerInput(product, fazerCardsMode, customerInput);
 
+        // Deterministic, local FazerCards blockers must fail before the
+        // wallet debit. This does not call the provider or decide uncertain
+        // provider outcomes, which remain part of post-debit fulfillment.
+        if (fazerCardsMode?.isAutoProvider === true && product.providerExecutionEnabled === true) {
+            const [providerProduct, providerDoc] = await Promise.all([
+                product.providerProduct
+                    ? ProviderProduct.findById(product.providerProduct).session(session).lean()
+                    : null,
+                product.provider
+                    ? Provider.findById(product.provider).select('name slug providerCode isActive').session(session).lean()
+                    : null,
+            ]);
+            const readiness = evaluateFazerCardsReadiness({
+                product,
+                providerProduct,
+                provider: providerDoc,
+                operation: READINESS_OPERATIONS.CUSTOMER_AUTOMATIC_PURCHASE,
+                purchaseContext: { quantity: qty },
+            });
+            if (!readiness.ready) {
+                const firstReason = readiness.reasons[0] || {};
+                throw new BusinessRuleError(
+                    firstReason.message || 'This FazerCards product is not ready for automatic fulfillment.',
+                    firstReason.code || 'FAZERCARDS_AUTOMATIC_FULFILLMENT_NOT_READY',
+                    { reasons: readiness.reasons }
+                );
+            }
+        }
+
         // â”€â”€ 2c. JIT Provider Price Verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         //
         // If this product is linked to a provider, verify the provider's live
@@ -736,19 +781,58 @@ const _attemptCreateOrder = async (
                     .lean();
 
                 if (ppDoc?.externalProductId) {
-                    const livePrice = await getLivePrice(
+                    const observedPrice = await getLivePrice(
                         String(product.provider),
                         ppDoc.externalProductId,
                         provider
                     );
 
-                    if (livePrice !== null && product.providerPrice != null) {
-                        // Use decimal.js for lossless comparison (prices are 50dp strings)
-                        if (compare(String(livePrice), String(product.providerPrice)) > 0) {
-                            // â”€â”€ Price increased â€” abort order, auto-update DB â”€â”€
-                            _autoUpdateProductPrice(product._id, livePrice, product.markupType, product.markupValue);
-                            invalidatePriceCache(String(product.provider));
+                    const storedCostIncreased = observedPrice !== null && product.providerPrice != null &&
+                        compare(String(observedPrice), String(product.providerPrice)) > 0;
+                    const publishedPriceIsBelowCost = observedPrice !== null &&
+                        compare(String(observedPrice), String(getProductFinalUnitPrice(product))) > 0;
 
+                    if (storedCostIncreased || publishedPriceIsBelowCost) {
+                        // A cached catalog can be five minutes old. Confirm an
+                        // apparent increase with a fresh provider read before
+                        // rejecting a customer, so a reverted price cannot
+                        // produce a false "price increased" failure.
+                        let livePrice;
+                        try {
+                            livePrice = await getLivePrice(
+                                String(product.provider),
+                                ppDoc.externalProductId,
+                                provider,
+                                { forceRefresh: true }
+                            );
+                        } catch (_) {
+                            throw new BusinessRuleError(
+                                'The supplier price changed recently but could not be confirmed. Please try again shortly.',
+                                'PROVIDER_PRICE_CONFIRMATION_UNAVAILABLE'
+                            );
+                        }
+
+                        const confirmedCostIncrease = livePrice !== null && product.providerPrice != null &&
+                            compare(String(livePrice), String(product.providerPrice)) > 0;
+                        const confirmedPublishedPriceBelowCost = livePrice !== null &&
+                            compare(String(livePrice), String(getProductFinalUnitPrice(product))) > 0;
+
+                        if (confirmedCostIncrease || confirmedPublishedPriceBelowCost) {
+                            const refreshed = await applyLiveProviderPrice({
+                                providerProductId: product.providerProduct,
+                                rawPrice: livePrice,
+                            });
+                            if (!refreshed.applied) {
+                                throw new BusinessRuleError(
+                                    'The supplier price changed while the catalog was being refreshed. Please try again shortly.',
+                                    'PROVIDER_PRICE_REFRESH_CONFLICT'
+                                );
+                            }
+
+                            // Keep the newly-confirmed catalog in cache for a
+                            // retry. Sync-mode products now expose their
+                            // authorized recalculated price; manual prices are
+                            // intentionally not overwritten.
                             throw new BusinessRuleError(
                                 'The provider has increased the price for this service. ' +
                                 'The catalog has been automatically updated. ' +
@@ -760,7 +844,11 @@ const _attemptCreateOrder = async (
                 }
             } catch (jitErr) {
                 // Re-throw our own BusinessRuleError (price increase abort)
-                if (jitErr.code === 'PROVIDER_PRICE_INCREASED') throw jitErr;
+                if ([
+                    'PROVIDER_PRICE_INCREASED',
+                    'PROVIDER_PRICE_CONFIRMATION_UNAVAILABLE',
+                    'PROVIDER_PRICE_REFRESH_CONFLICT',
+                ].includes(jitErr.code)) throw jitErr;
                 // Swallow all other errors (API timeout, network failure, etc.)
                 // â€” proceed with the cached DB price rather than blocking the order.
             }
@@ -784,6 +872,29 @@ const _attemptCreateOrder = async (
         // â”€â”€ FINAL ROUNDING â€” only place we round to 2dp â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const chargedAmount = orderPricing.chargedAmount;
 
+        if (acceptedQuote) {
+            const quoteMatches = acceptedQuote.currency === userCurrency
+                && compare(acceptedQuote.payableAmount, chargedAmount.toFixed(2)) === 0
+                && compare(acceptedQuote.totalUsd, serializeDecimal(usdTotalPrice)) === 0
+                && compare(acceptedQuote.customerUnitPriceUsd, serializeDecimal(pricing.customerUnitPriceUsd)) === 0
+                && compare(acceptedQuote.basePriceSnapshot, serializeDecimal(pricing.basePrice)) === 0
+                && compare(acceptedQuote.purchaseRateSnapshot, serializeDecimal(purchaseRateSnapshot)) === 0
+                && compare(acceptedQuote.markupPercentage, serializeDecimal(pricing.markupPercentage || 0)) === 0
+                && compare(acceptedQuote.groupPercentage, serializeDecimal(pricing.groupPercentage || 0)) === 0;
+            if (!quoteMatches) {
+                throw new BusinessRuleError(
+                    'The price has changed. Please review and confirm the updated price before ordering.',
+                    'QUOTE_PRICE_CHANGED',
+                    {
+                        currency: userCurrency,
+                        payableAmount: chargedAmount.toFixed(2),
+                        totalUsd: serializeDecimal(usdTotalPrice),
+                        purchaseRateSnapshot,
+                    }
+                );
+            }
+        }
+
         // â”€â”€ 3c. FINAL PRICE GUARD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         // Prevent NaN / Infinity / zero from reaching the wallet debit.
         if (!Number.isFinite(chargedAmount) || chargedAmount <= 0) {
@@ -797,6 +908,17 @@ const _attemptCreateOrder = async (
         }
 
         const orderId = new mongoose.Types.ObjectId();
+
+        if (acceptedQuote) {
+            const consumed = await CheckoutQuote.updateOne(
+                { _id: acceptedQuote._id, userId, status: CHECKOUT_QUOTE_STATUS.ACTIVE },
+                { $set: { status: CHECKOUT_QUOTE_STATUS.CONSUMED, consumedAt: new Date(), consumedOrderId: orderId } },
+                { session }
+            );
+            if (consumed.modifiedCount !== 1) {
+                throw new BusinessRuleError('This checkout quote was already used. Please review the current price.', 'QUOTE_ALREADY_USED');
+            }
+        }
 
         // â”€â”€ 4. Atomic Debit (in user currency) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const { walletDeducted, creditUsedAmount } = await debitWalletAtomic({
@@ -1031,6 +1153,8 @@ const _attemptCreateOrder = async (
                     source,
                     apiKeyPrefix,
                     externalOrderId,
+                    quoteId,
+                    requireQuoteConsent,
                 },
                 true
             );

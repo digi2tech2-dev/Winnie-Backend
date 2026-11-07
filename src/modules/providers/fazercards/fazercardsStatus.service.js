@@ -3,26 +3,7 @@
 const { sanitizePayload } = require('./fazercards.client');
 const { redactSecrets } = require('./fazercardsContracts');
 
-const NORMALIZED_STATUSES = Object.freeze({
-    COMPLETED: 'COMPLETED',
-    PROCESSING: 'PROCESSING',
-    FAILED: 'FAILED',
-    REFUNDED: 'REFUNDED',
-    UNKNOWN: 'UNKNOWN',
-});
-
-const PROVIDER_STATUS_LABELS = Object.freeze({
-    COMPLETED: 'Completed',
-    PROCESSING: 'Pending',
-    FAILED: 'Cancelled',
-    REFUNDED: 'Refunded',
-    UNKNOWN: 'Unknown',
-});
-
-const COMPLETED_VALUES = new Set(['completed', 'complete', 'succeeded', 'success', 'done', 'fulfilled']);
-const PROCESSING_VALUES = new Set(['processing', 'pending', 'in_progress', 'in progress', 'inprogress', 'created', 'accepted']);
-const FAILED_VALUES = new Set(['failed', 'error', 'cancelled', 'canceled', 'rejected']);
-const REFUNDED_VALUES = new Set(['refunded']);
+const { NORMALIZED_STATUSES, PROVIDER_STATUS_LABELS, classifyFazerCardsStatus } = require('./fazercardsStatus.classifier');
 
 const asString = (value, fallback = '') => {
     if (value === undefined || value === null) return fallback;
@@ -36,48 +17,7 @@ const getPath = (value, path) => {
     return path.split('.').reduce((node, key) => (node && typeof node === 'object' ? node[key] : undefined), value);
 };
 
-const normalizeFazerCardsProviderStatus = (rawStatus) => {
-    const raw = asString(rawStatus);
-    const normalized = raw.toLowerCase();
-    if (COMPLETED_VALUES.has(normalized)) {
-        return {
-            normalizedStatus: NORMALIZED_STATUSES.COMPLETED,
-            providerStatus: PROVIDER_STATUS_LABELS.COMPLETED,
-            known: true,
-            terminalFailure: false,
-        };
-    }
-    if (PROCESSING_VALUES.has(normalized)) {
-        return {
-            normalizedStatus: NORMALIZED_STATUSES.PROCESSING,
-            providerStatus: PROVIDER_STATUS_LABELS.PROCESSING,
-            known: true,
-            terminalFailure: false,
-        };
-    }
-    if (FAILED_VALUES.has(normalized)) {
-        return {
-            normalizedStatus: NORMALIZED_STATUSES.FAILED,
-            providerStatus: PROVIDER_STATUS_LABELS.FAILED,
-            known: true,
-            terminalFailure: true,
-        };
-    }
-    if (REFUNDED_VALUES.has(normalized)) {
-        return {
-            normalizedStatus: NORMALIZED_STATUSES.REFUNDED,
-            providerStatus: PROVIDER_STATUS_LABELS.REFUNDED,
-            known: true,
-            terminalFailure: true,
-        };
-    }
-    return {
-        normalizedStatus: NORMALIZED_STATUSES.UNKNOWN,
-        providerStatus: raw || PROVIDER_STATUS_LABELS.UNKNOWN,
-        known: false,
-        terminalFailure: false,
-    };
-};
+const normalizeFazerCardsProviderStatus = classifyFazerCardsStatus;
 
 const extractFazerCardsOrderId = (payload = {}) => firstValue(
     getPath(payload, 'id'),
@@ -139,6 +79,7 @@ const parseFazerCardsOrderPayload = (payload = {}, {
         providerIdempotencyKey,
         knownStatus: mapped.known,
         terminalFailure: mapped.terminalFailure,
+        outcome: mapped.outcome,
         providerMessage: firstValue(
             getPath(payload, 'message'),
             getPath(payload, 'order.message'),

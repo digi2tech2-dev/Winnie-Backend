@@ -7,7 +7,7 @@ const catchAsync = require('../../shared/utils/catchAsync');
 // ── Customer Endpoints ────────────────────────────────────────────────────────
 
 const createOrder = catchAsync(async (req, res) => {
-    const { productId, quantity, orderFieldsValues, dynamicData, link, target } = req.body;
+    const { productId, quantity, quoteId, orderFieldsValues, dynamicData, link, target } = req.body;
     const customerInput = req.validatedDynamicInput || null;
 
     // Merge top-level link/target into orderFieldsValues so they always
@@ -34,6 +34,8 @@ const createOrder = catchAsync(async (req, res) => {
         idempotencyKey,
         orderFieldsValues: finalFields,
         customerInput,
+        quoteId,
+        requireQuoteConsent: req.user.role === 'CUSTOMER',
         auditContext,
     });
 

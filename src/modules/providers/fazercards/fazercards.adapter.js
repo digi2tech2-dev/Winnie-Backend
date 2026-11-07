@@ -10,6 +10,7 @@ const {
     NORMALIZED_STATUSES,
     parseFazerCardsOrderPayload,
 } = require('./fazercardsStatus.service');
+const { classifyFazerCardsStatus } = require('./fazercardsStatus.classifier');
 
 const asString = (value, fallback = null) => {
     if (value === null || value === undefined || value === '') return fallback;
@@ -149,11 +150,11 @@ const buildTopupFields = (params = {}, requiredFields = []) => {
 };
 
 const normalizeTopupOrderStatus = (rawStatus) => {
-    const normalized = String(rawStatus || '').trim().toLowerCase();
-    if (['completed', 'complete', 'success', 'succeeded', 'done', 'fulfilled'].includes(normalized)) return { status: 'Completed', known: true, terminalFailure: false };
-    if (['processing', 'pending', 'in_progress', 'in progress', 'inprogress'].includes(normalized)) return { status: 'Pending', known: true, terminalFailure: false };
-    if (['failed', 'error', 'cancelled', 'canceled', 'refunded'].includes(normalized)) return { status: 'Cancelled', known: true, terminalFailure: true };
-    return { status: rawStatus ? String(rawStatus) : 'Unknown', known: false, terminalFailure: false };
+    const classified = classifyFazerCardsStatus(rawStatus);
+    return {
+        ...classified,
+        status: classified.providerStatus,
+    };
 };
 
 const extractTopupOrderNode = (data = {}) => (
@@ -386,8 +387,13 @@ const normalizeTopupOfferProduct = ({ category = {}, offer = {}, fields = [] } =
         currency: 'USD',
         costPrice,
         rawPrice: hasValidPrice ? String(priceSource) : '0',
-        available: true,
-        stock: null,
+        // Only retain availability/stock when FazerCards actually supplied a
+        // documented-looking field. Missing values remain unknown.
+        available: parseBoolean(firstValue(
+            offer.available, offer.is_available, offer.isAvailable,
+            offer.status, category.available, category.is_available
+        ), null),
+        stock: parseNumber(firstValue(offer.stock, offer.quantity, offer.available_stock, offer.availableStock), null),
         minQty: parseNumber(firstValue(offer.min_order_quantity, offer.minQty, offer.min_qty, offer.min), 1) || 1,
         maxQty: parseNumber(firstValue(offer.max_order_quantity, offer.maxQty, offer.max_qty, offer.max), 9999) || 9999,
         isActive: true,

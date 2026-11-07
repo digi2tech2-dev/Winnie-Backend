@@ -215,6 +215,16 @@ const productSchema = new mongoose.Schema(
         },
 
         /**
+         * Source timestamp for providerPrice.  Catalog and JIT refreshes use
+         * it as a monotonic fence so an older provider observation cannot
+         * overwrite a newer cost/public-price cascade.
+         */
+        providerPriceSyncedAt: {
+            type: Date,
+            default: null,
+        },
+
+        /**
          * Markup type applied on top of providerPrice to compute basePrice.
          *   'percentage' → basePrice = providerPrice * (1 + markupValue / 100)
          *   'fixed'      → basePrice = providerPrice + markupValue
@@ -424,6 +434,12 @@ const productSchema = new mongoose.Schema(
             trim: true,
             default: null,
         },
+
+        // Marker owned only by the FazerCards source-availability lifecycle.
+        // It prevents recovery from clearing an independent administrator block.
+        sourceAvailabilityBlocked: { type: Boolean, default: false, index: true },
+        sourceAvailabilityBlockReason: { type: String, trim: true, default: null },
+        sourceAvailabilityBlockedAt: { type: Date, default: null },
 
         familyKey: {
             type: String,

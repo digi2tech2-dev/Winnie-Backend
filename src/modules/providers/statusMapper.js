@@ -95,6 +95,7 @@ const _MAP = {
     rejected:   ORDER_STATUS.FAILED,
     reject:     ORDER_STATUS.FAILED,
     refunded:   ORDER_STATUS.FAILED,
+    refund:     ORDER_STATUS.FAILED,
     expired:    ORDER_STATUS.FAILED,
 };
 
@@ -145,7 +146,7 @@ const requiresRefund = (providerStatus) => {
     // Full refund triggers
     if (key === 'cancelled' || key === 'canceled' || key === 'cancel'
         || key === 'failed'    || key === 'fail'     || key === 'error'
-        || key === 'reject'    || key === 'rejected'  || key === 'refunded'
+        || key === 'reject'    || key === 'rejected'  || key === 'refund' || key === 'refunded'
         || key === 'expired') {
         return true;
     }

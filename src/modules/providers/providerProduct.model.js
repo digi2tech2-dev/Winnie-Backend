@@ -23,6 +23,17 @@ const SUPPORT_LEVELS = Object.freeze({
     DISCOVERY_UNCONFIRMED: 'DISCOVERY_UNCONFIRMED',
 });
 
+// This is intentionally independent from isActive/supportLevel.  Those
+// fields describe Winnie configuration/classification; this one describes
+// what a *complete* FazerCards source snapshot proved about the offer.
+const SOURCE_AVAILABILITY = Object.freeze({
+    AVAILABLE: 'AVAILABLE',
+    EXPLICITLY_UNAVAILABLE: 'EXPLICITLY_UNAVAILABLE',
+    MISSING_PENDING: 'MISSING_PENDING',
+    MISSING_CONFIRMED: 'MISSING_CONFIRMED',
+    UNKNOWN: 'UNKNOWN',
+});
+
 /**
  * ProviderProduct — INTERNAL ONLY.
  *
@@ -194,6 +205,22 @@ const providerProductSchema = new mongoose.Schema(
             default: null,
         },
 
+        sourceAvailability: {
+            type: String,
+            enum: Object.values(SOURCE_AVAILABILITY),
+            default: SOURCE_AVAILABILITY.UNKNOWN,
+            index: true,
+        },
+        sourceAvailabilityReason: { type: String, trim: true, default: null },
+        sourceAvailabilityChangedAt: { type: Date, default: null },
+        sourceLastSeenAt: { type: Date, default: null },
+        sourceLastSeenSnapshotId: { type: String, default: null, index: true },
+        sourceLastMissingSnapshotId: { type: String, default: null },
+        sourceMissingSince: { type: Date, default: null },
+        sourceConsecutiveMissingSnapshots: { type: Number, default: 0, min: 0 },
+        sourceMetadataFingerprint: { type: String, default: null },
+        sourceReappearanceReviewRequired: { type: Boolean, default: false },
+
         fulfillmentMode: {
             type: String,
             enum: Object.values(FULFILLMENT_MODES),
@@ -316,4 +343,4 @@ providerProductSchema.pre('validate', async function enforceUniqueProviderProduc
 
 const ProviderProduct = mongoose.model('ProviderProduct', providerProductSchema);
 
-module.exports = { ProviderProduct, FULFILLMENT_MODES, SUPPORT_LEVELS };
+module.exports = { ProviderProduct, FULFILLMENT_MODES, SUPPORT_LEVELS, SOURCE_AVAILABILITY };

@@ -37,6 +37,10 @@ const { ProviderProduct } = require('../providers/providerProduct.model');
 const { PROVIDER_CODES } = require('../providers/provider.constants');
 const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
 const {
+    evaluateFazerCardsReadiness,
+    READINESS_OPERATIONS,
+} = require('../providers/fazercards/fazercardsReadiness.service');
+const {
     canonicalizeXenaProductForResponse,
     canonicalizeXenaProductUpdate,
     isXenaProductLike,
@@ -48,7 +52,7 @@ const {
     BusinessRuleError,
 } = require('../../shared/errors/AppError');
 
-const PROVIDER_PRODUCT_ADMIN_SELECT = 'rawName translatedName externalProductId rawPrice costPrice currency minQty maxQty isActive lastSyncedAt providerCode familyKey fulfillmentMode supportLevel executionBlocked isSupported isBlocked blockReason category categoryName offerId offerName region platform stock requiredFields rawPayload';
+const PROVIDER_PRODUCT_ADMIN_SELECT = 'rawName translatedName externalProductId rawPrice costPrice currency minQty maxQty isActive lastSyncedAt providerCode familyKey fulfillmentMode supportLevel executionBlocked isSupported isBlocked blockReason category categoryName offerId offerName region platform stock requiredFields rawPayload sourceAvailability sourceAvailabilityReason sourceReappearanceReviewRequired';
 
 const dynamicFieldsFromOrderFields = (orderFields = []) => (
     (Array.isArray(orderFields) ? orderFields : []).map((field) => ({
@@ -161,6 +165,32 @@ const validateFazerCardsProductSettings = ({ product, safe, providerProduct }) =
         || product.provider?.slug;
     if (!isFazerCardsProviderCode(providerCode)) return safe;
 
+    const sourceUnavailable = ['MISSING_CONFIRMED', 'EXPLICITLY_UNAVAILABLE'].includes(String(providerProduct?.sourceAvailability || '').trim().toUpperCase());
+    if (sourceUnavailable) {
+        const attemptsReexposure = safe.status === PRODUCT_STATUSES.AVAILABLE
+            || safe.customerPurchaseEnabled === true
+            || safe.providerExecutionBlocked === false
+            || safe.providerExecutionEnabled === true
+            || safe.providerBlockReason !== undefined;
+        if (attemptsReexposure) {
+            throw new BusinessRuleError(
+                providerProduct?.sourceAvailabilityReason || 'This FazerCards source is confirmed unavailable and cannot be re-enabled.',
+                'FAZERCARDS_SOURCE_UNAVAILABLE_LOCKED'
+            );
+        }
+    }
+    // Generic Product PATCH is deliberately not a substitute for the
+    // supplier-management Launch Ops authorization boundary.
+    if (safe.providerExecutionEnabled !== undefined
+        || safe.providerExecutionMode !== undefined
+        || safe.providerExecutionBlocked !== undefined
+        || safe.providerBlockReason !== undefined) {
+        throw new BusinessRuleError(
+            'FazerCards execution controls must be changed through Supplier Launch Ops.',
+            'FAZERCARDS_LAUNCH_OPS_REQUIRED'
+        );
+    }
+
     const familyKey = inferFazerCardsFamilyKey({ ...product.toObject?.(), ...safe }, providerProduct || product.providerProduct);
     const contract = fazerCardsContracts.getContractOrUnknown(familyKey);
     const requestedMode = safe.providerExecutionMode
@@ -224,20 +254,29 @@ const validateFazerCardsProductSettings = ({ product, safe, providerProduct }) =
         );
     }
 
+    const changesAutomaticExecution = (
+        safe.providerExecutionEnabled !== undefined
+        && safe.providerExecutionEnabled !== product.providerExecutionEnabled
+    ) || (
+        safe.providerExecutionMode !== undefined
+        && safe.providerExecutionMode !== product.providerExecutionMode
+    );
     if (modeValidation.mode === PROVIDER_EXECUTION_MODES.AUTO_PROVIDER && nextProduct.providerExecutionEnabled === true) {
-        const autoReadiness = fazerCardsContracts.validateAutoProviderReadinessForProduct({
-            product: nextProduct,
-            providerProduct,
-            familyKey,
-            requireCustomerVisible: true,
-        });
-        if (!autoReadiness.ok) {
-            const firstError = autoReadiness.errors[0] || {};
-            throw new BusinessRuleError(
-                firstError.message || 'This FazerCards product is not ready for auto provider execution.',
-                firstError.code || 'AUTO_PROVIDER_NOT_READY',
-                { errors: autoReadiness.errors }
-            );
+        if (changesAutomaticExecution) {
+            const autoReadiness = evaluateFazerCardsReadiness({
+                product: nextProduct,
+                providerProduct,
+                provider: product.provider,
+                operation: READINESS_OPERATIONS.ADMIN_AUTO_CONFIGURATION,
+            });
+            if (!autoReadiness.ready) {
+                const firstError = autoReadiness.reasons[0] || {};
+                throw new BusinessRuleError(
+                    firstError.message || 'This FazerCards product is not ready for auto provider execution.',
+                    firstError.code || 'AUTO_PROVIDER_NOT_READY',
+                    { errors: autoReadiness.reasons }
+                );
+            }
         }
         safe.executionType = safe.providerExecutionEnabled === true
             ? EXECUTION_TYPES.AUTOMATIC
@@ -668,7 +707,7 @@ const publishFromProviderProduct = async ({
  */
 const updateProduct = async (productId, updates) => {
     const product = await Product.findById(productId)
-        .populate('provider', 'name slug code')
+        .populate('provider', 'name slug code providerCode isActive')
         .populate('providerProduct', PROVIDER_PRODUCT_ADMIN_SELECT);
     if (!product) throw new NotFoundError('Product');
 

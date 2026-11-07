@@ -170,6 +170,12 @@ const providerSchema = new mongoose.Schema(
             min: [0, 'syncInterval cannot be negative'],
         },
 
+        /** Timestamp of the last fully successful catalog sync. */
+        lastCatalogSyncedAt: {
+            type: Date,
+            default: null,
+        },
+
         /**
          * List of feature strings this provider supports.
          * Examples: ['placeOrder', 'checkOrder', 'checkOrdersBatch', 'fetchProducts']

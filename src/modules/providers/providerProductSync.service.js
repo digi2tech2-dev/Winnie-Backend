@@ -153,20 +153,56 @@ const _upsertOne = async (providerId, dto, now) => {
         if (dto[field] !== undefined) set[field] = dto[field];
     }
 
+    // A catalog fetch is an observation at `now`, which is captured before
+    // the remote request. Do not let a slow response overwrite a newer JIT
+    // observation that completed while that request was in flight.
     const doc = await ProviderProduct.findOneAndUpdate(
         {
             provider: providerId,
             externalProductId: dto.externalProductId,
+            $or: [
+                { lastSyncedAt: null },
+                { lastSyncedAt: { $lte: now } },
+            ],
         },
         {
             $set: set,
         },
         {
-            upsert: true,
+            upsert: false,
             new: true,
-            setDefaultsOnInsert: true,
         }
     );
+
+    if (!doc) {
+        // The conditional update either found no document or correctly
+        // rejected an older observation. Check before attempting the insert
+        // so a stale writer never replaces the newer document.
+        const existing = await ProviderProduct.findOne({
+            provider: providerId,
+            externalProductId: dto.externalProductId,
+        });
+        if (existing) return { doc: existing, isNew: false, applied: false };
+
+        try {
+            const created = await ProviderProduct.create({
+                provider: providerId,
+                externalProductId: dto.externalProductId,
+                ...set,
+            });
+            return { doc: created, isNew: true, applied: true };
+        } catch (error) {
+            // Another worker can insert after the existence check. In that
+            // case retain its observation rather than retrying a stale write.
+            if (error?.code !== 11000) throw error;
+            const concurrent = await ProviderProduct.findOne({
+                provider: providerId,
+                externalProductId: dto.externalProductId,
+            });
+            if (concurrent) return { doc: concurrent, isNew: false, applied: false };
+            throw error;
+        }
+    }
 
     // Discriminate new vs updated: createdAt ≈ updatedAt within 100ms on the
     // same write means this was an insert, not an update.
@@ -174,7 +210,92 @@ const _upsertOne = async (providerId, dto, now) => {
     const updatedMs = doc.updatedAt?.getTime() ?? 0;
     const isNew = Math.abs(createdMs - updatedMs) < 100;
 
-    return { doc, isNew };
+    return { doc, isNew, applied: true };
+};
+
+/**
+ * Propagate a known provider cost to linked customer products that have
+ * explicitly opted into synchronized pricing. Manual prices are deliberately
+ * not changed here: an administrator owns those prices and must review a cost
+ * change before changing the public sell price.
+ */
+const syncLinkedProductPrices = async (providerProductId, rawPrice, observedAt = new Date()) => {
+    const eligibleForObservation = {
+        $or: [
+            { providerPriceSyncedAt: null },
+            { providerPriceSyncedAt: { $lte: observedAt } },
+        ],
+    };
+
+    // Cost is internal data and must remain current even for products whose
+    // public price is admin-managed. Only sync-mode products receive a public
+    // price recalculation below.
+    await Product.updateMany(
+        { providerProduct: providerProductId, ...eligibleForObservation },
+        {
+            $set: {
+                providerPrice: String(rawPrice),
+                providerPriceSyncedAt: observedAt,
+            },
+        }
+    );
+
+    const products = await Product.find({
+        providerProduct: providerProductId,
+        pricingMode: PRICING_MODES.SYNC,
+        providerPriceSyncedAt: observedAt,
+    }).select('markupType markupValue');
+
+    let pricesSynced = 0;
+    for (const product of products) {
+        const newFinalPrice = computeFinalPrice(rawPrice, product.markupType, product.markupValue);
+        const newBasePrice = newFinalPrice ?? String(rawPrice);
+
+        const update = await Product.updateOne({
+            _id: product._id,
+            providerPriceSyncedAt: observedAt,
+        }, {
+            $set: {
+                finalPrice: newFinalPrice,
+                basePrice: newBasePrice,
+            },
+        });
+        pricesSynced += update.modifiedCount;
+    }
+    return pricesSynced;
+};
+
+/**
+ * Persist a price observed from a just-fetched provider catalog and propagate
+ * it through the same sync-mode pricing rule used by scheduled/manual sync.
+ *
+ * `lastSyncedAt` prevents an older JIT observation from replacing a newer
+ * catalog sync.  The caller receives `applied: false` when that happens and
+ * must not overwrite the newer local catalog state.
+ */
+const applyLiveProviderPrice = async ({ providerProductId, rawPrice, observedAt = new Date() }) => {
+    const providerProduct = await ProviderProduct.findOneAndUpdate(
+        {
+            _id: providerProductId,
+            $or: [
+                { lastSyncedAt: null },
+                { lastSyncedAt: { $lte: observedAt } },
+            ],
+        },
+        {
+            $set: {
+                rawPrice: String(rawPrice),
+                lastSyncedAt: observedAt,
+            },
+        },
+        { new: true }
+    );
+
+    if (!providerProduct) return { applied: false, pricesSynced: 0 };
+    return {
+        applied: true,
+        pricesSynced: await syncLinkedProductPrices(providerProduct._id, String(rawPrice), observedAt),
+    };
 };
 
 // =============================================================================
@@ -206,7 +327,7 @@ const _performSync = async (provider, adapterOptions) => {
     // dtos: Array<{ externalProductId, rawName, rawPrice, minQty, maxQty, isActive, rawPayload }>
 
     const seenExternalIds = new Set();
-    const touchedProviderProducts = [];  // { id, rawPrice } — for price propagation
+    const touchedProviderProducts = [];  // { id, rawPrice, observedAt } — for price propagation
 
     // ── 2. Concurrent upserts ─────────────────────────────────────────────────
     //
@@ -215,8 +336,8 @@ const _performSync = async (provider, adapterOptions) => {
     //
     const tasks = dtos.map((dto) => async () => {
         seenExternalIds.add(String(dto.externalProductId));
-        const { doc, isNew } = await _upsertOne(provider._id, dto, now);
-        return { doc, isNew, rawPrice: dto.rawPrice };
+        const { doc, isNew, applied } = await _upsertOne(provider._id, dto, now);
+        return { doc, isNew, applied, rawPrice: dto.rawPrice };
     });
 
     const settlements = await runWithConcurrency(tasks, UPSERT_CONCURRENCY);
@@ -227,10 +348,12 @@ const _performSync = async (provider, adapterOptions) => {
         const dto = dtos[i];
 
         if (settlement.status === 'fulfilled') {
-            const { doc, isNew, rawPrice } = settlement.value;
-            touchedProviderProducts.push({ id: doc._id, rawPrice });
-            if (isNew) upserted++;
-            else updated++;
+            const { doc, isNew, rawPrice, applied } = settlement.value;
+            if (applied) {
+                touchedProviderProducts.push({ id: doc._id, rawPrice, observedAt: now });
+                if (isNew) upserted++;
+                else updated++;
+            }
         } else {
             errors.push(`[upsert:${dto.externalProductId}] ${settlement.reason?.message ?? 'Unknown error'}`);
         }
@@ -276,26 +399,9 @@ const _performSync = async (provider, adapterOptions) => {
     }
 
     // ── 4. Push price updates to Platform Products (sync mode) ────────────────
-    for (const { id: providerProductId, rawPrice } of touchedProviderProducts) {
+    for (const { id: providerProductId, rawPrice, observedAt } of touchedProviderProducts) {
         try {
-            const products = await Product.find({
-                providerProduct: providerProductId,
-                pricingMode: PRICING_MODES.SYNC,
-            }).select('markupType markupValue');
-
-            for (const product of products) {
-                const newFinalPrice = computeFinalPrice(rawPrice, product.markupType, product.markupValue);
-                const newBasePrice = newFinalPrice ?? String(rawPrice);
-
-                await Product.findByIdAndUpdate(product._id, {
-                    $set: {
-                        providerPrice: String(rawPrice),
-                        finalPrice: newFinalPrice,
-                        basePrice: newBasePrice,
-                    },
-                });
-                pricesSynced++;
-            }
+            pricesSynced += await syncLinkedProductPrices(providerProductId, String(rawPrice), observedAt);
         } catch (err) {
             errors.push(`[price-sync:${providerProductId}] ${err.message}`);
         }
@@ -374,7 +480,17 @@ const syncProviderProducts = async (providerId, adapterOptions = {}) => {
             throw new BusinessRuleError('Cannot sync an inactive provider.', 'PROVIDER_INACTIVE');
         }
 
-        return await _performSync(provider, adapterOptions);
+        const result = await _performSync(provider, adapterOptions);
+        // A catalog with any per-item/deactivation/price-propagation error is
+        // not a fresh authoritative snapshot. Leave the old marker intact so
+        // the scheduler retries it instead of treating a partial sync as good.
+        if (result.errors.length === 0) {
+            await Provider.updateOne(
+                { _id: provider._id },
+                { $set: { lastCatalogSyncedAt: result.syncedAt } }
+            );
+        }
+        return result;
 
     } finally {
         // ── Release lock unconditionally (success OR any error) ──────────────
@@ -408,6 +524,32 @@ const syncAllProviders = async (adapterOptions = {}) => {
         }
     }
 
+    return results;
+};
+
+/**
+ * Sync only providers whose configured interval has elapsed. A completed
+ * catalog sync stamps the provider; an incomplete sync intentionally does not
+ * advance that stamp, so the next scheduler tick retries it.
+ */
+const syncDueProviders = async (adapterOptions = {}) => {
+    const now = new Date();
+    const providers = await Provider.find({ isActive: true, syncInterval: { $gt: 0 } })
+        .select('_id syncInterval lastCatalogSyncedAt');
+    const results = [];
+
+    for (const provider of providers) {
+        const intervalMs = Number(provider.syncInterval) * 60 * 1000;
+        const lastSyncMs = provider.lastCatalogSyncedAt ? new Date(provider.lastCatalogSyncedAt).getTime() : 0;
+        if (lastSyncMs && lastSyncMs + intervalMs > now.getTime()) continue;
+
+        try {
+            const result = await syncProviderProducts(provider._id, adapterOptions);
+            results.push({ providerId: provider._id, result });
+        } catch (err) {
+            results.push({ providerId: provider._id, error: err.message });
+        }
+    }
     return results;
 };
 
@@ -461,7 +603,9 @@ const recalcProductPrices = async (providerProductId) => {
 module.exports = {
     syncProviderProducts,
     syncAllProviders,
+    syncDueProviders,
     recalcProductPrices,
+    applyLiveProviderPrice,
     // ── Exported for tests ────────────────────────────────────────────────────
     isSyncRunning,
     runWithConcurrency,   // pure utility — testable in isolation

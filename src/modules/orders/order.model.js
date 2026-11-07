@@ -324,6 +324,25 @@ const orderSchema = new mongoose.Schema(
             index: true,
         },
 
+        // FazerCards placement is externally side-effecting. These fields form
+        // a persistent one-way claim before the outbound request; a restart can
+        // therefore preserve ambiguity instead of issuing a second order.
+        fazerCardsPlacementState: {
+            type: String,
+            enum: ['UNCLAIMED', 'CLAIMED', 'SUBMITTED', 'AMBIGUOUS', 'RESOLVED'],
+            default: 'UNCLAIMED',
+            index: true,
+        },
+        fazerCardsPlacementOwner: { type: String, default: null, select: false },
+        fazerCardsPlacementClaimedAt: { type: Date, default: null },
+        fazerCardsPlacementSubmittedAt: { type: Date, default: null },
+        fazerCardsPlacementResolvedAt: { type: Date, default: null },
+        fazerCardsRecoveryLeaseToken: { type: String, default: null, select: false },
+        fazerCardsRecoveryLeaseUntil: { type: Date, default: null, index: true },
+        fazerCardsRecoveryAttempts: { type: Number, default: 0, min: 0 },
+        fazerCardsRecoveryLastAt: { type: Date, default: null },
+        fazerCardsRecoveryReason: { type: String, default: null },
+
         providerOrderId: {
             type: mongoose.Schema.Types.Mixed,  // Number (Royal Crown) OR String (Alkasr "ID_xxx")
             default: null,

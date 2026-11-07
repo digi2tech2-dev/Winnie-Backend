@@ -48,6 +48,12 @@ const {
     notifyOrderRefunded,
 } = require('../notifications/notification.events');
 const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
+const { FAZER_CARDS_OUTCOMES, classifyFazerCardsOutcome } = require('../providers/fazercards/fazercardsOutcome.service');
+const {
+    claimFazerCardsPlacement,
+    markFazerCardsPlacementSubmitted,
+    markFazerCardsPlacementOutcome,
+} = require('../providers/fazercards/fazercardsPlacement.service');
 const { storeDeliveredCodesForOrder, sanitizeProviderCodePayload } = require('../providers/fazercards/fazercardsDelivery.service');
 const xenaService = require('../providers/xena/xena.service');
 const {
@@ -549,6 +555,10 @@ const isFazerCardsControlledAutoOrder = (product = {}, providerProduct = {}) => 
         && FAZER_CARDS_CONTROLLED_AUTO_FAMILIES.has(familyKey);
 };
 
+const isFazerCardsOrder = (product = {}, providerProduct = {}) => (
+    normalizeProviderCode(product?.providerCode || providerProduct?.providerCode) === PROVIDER_CODES.FAZER_CARDS
+);
+
 const getCodeDeliveryMaxOrderUsd = () => {
     const max = Number(config.providers.fazerCards.codeDeliveryMaxOrderUsd);
     return Number.isFinite(max) && max > 0 ? max : null;
@@ -631,6 +641,7 @@ const buildFazerCardsParsedOrderResult = ({
             ? (parsed.code || defaultErrorCode)
             : null,
         providerErrorMessage: parsed.warnings?.[0] || null,
+        outcome: parsed.outcome || null,
         rawResponse: sanitizeProviderCodePayload(data),
         errorMessage: parsed.warnings?.[0] || null,
     };
@@ -679,13 +690,13 @@ const placeFazerCardsControlledAutoOrder = async ({
     const telegramKind = familyKey === 'TELEGRAM'
         ? fazerCardsContracts.extractTelegramIdentifiers(providerProduct).kind
         : null;
-    const providerIdempotencyKey = familyKey === 'TELEGRAM'
+    const providerIdempotencyKey = order.providerIdempotencyKey || (familyKey === 'TELEGRAM'
         ? `fazercards:telegram-${telegramKind || 'unknown'}:${order._id.toString()}`
         : familyKey === 'STEAM_GIFTS'
             ? `fazercards:steam-gift:${order._id.toString()}`
             : familyKey === 'MANUAL_SERVICES'
                 ? `fazercards:manual-service:${order._id.toString()}`
-                : `fazercards:steam-topup:${order._id.toString()}`;
+                : `fazercards:steam-topup:${order._id.toString()}`);
 
     if (product.providerExecutionMode !== fazerCardsContracts.PROVIDER_EXECUTION_MODES.AUTO_PROVIDER) {
         return buildFazerCardsManualReviewResult({
@@ -699,6 +710,13 @@ const placeFazerCardsControlledAutoOrder = async ({
             providerIdempotencyKey,
             providerErrorCode: 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED',
             providerErrorMessage: 'FazerCards provider execution is disabled for this product.',
+        });
+    }
+    if (['MISSING_CONFIRMED', 'EXPLICITLY_UNAVAILABLE'].includes(String(providerProduct.sourceAvailability || '').toUpperCase())) {
+        return buildFazerCardsManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_SOURCE_UNAVAILABLE',
+            providerErrorMessage: providerProduct.sourceAvailabilityReason || 'FazerCards source availability is confirmed unavailable; placement is held for reconciliation.',
         });
     }
     if (product.providerExecutionBlocked === true || providerProduct.executionBlocked === true) {
@@ -901,10 +919,14 @@ const placeFazerCardsControlledAutoOrder = async ({
             });
         }
 
-        return buildFazerCardsRejectedResult({
+        // The public contract does not establish that arbitrary 4xx responses
+        // are pre-creation rejections. Hold correlation for review instead of
+        // treating an undocumented stock/validation error as refund evidence.
+        return buildFazerCardsManualReviewResult({
             providerIdempotencyKey,
-            providerErrorCode: err.code || 'FAZERCARDS_CONTROLLED_ORDER_REJECTED',
-            providerErrorMessage: err.safeUpstreamMessage || err.message || 'FazerCards controlled order was rejected.',
+            providerRequestId: err.requestId || null,
+            providerErrorCode: err.code || 'FAZERCARDS_CONTROLLED_ORDER_UNKNOWN',
+            providerErrorMessage: 'FazerCards controlled order outcome is uncertain and requires manual review.',
             rawResponse: err.providerBody || { errorCode: err.code, message: err.safeUpstreamMessage || err.message },
         });
     }
@@ -938,7 +960,7 @@ const placeFazerCardsCodeDeliveryOrder = async ({
     providerDoc = null,
 } = {}) => {
     const familyKey = String(providerProduct.familyKey || product.familyKey || '').trim().toUpperCase();
-    const providerIdempotencyKey = `fazercards:code-delivery:${order._id.toString()}`;
+    const providerIdempotencyKey = order.providerIdempotencyKey || `fazercards:code-delivery:${order._id.toString()}`;
     const unitCost = Number(providerProduct.costPrice ?? providerProduct.rawPrice);
     const quantity = Number(order.quantity || 1);
     const totalProviderCost = Number.isFinite(unitCost) && Number.isFinite(quantity)
@@ -957,6 +979,13 @@ const placeFazerCardsCodeDeliveryOrder = async ({
             providerIdempotencyKey,
             providerErrorCode: 'FAZERCARDS_PROVIDER_EXECUTION_DISABLED',
             providerErrorMessage: 'FazerCards provider execution is disabled for this product.',
+        });
+    }
+    if (['MISSING_CONFIRMED', 'EXPLICITLY_UNAVAILABLE'].includes(String(providerProduct.sourceAvailability || '').toUpperCase())) {
+        return buildCodeDeliveryManualReviewResult({
+            providerIdempotencyKey,
+            providerErrorCode: 'FAZERCARDS_SOURCE_UNAVAILABLE',
+            providerErrorMessage: providerProduct.sourceAvailabilityReason || 'FazerCards source availability is confirmed unavailable; placement is held for reconciliation.',
         });
     }
     if (product.providerExecutionBlocked === true || providerProduct.executionBlocked === true) {
@@ -1108,10 +1137,14 @@ const placeFazerCardsCodeDeliveryOrder = async ({
             });
         }
 
-        return buildCodeDeliveryRejectedResult({
+        // No documented 4xx no-order-created contract exists for this family.
+        // A response that arrived after submission may still represent an
+        // accepted provider order, so it cannot authorize a wallet refund.
+        return buildCodeDeliveryManualReviewResult({
             providerIdempotencyKey,
-            providerErrorCode: err.code || 'FAZERCARDS_CODE_DELIVERY_REJECTED',
-            providerErrorMessage: err.safeUpstreamMessage || err.message || 'FazerCards code-delivery order was rejected.',
+            providerRequestId: err.requestId || null,
+            providerErrorCode: err.code || 'FAZERCARDS_CODE_DELIVERY_UNKNOWN',
+            providerErrorMessage: 'FazerCards code-delivery order outcome is uncertain and requires manual review.',
             rawResponse: err.providerBody || { errorCode: err.code, message: err.safeUpstreamMessage || err.message },
         });
     }
@@ -1144,6 +1177,7 @@ const placeFazerCardsCodeDeliveryOrder = async ({
         providerIdempotencyKey,
         providerErrorCode: parsed.status === fazerCardsContracts.PARSED_STATUSES.MANUAL_REVIEW ? (parsed.code || 'FAZERCARDS_CODE_DELIVERY_MANUAL_REVIEW') : null,
         providerErrorMessage: parsed.warnings?.[0] || null,
+        outcome: parsed.outcome || null,
         rawResponse: {
             ...sanitizeProviderCodePayload(data),
             deliveredCodeCount: codeStorage.deliveredCodeCount,
@@ -1543,7 +1577,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     try {
         if (order.productId?.providerProduct) {
             providerProduct = await ProviderProduct.findById(order.productId.providerProduct)
-                .select('externalProductId rawPayload providerCode familyKey category categoryName offerId offerName fulfillmentMode supportLevel executionBlocked isSupported isBlocked blockReason requiredFields costPrice rawPrice currency stock minQty maxQty')
+                .select('externalProductId rawPayload providerCode familyKey category categoryName offerId offerName fulfillmentMode supportLevel executionBlocked isSupported isBlocked blockReason requiredFields costPrice rawPrice currency stock minQty maxQty sourceAvailability sourceAvailabilityReason')
                 .lean();
             externalProductId = providerProduct?.externalProductId ?? null;
         }
@@ -1559,6 +1593,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     const stableOrderUuid = order.idempotencyKey || order._id.toString();
     const isXenaOrder = isXenaFulfillmentOrder(order, resolvedProviderDoc);
     const isCanonicalOrder = isCanonicalB2BProvider(resolvedProviderDoc);
+    const isFazerOrder = isFazerCardsOrder(order.productId, providerProduct);
 
     if (isXenaOrder) {
         const claim = await claimXenaFulfillmentAttempt({
@@ -1614,11 +1649,37 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         }
     }
 
+    // Persist ownership before the external side effect. A process crash after
+    // this point leaves a durable correlation record and is held for review;
+    // it must never be retried with a fresh idempotency key.
+    let fazerCardsPlacementClaim = null;
+    if (isFazerOrder) {
+        fazerCardsPlacementClaim = await claimFazerCardsPlacement({
+            order,
+            family: providerProduct?.familyKey || order.productId?.familyKey,
+        });
+        if (!fazerCardsPlacementClaim.claimed) {
+            const current = fazerCardsPlacementClaim.current;
+            // Another worker may still be persisting the same placement. Do not
+            // overwrite its PROCESSING transition; the durable claim itself
+            // prevents a second POST. A later recovery action can escalate a
+            // stale claim without racing the active owner.
+            return { order: current || await Order.findById(orderId), placed: false, refunded: false };
+        }
+    }
+
     // ── Call the provider ──────────────────────────────────────────────────────
     console.log(`[Fulfillment] Placing order ${orderId} with provider…`);
 
     let result;
     try {
+        if (fazerCardsPlacementClaim) {
+            const submitted = await markFazerCardsPlacementSubmitted({
+                orderId: order._id,
+                ownerToken: fazerCardsPlacementClaim.ownerToken,
+            });
+            if (!submitted) return { order: await Order.findById(orderId), placed: false, refunded: false };
+        }
         const useFazerCardsCodeDelivery = isFazerCardsCodeDeliveryOrder(order.productId, providerProduct);
         const useFazerCardsControlledAuto = isFazerCardsControlledAutoOrder(order.productId, providerProduct);
         if (useFazerCardsCodeDelivery) {
@@ -1713,6 +1774,16 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 },
                 errorMessage: 'Xena recharge outcome is uncertain and requires manual review.',
             };
+        } else if (isFazerOrder) {
+            // FazerCards' HTTP rejection contract is not sufficiently documented
+            // to prove no upstream order exists. Preserve the stable claim and
+            // require correlation instead of refunding or retrying blindly.
+            result = buildFazerCardsManualReviewResult({
+                providerIdempotencyKey: fazerCardsPlacementClaim?.providerIdempotencyKey || order.providerIdempotencyKey,
+                providerErrorCode: err.code || 'FAZERCARDS_PLACEMENT_UNKNOWN',
+                providerErrorMessage: 'FazerCards placement outcome is uncertain and requires reconciliation.',
+                rawResponse: err.providerBody || { httpStatus: Number(err.response?.status || err.statusCode || 0) || null, code: err.code || null },
+            });
         } else {
         // Classify the error: transient (network/timeout) vs hard rejection.
         //
@@ -1751,6 +1822,34 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             };
         }
         }
+    }
+
+    if (isFazerOrder && result?.success === false && result?.manualReview !== true && !result?.providerOrderId &&
+        /^FAZERCARDS_HTTP_/.test(String(result?.providerErrorCode || ''))) {
+        // The adapter normalized a transport-level 4xx before this layer saw
+        // it. Without a provider order id or documented no-order proof it is
+        // still an ambiguous placement, never an automatic-refund outcome.
+        result = buildFazerCardsManualReviewResult({
+            providerIdempotencyKey: result.providerIdempotencyKey || fazerCardsPlacementClaim?.providerIdempotencyKey || order.providerIdempotencyKey,
+            providerRequestId: result.providerRequestId || null,
+            providerErrorCode: result.providerErrorCode,
+            providerErrorMessage: 'FazerCards placement outcome is uncertain and requires manual review.',
+            rawResponse: result.rawResponse,
+        });
+    }
+
+    if (fazerCardsPlacementClaim) {
+        const outcome = result?.outcome || classifyFazerCardsOutcome({ rawStatus: result?.providerStatus });
+        const state = result?.manualReview === true || outcome === FAZER_CARDS_OUTCOMES.UNKNOWN_REMOTE_OUTCOME && !result?.providerOrderId
+            ? 'AMBIGUOUS'
+            : result?.providerOrderId
+                ? 'SUBMITTED'
+                : 'RESOLVED';
+        await markFazerCardsPlacementOutcome({
+            orderId: order._id,
+            ownerToken: fazerCardsPlacementClaim.ownerToken,
+            state,
+        });
     }
 
     const logResult = isFazerCardsCodeDeliveryOrder(order.productId, providerProduct)
@@ -2020,6 +2119,25 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             claimedOrder.providerStatus === 'PLACEMENT_UNCERTAIN') {
             console.error(`[Fulfillment] Canonical recovery crash for order ${orderId}; retaining placement uncertainty:`, fatalErr.message);
             return { order: claimedOrder, placed: false, refunded: claimedOrder.refunded === true };
+        }
+
+        // FazerCards has the same no-second-placement safety boundary. Once a
+        // persistent claim exists, an interrupted local writer is ambiguous;
+        // never let the generic crash handler manufacture a failure/refund.
+        if (normalizeProviderCode(claimedOrder?.providerCode).replace(/[-\s]+/g, '_') === PROVIDER_CODES.FAZER_CARDS &&
+            claimedOrder?.status === ORDER_STATUS.PROCESSING &&
+            !claimedOrder.providerOrderId &&
+            ['CLAIMED', 'SUBMITTED', 'AMBIGUOUS'].includes(claimedOrder.fazerCardsPlacementState)) {
+            const reviewOrder = await moveOrderToManualReview(claimedOrder, {
+                providerOrderId: null,
+                providerStatus: 'Unknown',
+                providerIdempotencyKey: claimedOrder.providerIdempotencyKey,
+                providerErrorCode: 'FAZERCARDS_PLACEMENT_UNKNOWN',
+                providerErrorMessage: 'FazerCards placement was interrupted and requires correlation before any retry.',
+                rawResponse: { errorCode: 'FAZERCARDS_PLACEMENT_UNKNOWN' },
+                errorMessage: 'FazerCards placement was interrupted and requires correlation before any retry.',
+            }, { reason: 'FAZERCARDS_PLACEMENT_UNKNOWN' });
+            return { order: reviewOrder || await Order.findById(orderId), placed: false, refunded: false };
         }
 
         if (activeXenaPlacementGate?.phase === 'POST_DISPATCHING' || activeXenaPlacementGate?.phase === 'POST_AMBIGUOUS') {
@@ -2887,10 +3005,58 @@ const reconcileFailedOrderRefunds = async ({ limit = 100 } = {}) => {
     return stats;
 };
 
+// Recovery never dispatches FazerCards. Its only placement action is to claim
+// a bounded local lease and make an unresolved submission visible to operators.
+// This is deliberately separate from provider polling: a missing remote id is
+// not evidence that the provider did not accept the original POST.
+const recoverFazerCardsFinancialSafety = async ({ limit = 25, leaseMs = 300000 } = {}) => {
+    const safeLimit = Math.min(Math.max(Number.parseInt(limit, 10) || 25, 1), 200);
+    const safeLeaseMs = Math.min(Math.max(Number.parseInt(leaseMs, 10) || 300000, 30000), 30 * 60 * 1000);
+    const now = new Date();
+    const stats = { scanned: 0, leased: 0, manualReview: 0, skipped: 0, errors: [] };
+    const candidates = await Order.find({
+        providerCode: { $in: ['fazer_cards', 'fazer-cards', 'fazercards'] },
+        status: { $in: [ORDER_STATUS.PROCESSING, ORDER_STATUS.MANUAL_REVIEW] },
+        fazerCardsPlacementState: { $in: ['CLAIMED', 'SUBMITTED', 'AMBIGUOUS'] },
+        $or: [{ fazerCardsRecoveryLeaseUntil: null }, { fazerCardsRecoveryLeaseUntil: { $lte: now } }],
+    }).sort({ fazerCardsPlacementClaimedAt: 1, createdAt: 1 }).limit(safeLimit).lean();
+    stats.scanned = candidates.length;
+    for (const candidate of candidates) {
+        const token = new mongoose.Types.ObjectId().toString();
+        const leased = await Order.findOneAndUpdate({
+            _id: candidate._id,
+            status: { $in: [ORDER_STATUS.PROCESSING, ORDER_STATUS.MANUAL_REVIEW] },
+            fazerCardsPlacementState: { $in: ['CLAIMED', 'SUBMITTED', 'AMBIGUOUS'] },
+            $or: [{ fazerCardsRecoveryLeaseUntil: null }, { fazerCardsRecoveryLeaseUntil: { $lte: now } }],
+        }, { $set: { fazerCardsRecoveryLeaseToken: token, fazerCardsRecoveryLeaseUntil: new Date(now.getTime() + safeLeaseMs), fazerCardsRecoveryLastAt: now }, $inc: { fazerCardsRecoveryAttempts: 1 } }, { new: true });
+        if (!leased) { stats.skipped += 1; continue; }
+        stats.leased += 1;
+        try {
+            // A providerOrderId gives the ordinary poller a correlation path;
+            // do not change its state here. Without it we require review.
+            if (leased.providerOrderId) { stats.skipped += 1; continue; }
+            const updated = await Order.findOneAndUpdate({ _id: leased._id, fazerCardsRecoveryLeaseToken: token }, {
+                $set: {
+                    status: ORDER_STATUS.MANUAL_REVIEW,
+                    fazerCardsPlacementState: 'AMBIGUOUS',
+                    fazerCardsRecoveryReason: 'FAZERCARDS_PLACEMENT_CORRELATION_REQUIRED',
+                    providerErrorCode: 'FAZERCARDS_PLACEMENT_CORRELATION_REQUIRED',
+                    providerErrorMessage: 'FazerCards placement has no reliable provider order correlation; manual reconciliation is required.',
+                    rejectionReason: 'FazerCards placement outcome remains ambiguous; automatic retry and refund are blocked.',
+                    lastCheckedAt: new Date(),
+                },
+            }, { new: true });
+            if (updated) { stats.manualReview += 1; notifyOrderManualReview(updated, { reason: 'FAZERCARDS_PLACEMENT_CORRELATION_REQUIRED', source: 'fazercards_recovery' }); }
+        } catch (err) { stats.errors.push(`[${candidate._id}] ${err.message}`); }
+    }
+    return stats;
+};
+
 module.exports = {
     executeOrder,
     refundFailedOrder,
     processOrderStatusResult,
     pollProcessingOrders,
     reconcileFailedOrderRefunds,
+    recoverFazerCardsFinancialSafety,
 };

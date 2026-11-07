@@ -22,7 +22,8 @@
  */
 
 const cron = require('node-cron');
-const { pollProcessingOrders, reconcileFailedOrderRefunds } = require('../orders/orderFulfillment.service');
+const { pollProcessingOrders, reconcileFailedOrderRefunds, recoverFazerCardsFinancialSafety } = require('../orders/orderFulfillment.service');
+const config = require('../../config/config');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -63,8 +64,11 @@ const runOnce = async (providerOverride = null) => {
         // bounded repair pass. It only settles terminal FAILED orders and uses
         // the same transactional/ledger idempotency safeguards as live failures.
         const refundReconciliation = await reconcileFailedOrderRefunds({ limit: 100 });
+        const fazerCardsRecovery = config.providers.fazerCards.recoveryEnabled
+            ? await recoverFazerCardsFinancialSafety({ limit: config.providers.fazerCards.recoveryBatchSize, leaseMs: config.providers.fazerCards.recoveryLeaseMs })
+            : { disabled: true };
         const elapsed = Date.now() - startedAt;
-        const result = { ...stats, refundReconciliation };
+        const result = { ...stats, refundReconciliation, fazerCardsRecovery };
         console.log(`[FulfillmentJob] Poll completed in ${elapsed}ms:`, result);
         return result;
 

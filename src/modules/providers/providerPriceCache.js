@@ -36,7 +36,7 @@ const CACHE_TTL_MS = parseInt(process.env.PROVIDER_PRICE_CACHE_TTL_MS ?? String(
 // ─── Internal State ───────────────────────────────────────────────────────────
 
 /**
- * @type {Map<string, { prices: Map<string, number>, expiresAt: number }>}
+ * @type {Map<string, { prices: Map<string, string>, expiresAt: number }>}
  */
 const _cache = new Map();
 
@@ -60,15 +60,16 @@ const _pending = new Map();
  * @param {string}              providerId          - Provider document _id
  * @param {string}              externalProductId   - The provider's product/service ID
  * @param {BaseProviderAdapter} adapter             - Resolved provider adapter instance
- * @returns {Promise<number|null>}  rawPrice, or null if product not found in catalog
+ * @param {{forceRefresh?: boolean}} [options]      - bypass the TTL for a confirmation read
+ * @returns {Promise<string|null>}  rawPrice, or null if product not found in catalog
  */
-const getLivePrice = async (providerId, externalProductId, adapter) => {
+const getLivePrice = async (providerId, externalProductId, adapter, { forceRefresh = false } = {}) => {
     const key = String(providerId);
     const extId = String(externalProductId);
 
     // ── 1. Cache hit check ────────────────────────────────────────────────────
     const cached = _cache.get(key);
-    if (cached && cached.expiresAt > Date.now()) {
+    if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
         return cached.prices.get(extId) ?? null;
     }
 
@@ -118,7 +119,7 @@ const clearAll = () => {
 const _fetchAndCache = async (key, adapter) => {
     const dtos = await adapter.getProducts();
 
-    /** @type {Map<string, number>} */
+    /** @type {Map<string, string>} */
     const prices = new Map();
     for (const dto of dtos) {
         prices.set(String(dto.externalProductId), dto.rawPrice);

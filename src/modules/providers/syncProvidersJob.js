@@ -4,7 +4,7 @@
  * syncProvidersJob.js
  *
  * Background cron job that auto-syncs the provider product catalogue
- * every 6 hours (configurable).
+ * according to each Provider.syncInterval (default 60 minutes).
  *
  * This is SEPARATE from fulfillmentJob.js (which polls order statuses).
  *
@@ -22,7 +22,7 @@
  */
 
 const cron = require('node-cron');
-const { syncAllProviders } = require('./providerCatalog.service');
+const { syncDueProviders } = require('./providerCatalog.service');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -52,7 +52,7 @@ const runOnce = async (adapterOptions = {}) => {
     try {
         console.log('[SyncJob] Starting provider product sync…');
 
-        const results = await syncAllProviders(adapterOptions);
+        const results = await syncDueProviders(adapterOptions);
 
         const elapsed = Date.now() - startedAt;
         let successful = 0;
@@ -100,12 +100,13 @@ const runOnce = async (adapterOptions = {}) => {
  * start(schedule?, adapterOptions?)
  *
  * Schedule the sync job.
- * Default: every 6 hours, aligned to midnight UTC ("0 0,6,12,18 * * *").
+ * Default: every minute. Per-provider syncInterval determines whether a
+ * provider is due, so the scheduler does not need to wait for a coarse batch.
  *
- * @param {string} [schedule='0 0,6,12,18 * * *'] - cron expression
+ * @param {string} [schedule='* * * * *'] - cron expression
  * @param {Object} [adapterOptions]                - adapter override (tests only)
  */
-const start = (schedule = '0 0,6,12,18 * * *', adapterOptions = {}) => {
+const start = (schedule = '* * * * *', adapterOptions = {}) => {
     if (process.env.NODE_ENV === 'test') {
         console.log('[SyncJob] Skipped in test environment.');
         return;

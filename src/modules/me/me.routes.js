@@ -114,6 +114,9 @@ const createOrderValidation = [
     body('quantity')
         .optional()
         .isInt({ min: 1 }).withMessage('quantity must be a positive integer'),
+    body('quoteId')
+        .optional()
+        .isMongoId().withMessage('Invalid checkout quote'),
 ];
 
 const quoteOrderValidation = [

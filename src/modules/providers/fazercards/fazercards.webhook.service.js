@@ -19,6 +19,7 @@ const ACCEPTED_EVENTS = new Set([
     'order.status_changed',
     'order.completed',
     'order.failed',
+    'order.refund',
     'order.refunded',
     'manual_service.chat.message',
     'manual_service.chat.waiting_reply',
@@ -96,7 +97,7 @@ const parseJsonBody = (rawBody) => {
 const eventStatusFromName = (event) => {
     if (event === 'order.completed') return 'completed';
     if (event === 'order.failed') return 'failed';
-    if (event === 'order.refunded') return 'refunded';
+    if (event === 'order.refund' || event === 'order.refunded') return 'refund';
     if (event === 'order.created') return 'processing';
     return null;
 };
@@ -113,6 +114,7 @@ const WEBHOOK_TERMINAL_STATUS_VALUES = new Set([
     'cancelled',
     'canceled',
     'rejected',
+    'refund',
     'refunded',
 ]);
 

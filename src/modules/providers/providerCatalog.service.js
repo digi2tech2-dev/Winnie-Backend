@@ -21,6 +21,7 @@
 const {
     syncProviderProducts: _syncProviderProducts,
     syncAllProviders: _syncAllProviders,
+    syncDueProviders: _syncDueProviders,
     recalcProductPrices,
 } = require('./providerProductSync.service');
 
@@ -67,9 +68,11 @@ const syncProviderProducts = _syncProviderProducts;
  * @returns {Promise<Array<{ providerId, result?, error? }>>}
  */
 const syncAllProviders = _syncAllProviders;
+const syncDueProviders = _syncDueProviders;
 
 module.exports = {
     syncProviderProducts,
     syncAllProviders,
+    syncDueProviders,
     recalcProductPrices,
 };

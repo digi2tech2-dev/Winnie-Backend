@@ -75,7 +75,7 @@
 const { Router } = require('express');
 const authenticate = require('../../shared/middlewares/authenticate');
 const authorize = require('../../shared/middlewares/authorize');
-const { authorizeRoles, requirePermission, requireAnyPermission } = authorize;
+const { authorizeRoles, requirePermission, requireExplicitPermission, requireAnyPermission } = authorize;
 const catchAsync = require('../../shared/utils/catchAsync');
 const { sendSuccess, sendPaginated } = require('../../shared/utils/apiResponse');
 const { createUpload } = require('../../shared/middlewares/upload');
@@ -218,9 +218,9 @@ router.post('/providers/fazercards/orders/:orderId/manual/fail', authorizeRoles(
 router.post('/providers/fazercards/orders/:orderId/manual/note', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsManualNote), providersCtrl.noteFazerCardsManualOrder);
 router.post('/providers/fazercards/orders/:orderId/delivered-codes', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsManualDeliveredCode), providersCtrl.storeFazerCardsManualDeliveredCode);
 router.get('/providers/fazercards/code-delivery/products/:productId/readiness', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.getFazerCardsCodeDeliveryReadiness);
-router.post('/providers/fazercards/products/bulk-update-launch', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsBulkLaunch), providersCtrl.bulkUpdateFazerCardsLaunch);
-router.post('/providers/fazercards/products/publish-eligible', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsPublishEligibleLaunch), providersCtrl.publishEligibleFazerCardsProducts);
-router.post('/providers/fazercards/products/:productId/launch', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsProductLaunch), providersCtrl.updateFazerCardsProductLaunch);
+router.post('/providers/fazercards/products/bulk-update-launch', authorizeRoles('ADMIN'), requireExplicitPermission('suppliers.manage'), validateBody(schemas.fazerCardsBulkLaunch), providersCtrl.bulkUpdateFazerCardsLaunch);
+router.post('/providers/fazercards/products/publish-eligible', authorizeRoles('ADMIN'), requireExplicitPermission('suppliers.manage'), validateBody(schemas.fazerCardsPublishEligibleLaunch), providersCtrl.publishEligibleFazerCardsProducts);
+router.post('/providers/fazercards/products/:productId/launch', authorizeRoles('ADMIN'), requireExplicitPermission('suppliers.manage'), validateBody(schemas.fazerCardsProductLaunch), providersCtrl.updateFazerCardsProductLaunch);
 router.get('/providers/fazercards/products/:productId/readiness', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.getFazerCardsProductReadiness);
 router.post('/providers/fazercards/products/:productId/dry-run', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), validateBody(schemas.fazerCardsUnifiedDryRun), providersCtrl.dryRunFazerCardsProduct);
 router.post('/providers/fazercards/orders/:orderId/sync-status', authorizeRoles('ADMIN'), requirePermission('suppliers.manage'), providersCtrl.syncFazerCardsOrderStatus);

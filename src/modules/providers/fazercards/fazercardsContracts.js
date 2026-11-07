@@ -1,6 +1,7 @@
 'use strict';
 
 const { FULFILLMENT_MODES } = require('../providerProduct.model');
+const { NORMALIZED_STATUSES, classifyFazerCardsStatus } = require('./fazercardsStatus.classifier');
 
 const SUPPORT_STAGES = Object.freeze({
     CATALOG_ONLY: 'CATALOG_ONLY',
@@ -744,17 +745,15 @@ const buildUnconfirmedPayload = ({ contract } = {}) => buildContractError(
 );
 
 const mapProviderStatus = (rawStatus) => {
-    const normalized = asString(rawStatus).toLowerCase();
-    if (['completed', 'complete', 'success', 'succeeded', 'done', 'fulfilled'].includes(normalized)) {
-        return { status: PARSED_STATUSES.COMPLETED, providerStatus: 'Completed', known: true, terminalFailure: false };
-    }
-    if (['processing', 'pending', 'in_progress', 'in progress', 'inprogress', 'created', 'accepted'].includes(normalized)) {
-        return { status: PARSED_STATUSES.PROCESSING, providerStatus: 'Pending', known: true, terminalFailure: false };
-    }
-    if (['failed', 'error', 'cancelled', 'canceled', 'rejected', 'refunded'].includes(normalized)) {
-        return { status: PARSED_STATUSES.FAILED, providerStatus: 'Cancelled', known: true, terminalFailure: true };
-    }
-    return { status: PARSED_STATUSES.MANUAL_REVIEW, providerStatus: rawStatus ? String(rawStatus) : 'Unknown', known: false, terminalFailure: false };
+    const classified = classifyFazerCardsStatus(rawStatus);
+    const status = classified.normalizedStatus === NORMALIZED_STATUSES.COMPLETED
+        ? PARSED_STATUSES.COMPLETED
+        : classified.normalizedStatus === NORMALIZED_STATUSES.PROCESSING
+            ? PARSED_STATUSES.PROCESSING
+            : classified.normalizedStatus === NORMALIZED_STATUSES.FAILED || classified.normalizedStatus === NORMALIZED_STATUSES.REFUNDED
+                ? PARSED_STATUSES.FAILED
+                : PARSED_STATUSES.MANUAL_REVIEW;
+    return { ...classified, status };
 };
 
 const extractOrderNode = (data = {}) => (
@@ -938,6 +937,8 @@ const parseProviderOrderResponse = (data = {}) => {
         status: !mapped.known || !providerOrderId ? PARSED_STATUSES.MANUAL_REVIEW : mapped.status,
         providerOrderId,
         providerStatus: mapped.providerStatus,
+        normalizedStatus: mapped.normalizedStatus,
+        outcome: mapped.outcome,
         knownStatus: mapped.known,
         terminalFailure: mapped.terminalFailure,
         manualReview: !mapped.known || !providerOrderId,

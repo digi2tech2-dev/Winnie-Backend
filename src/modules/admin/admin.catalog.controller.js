@@ -23,6 +23,7 @@ const providerService = require('../providers/provider.service');
 const ppService = require('../providers/providerProduct.service');
 const productService = require('../products/product.service');
 const { ProviderProduct } = require('../providers/providerProduct.model');
+const { PROVIDER_CODES } = require('../providers/provider.constants');
 const { createAuditLog } = require('../audit/audit.service');
 const {
     PRODUCT_ACTIONS,
@@ -739,8 +740,8 @@ const linkProductProvider = catchAsync(async (req, res) => {
     }
 
     const providerProduct = await ProviderProduct.findById(providerProductId)
-        .select('provider externalProductId rawName translatedName rawPrice rawPayload minQty maxQty isActive')
-        .populate('provider', 'name isActive');
+        .select('provider providerCode externalProductId rawName translatedName rawPrice rawPayload minQty maxQty isActive')
+        .populate('provider', 'name slug providerCode isActive');
 
     if (!providerProduct) throw new NotFoundError('ProviderProduct');
     if (String(providerProduct.provider?._id || providerProduct.provider) !== providerId) {
@@ -751,6 +752,18 @@ const linkProductProvider = catchAsync(async (req, res) => {
     }
     if (providerProduct.provider?.isActive === false) {
         throw new BusinessRuleError('The selected provider is inactive.', 'PROVIDER_INACTIVE');
+    }
+    const selectedProviderCode = String(
+        providerProduct.providerCode
+        || providerProduct.provider?.providerCode
+        || providerProduct.provider?.slug
+        || ''
+    ).trim().toUpperCase();
+    if (selectedProviderCode === PROVIDER_CODES.FAZER_CARDS || selectedProviderCode === 'FAZERCARDS') {
+        throw new BusinessRuleError(
+            'FazerCards provider links must be imported and configured through FazerCards Launch Ops.',
+            'FAZERCARDS_PROVIDER_LINK_REQUIRES_LAUNCH_OPS'
+        );
     }
     if (providerProduct.isActive === false) {
         throw new BusinessRuleError('The selected provider product is inactive.', 'PROVIDER_PRODUCT_INACTIVE');
