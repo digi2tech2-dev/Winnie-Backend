@@ -47,6 +47,9 @@ require('./modules/admin/setting.model').seedDefaultSettings().catch(() => { });
 const app = express();
 const API_PREFIX = '/api';
 
+// The local reverse proxy is the only trusted hop before client IP rate limiting.
+app.set('trust proxy', 'loopback');
+
 // ── Security Middlewares ──────────────────────────────────────────────────────
 app.use(helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' },
