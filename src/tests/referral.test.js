@@ -10,7 +10,12 @@ const { register } = require('../modules/auth/auth.service');
 const { User } = require('../modules/users/user.model');
 const { WalletTransaction } = require('../modules/wallet/walletTransaction.model');
 const { ReferralRelationship, ReferralCommission } = require('../modules/referrals/referral.model');
-const { REFERRAL_COMMISSION_STATUS } = require('../modules/referrals/referral.constants');
+const {
+    REFERRAL_COMMISSION_STATUS,
+    REFERRAL_COMMISSION_PAYOUT_STATUS,
+    REFERRAL_PAYOUT_STATUS,
+    REFERRAL_SOURCE_TYPES,
+} = require('../modules/referrals/referral.constants');
 const { PAYMENT_GATEWAYS } = require('../modules/payments/payment.constants');
 
 const {
@@ -217,37 +222,77 @@ describe('Referral settings', () => {
 });
 
 describe('Referral commission processing', () => {
-    it('deposit approval for invited user credits inviter commission', async () => {
+    it('deposit approval creates a pending commission, then payout approval credits the inviter exactly once', async () => {
         const { admin, inviter, invited } = await setupActors({ percentage: 10 });
         const deposit = await createPendingDeposit(invited._id);
 
         await depositService.approveDeposit(deposit._id, admin._id);
 
         const freshInviter = await User.findById(inviter._id);
-        expect(freshInviter.walletBalance).toBe(50);
+        expect(freshInviter.walletBalance).toBe(0);
 
         const commission = await ReferralCommission.findOne({ inviterUserId: inviter._id });
-        expect(commission.status).toBe(REFERRAL_COMMISSION_STATUS.CREDITED);
+        expect(commission.status).toBe(REFERRAL_COMMISSION_STATUS.PENDING);
+        expect(commission.payoutStatus).toBe(REFERRAL_COMMISSION_PAYOUT_STATUS.AVAILABLE);
         expect(commission.commissionAmount).toBe(50);
-        expect(commission.walletTransactionId).not.toBeNull();
+        expect(commission.walletTransactionId).toBeNull();
 
-        const tx = await WalletTransaction.findById(commission.walletTransactionId);
-        expect(tx.semanticType).toBe('REFERRAL_COMMISSION');
-        expect(tx.sourceType).toBe('REFERRAL');
+        expect(await WalletTransaction.countDocuments({
+            userId: inviter._id,
+            semanticType: 'REFERRAL_COMMISSION_PAYOUT',
+        })).toBe(0);
+
+        const payout = await referralService.createReferralPayoutRequest(inviter._id, {
+            method: 'wallet_credit',
+            currency: 'USD',
+            amount: 50,
+        });
+        expect(payout.status).toBe(REFERRAL_PAYOUT_STATUS.PENDING);
+
+        const firstApproval = await referralService.approveReferralPayoutWalletCredit(payout.id, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+        const secondApproval = await referralService.approveReferralPayoutWalletCredit(payout.id, {
+            actorId: admin._id,
+            actorRole: 'ADMIN',
+        });
+
+        expect(firstApproval.alreadyProcessed).toBe(false);
+        expect(secondApproval.alreadyProcessed).toBe(true);
+        expect(firstApproval.payout.status).toBe(REFERRAL_PAYOUT_STATUS.PAID);
+        expect(secondApproval.payout.status).toBe(REFERRAL_PAYOUT_STATUS.PAID);
+
+        const paidInviter = await User.findById(inviter._id);
+        expect(paidInviter.walletBalance).toBe(50);
+        const paidCommission = await ReferralCommission.findById(commission._id);
+        expect(paidCommission.status).toBe(REFERRAL_COMMISSION_STATUS.PAID);
+        expect(paidCommission.payoutStatus).toBe(REFERRAL_COMMISSION_PAYOUT_STATUS.PAID);
+        expect(paidCommission.walletTransactionId).not.toBeNull();
+
+        const tx = await WalletTransaction.findById(paidCommission.walletTransactionId);
+        expect(tx.semanticType).toBe('REFERRAL_COMMISSION_PAYOUT');
+        expect(tx.sourceType).toBe('REFERRAL_PAYOUT');
         expect(tx.amount).toBe(50);
+        expect(await WalletTransaction.countDocuments({
+            userId: inviter._id,
+            semanticType: 'REFERRAL_COMMISSION_PAYOUT',
+        })).toBe(1);
     });
 
-    it('payment mock confirm for invited user credits inviter commission', async () => {
+    it('payment mock confirmation creates a pending commission without immediate wallet credit', async () => {
         const { inviter, invited } = await setupActors({ percentage: 10 });
         const payment = await createMockPayment(invited);
 
         await paymentService.confirmMockPayment(payment._id, { actor: invited });
 
         const freshInviter = await User.findById(inviter._id);
-        expect(freshInviter.walletBalance).toBe(5);
+        expect(freshInviter.walletBalance).toBe(0);
 
         const commission = await ReferralCommission.findOne({ inviterUserId: inviter._id });
-        expect(commission.sourceType).toBe('PAYMENT');
+        expect(commission.status).toBe(REFERRAL_COMMISSION_STATUS.PENDING);
+        expect(commission.payoutStatus).toBe(REFERRAL_COMMISSION_PAYOUT_STATUS.AVAILABLE);
+        expect(commission.sourceType).toBe(REFERRAL_SOURCE_TYPES.PAYMENT);
         expect(commission.sourceSemanticType).toBe('CARD_PAYMENT_SUCCESS');
         expect(commission.commissionAmount).toBe(5);
     });
@@ -278,24 +323,23 @@ describe('Referral commission processing', () => {
         expect(await ReferralCommission.countDocuments()).toBe(0);
     });
 
-    it('percentage 0 creates no referral wallet credit', async () => {
+    it('percentage 0 creates neither a referral commission nor a payout wallet credit', async () => {
         const { admin, inviter, invited } = await setupActors({ percentage: 0 });
         const deposit = await createPendingDeposit(invited._id);
 
         await depositService.approveDeposit(deposit._id, admin._id);
 
-        const txCount = await WalletTransaction.countDocuments({
+        const payoutTransactionCount = await WalletTransaction.countDocuments({
             userId: inviter._id,
-            semanticType: 'REFERRAL_COMMISSION',
+            semanticType: 'REFERRAL_COMMISSION_PAYOUT',
         });
-        const commission = await ReferralCommission.findOne({ inviterUserId: inviter._id });
 
-        expect(txCount).toBe(0);
-        expect(commission.status).toBe(REFERRAL_COMMISSION_STATUS.SKIPPED);
-        expect(commission.metadata.skipReason).toBe('COMMISSION_PERCENTAGE_ZERO');
+        expect((await User.findById(inviter._id)).walletBalance).toBe(0);
+        expect(payoutTransactionCount).toBe(0);
+        expect(await ReferralCommission.findOne({ inviterUserId: inviter._id })).toBeNull();
     });
 
-    it('disabled setting creates no referral wallet credit', async () => {
+    it('disabled setting creates neither a referral commission nor a payout wallet credit', async () => {
         const { admin, inviter, invited } = await setupActors({ percentage: 10 });
         await referralService.updateReferralSettings(
             { enabled: false },
@@ -305,18 +349,17 @@ describe('Referral commission processing', () => {
 
         await depositService.approveDeposit(deposit._id, admin._id);
 
-        const txCount = await WalletTransaction.countDocuments({
+        const payoutTransactionCount = await WalletTransaction.countDocuments({
             userId: inviter._id,
-            semanticType: 'REFERRAL_COMMISSION',
+            semanticType: 'REFERRAL_COMMISSION_PAYOUT',
         });
-        const commission = await ReferralCommission.findOne({ inviterUserId: inviter._id });
 
-        expect(txCount).toBe(0);
-        expect(commission.status).toBe(REFERRAL_COMMISSION_STATUS.SKIPPED);
-        expect(commission.metadata.skipReason).toBe('REFERRALS_DISABLED');
+        expect((await User.findById(inviter._id)).walletBalance).toBe(0);
+        expect(payoutTransactionCount).toBe(0);
+        expect(await ReferralCommission.findOne({ inviterUserId: inviter._id })).toBeNull();
     });
 
-    it('duplicate processing does not double-credit inviter', async () => {
+    it('duplicate source-credit processing creates one pending commission and no immediate wallet credit', async () => {
         const { admin, inviter, invited } = await setupActors({ percentage: 10 });
         const deposit = await createPendingDeposit(invited._id);
         await depositService.approveDeposit(deposit._id, admin._id);
@@ -330,9 +373,11 @@ describe('Referral commission processing', () => {
         await referralService.processWalletCredit(sourceTx);
 
         const freshInviter = await User.findById(inviter._id);
-        expect(freshInviter.walletBalance).toBe(50);
+        expect(freshInviter.walletBalance).toBe(0);
         expect(await ReferralCommission.countDocuments({ sourceWalletTransactionId: sourceTx._id })).toBe(1);
-        expect(await WalletTransaction.countDocuments({ userId: inviter._id, semanticType: 'REFERRAL_COMMISSION' })).toBe(1);
+        expect((await ReferralCommission.findOne({ sourceWalletTransactionId: sourceTx._id })).status)
+            .toBe(REFERRAL_COMMISSION_STATUS.PENDING);
+        expect(await WalletTransaction.countDocuments({ userId: inviter._id, semanticType: 'REFERRAL_COMMISSION_PAYOUT' })).toBe(0);
     });
 });
 
