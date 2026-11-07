@@ -359,13 +359,10 @@ const _performSync = async (provider, adapterOptions) => {
         }
     }
 
-    // Rebuild seenExternalIds from only the successfully processed DTOs
-    // (failed upserts should not contribute to the "seen" set, which could
-    // incorrectly deactivate products that simply had a transient error).
-    //
-    // Re-populate from settlements so we only mark as "seen" what we actually wrote.
-    // (seenExternalIds was already populated in the task closures above, but those
-    // ran eagerly regardless of success — reset and rebuild from fulfilled only)
+    // Rebuild seenExternalIds from only the successfully processed DTOs.
+    // A partial write is not an authoritative catalog observation: below, any
+    // upsert error suppresses deactivation entirely so a transient DB failure
+    // cannot make a previously valid offer disappear.
     seenExternalIds.clear();
     for (let i = 0; i < settlements.length; i++) {
         if (settlements[i].status === 'fulfilled') {
@@ -377,10 +374,11 @@ const _performSync = async (provider, adapterOptions) => {
     //
     // Products previously in DB but NOT returned by the provider are considered
     // unavailable → soft-delete (isActive = false).
-    // Only run when the response is non-empty; an empty response might indicate
-    // a transient provider outage, not a genuine "no products" state.
+    // Only run when the response is non-empty and every upsert succeeded. An
+    // empty response, a provider failure, or an individual write failure is
+    // not an authoritative snapshot and must never deactivate existing offers.
     //
-    if (dtos.length > 0) {
+    if (dtos.length > 0 && errors.length === 0) {
         try {
             const deactivateResult = await ProviderProduct.updateMany(
                 {

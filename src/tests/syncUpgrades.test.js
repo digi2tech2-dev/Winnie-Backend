@@ -322,6 +322,29 @@ describe('[3] Partial failure handling', () => {
         expect(rejected).toHaveLength(2);
         expect(fulfilled.map((r) => r.value).sort()).toEqual(['a', 'c', 'e']);
     });
+
+    it('does not deactivate an existing offer when one catalog upsert fails', async () => {
+        const provider = await makeProvider();
+        const products = makeProducts(2);
+        await syncProviderProducts(provider._id, { products });
+
+        const originalFindOneAndUpdate = ProviderProduct.findOneAndUpdate;
+        const spy = jest.spyOn(ProviderProduct, 'findOneAndUpdate').mockImplementation((filter, ...args) => {
+            if (filter.externalProductId === 'P-0002') {
+                return Promise.reject(new Error('simulated transient write failure'));
+            }
+            return originalFindOneAndUpdate.call(ProviderProduct, filter, ...args);
+        });
+
+        try {
+            const result = await syncProviderProducts(provider._id, { products });
+            expect(result.errors).toHaveLength(1);
+            expect(result.deactivated).toBe(0);
+            expect((await ProviderProduct.findOne({ provider: provider._id, externalProductId: 'P-0002' })).isActive).toBe(true);
+        } finally {
+            spy.mockRestore();
+        }
+    });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

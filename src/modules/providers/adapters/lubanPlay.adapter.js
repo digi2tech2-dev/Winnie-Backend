@@ -5,6 +5,10 @@ const { BaseProviderAdapter } = require('./base.adapter');
 const { redactSecretText } = require('../../../shared/utils/secretEncryption');
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+// The documented /products endpoint returns the complete catalog in one
+// response. Sandbox observation shows a legitimate response can exceed the
+// normal order/read timeout, so only that catalog request gets this allowance.
+const CATALOG_PRODUCTS_TIMEOUT_MS = 120_000;
 const GIFT_CARD_MAX_QTY = 50;
 const TOPUP_MAX_QTY = 20;
 const DEFINITIVE_CREATE_ORDER_ERROR_CODES = new Set([
@@ -113,13 +117,16 @@ class LubanPlayAdapter extends BaseProviderAdapter {
         return error;
     }
 
-    async _post(path, body = {}) {
+    async _post(path, body = {}, requestConfig = null) {
         const form = new URLSearchParams();
         for (const [key, value] of Object.entries(body)) {
             if (value !== undefined && value !== null && value !== '') form.append(key, String(value));
         }
         try {
-            const { data } = await this._client.post(path, form.toString());
+            const response = requestConfig
+                ? await this._client.post(path, form.toString(), requestConfig)
+                : await this._client.post(path, form.toString());
+            const { data } = response;
             if (data?.success !== true) throw this._providerError(data);
             return data;
         } catch (error) {
@@ -186,7 +193,7 @@ class LubanPlayAdapter extends BaseProviderAdapter {
 
     async getProducts() {
         const [giftPayload, gamesPayload] = await Promise.all([
-            this._post('/products'),
+            this._post('/products', {}, { timeout: CATALOG_PRODUCTS_TIMEOUT_MS }),
             this._post('/topupProducts'),
         ]);
         if (!Array.isArray(giftPayload.data)) {
@@ -196,21 +203,33 @@ class LubanPlayAdapter extends BaseProviderAdapter {
             throw new Error('[LubanPlay] /topupProducts returned an invalid catalog envelope');
         }
         const giftCards = giftPayload.data.filter((item) => item?.type === 'giftcard');
+        const giftProductIds = new Set();
         for (const giftCard of giftCards) {
-            if (!text(giftCard?.product_id)) {
+            const productId = text(giftCard?.product_id);
+            if (!productId) {
                 throw new Error('[LubanPlay] /products contained a gift card without product_id');
             }
+            if (giftProductIds.has(productId)) {
+                throw new Error(`[LubanPlay] /products contained duplicate gift-card product_id ${productId}`);
+            }
+            giftProductIds.add(productId);
         }
         const games = gamesPayload.data;
+        const gameIds = new Set();
         const packagePayloads = [];
         for (let index = 0; index < games.length; index += 1) {
             if (index > 0 && this._packageRequestDelayMs > 0) {
                 await new Promise((resolve) => setTimeout(resolve, this._packageRequestDelayMs));
             }
             const game = games[index];
-            if (!text(game?.game_id)) {
+            const gameId = text(game?.game_id);
+            if (!gameId) {
                 throw new Error('[LubanPlay] /topupProducts contained a game without game_id');
             }
+            if (gameIds.has(gameId)) {
+                throw new Error(`[LubanPlay] /topupProducts contained duplicate game_id ${gameId}`);
+            }
+            gameIds.add(gameId);
             packagePayloads.push({ game, payload: await this._post('/topupPackages', { game_id: game.game_id }) });
         }
         const topups = packagePayloads.flatMap(({ game, payload }) => {
@@ -221,8 +240,16 @@ class LubanPlayAdapter extends BaseProviderAdapter {
             if (data.game_id !== undefined && text(data.game_id) !== text(game.game_id)) {
                 throw new Error(`[LubanPlay] /topupPackages returned a mismatched game_id for game ${text(game.game_id)}`);
             }
-            if (data.packages.some((item) => !text(item?.package_id))) {
-                throw new Error(`[LubanPlay] /topupPackages contained a package without package_id for game ${text(game.game_id)}`);
+            const packageIds = new Set();
+            for (const packageItem of data.packages) {
+                const packageId = text(packageItem?.package_id);
+                if (!packageId) {
+                    throw new Error(`[LubanPlay] /topupPackages contained a package without package_id for game ${text(game.game_id)}`);
+                }
+                if (packageIds.has(packageId)) {
+                    throw new Error(`[LubanPlay] /topupPackages contained duplicate package_id ${packageId} for game ${text(game.game_id)}`);
+                }
+                packageIds.add(packageId);
             }
             const effectiveGame = { ...game, ...data };
             return data.packages.map((item) => this._topupDto(effectiveGame, item));

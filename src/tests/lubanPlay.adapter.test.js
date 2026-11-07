@@ -50,7 +50,33 @@ describe('LubanPlayAdapter', () => {
             expect.objectContaining({ externalProductId: 'LUBAN_TOPUP:12:302', currency: 'EUR', isActive: false }),
         ]));
         expect(products.find((item) => item.externalProductId === 'LUBAN_GIFTCARD:gift-usd').rawPayload.sku_id).toBe('info-only');
-        expect(client.post).toHaveBeenCalledWith('/products', '');
+        expect(client.post).toHaveBeenCalledWith('/products', '', { timeout: 120000 });
+    });
+
+    it('maps a large complete gift-card response with the catalog-only timeout', async () => {
+        const largeCatalog = Array.from({ length: 11_916 }, (_, index) => ({
+            type: 'giftcard',
+            product_id: `gift-${index + 1}`,
+            name: `Gift ${index + 1}`,
+            face_value_min: '10.00',
+            face_value_max: '10',
+            amount_required: false,
+            currency: 'USD',
+            price: '9.500000',
+            status: 'available',
+        }));
+        const { adapter, client } = makeAdapter((path) => {
+            if (path === '/products') return Promise.resolve(response(largeCatalog));
+            if (path === '/topupProducts') return Promise.resolve(response([]));
+            throw new Error(`unexpected ${path}`);
+        });
+
+        const products = await adapter.getProducts();
+
+        expect(products).toHaveLength(11_916);
+        expect(products[0]).toMatchObject({ externalProductId: 'LUBAN_GIFTCARD:gift-1', isActive: true });
+        expect(products.at(-1)).toMatchObject({ externalProductId: 'LUBAN_GIFTCARD:gift-11916', isActive: true });
+        expect(client.post).toHaveBeenCalledWith('/products', '', { timeout: 120000 });
     });
 
     it('uses documented form fields and never sends an amount for fixed-price gift cards', async () => {
@@ -151,5 +177,30 @@ describe('LubanPlayAdapter', () => {
             throw new Error(`unexpected ${path}`);
         });
         await expect(adapter.getProducts()).rejects.toThrow(/without product_id/);
+    });
+
+    it('rejects duplicate ordering identifiers before returning a catalog snapshot', async () => {
+        const { adapter } = makeAdapter((path) => {
+            if (path === '/products') return Promise.resolve(response([
+                { type: 'giftcard', product_id: 'duplicate-gift', name: 'Gift one', face_value_min: '10', face_value_max: '10', amount_required: false, currency: 'USD', price: '9', status: 'available' },
+                { type: 'giftcard', product_id: 'duplicate-gift', name: 'Gift two', face_value_min: '20', face_value_max: '20', amount_required: false, currency: 'USD', price: '19', status: 'available' },
+            ]));
+            if (path === '/topupProducts') return Promise.resolve(response([]));
+            throw new Error(`unexpected ${path}`);
+        });
+        await expect(adapter.getProducts()).rejects.toThrow(/duplicate gift-card product_id/);
+    });
+
+    it('rejects duplicate package IDs within the same game before returning a catalog snapshot', async () => {
+        const { adapter } = makeAdapter((path) => {
+            if (path === '/products') return Promise.resolve(response([]));
+            if (path === '/topupProducts') return Promise.resolve(response([{ game_id: 12, name: 'Game', status: 'available' }]));
+            if (path === '/topupPackages') return Promise.resolve(response({ game_id: 12, packages: [
+                { package_id: 301, name: 'One', currency: 'USD', price: '1', status: 'available' },
+                { package_id: 301, name: 'Two', currency: 'USD', price: '2', status: 'available' },
+            ] }));
+            throw new Error(`unexpected ${path}`);
+        });
+        await expect(adapter.getProducts()).rejects.toThrow(/duplicate package_id/);
     });
 });
