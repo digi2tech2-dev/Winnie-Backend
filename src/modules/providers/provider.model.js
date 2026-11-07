@@ -20,6 +20,7 @@ const PROVIDER_AUTH_TYPES = Object.freeze({
 });
 const PROVIDER_ADAPTER_TYPES = Object.freeze({
     CANONICAL_B2B: 'canonical-b2b',
+    LUBAN_PLAY: 'luban-play',
 });
 
 /**

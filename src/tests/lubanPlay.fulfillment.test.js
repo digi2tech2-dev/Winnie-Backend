@@ -1,0 +1,239 @@
+'use strict';
+
+const { Order, ORDER_STATUS, ORDER_EXECUTION_TYPES } = require('../modules/orders/order.model');
+const { Provider } = require('../modules/providers/provider.model');
+const { ProviderProduct, FULFILLMENT_MODES } = require('../modules/providers/providerProduct.model');
+const { ProviderDeliveredCode } = require('../modules/providers/fazercards/providerDeliveredCode.model');
+const { WalletTransaction, LEDGER_TRANSACTION_TYPES } = require('../modules/wallet/walletTransaction.model');
+const { executeOrder, pollProcessingOrders } = require('../modules/orders/orderFulfillment.service');
+const {
+    connectTestDB,
+    disconnectTestDB,
+    clearCollections,
+    createCustomerWithGroup,
+    createProduct,
+} = require('./testHelpers');
+
+beforeAll(async () => connectTestDB());
+afterAll(async () => disconnectTestDB());
+beforeEach(async () => clearCollections());
+
+let sequence = 0;
+
+const makeChain = async ({ kind = 'giftcard' } = {}) => {
+    const id = ++sequence;
+    const provider = await Provider.create({
+        name: `Luban ${id}`,
+        slug: `luban-${id}`,
+        adapterType: 'luban-play',
+        providerCode: 'LUBAN_PLAY',
+        baseUrl: 'https://api.lubanplay.example/index.php?s=/api/openapi',
+        apiToken: 'test-token',
+        isActive: true,
+    });
+    const providerProduct = await ProviderProduct.create({
+        provider: provider._id,
+        externalProductId: kind === 'giftcard' ? `LUBAN_GIFTCARD:g-${id}` : `LUBAN_TOPUP:12:${id}`,
+        rawName: 'Luban test offer',
+        rawPrice: '10.000000',
+        minQty: 1,
+        maxQty: kind === 'giftcard' ? 50 : 20,
+        currency: 'USD',
+        isActive: true,
+        rawPayload: kind === 'giftcard'
+            ? { lubanKind: 'giftcard', product_id: `g-${id}` }
+            : { lubanKind: 'topup', game_id: 12, package_id: id },
+    });
+    const product = await createProduct({
+        name: `Luban product ${id}`,
+        executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        provider: provider._id,
+        providerProduct: providerProduct._id,
+        providerCode: 'LUBAN_PLAY',
+        familyKey: kind === 'giftcard' ? 'GIFTCARDS' : 'TOPUPS',
+        fulfillmentMode: kind === 'giftcard' ? FULFILLMENT_MODES.CODE_DELIVERY : FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
+        providerMapping: { player_id: 'player_id', server_id: 'server_id' },
+    });
+    return { provider, providerProduct, product };
+};
+
+const makeOrder = async (product, overrides = {}) => {
+    const { customer, group } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
+    return Order.create({
+        userId: customer._id,
+        orderNumber: 810000 + (++sequence),
+        productId: product._id,
+        quantity: 1,
+        unitPrice: '10',
+        totalPrice: '10',
+        basePriceSnapshot: '10',
+        markupPercentageSnapshot: 0,
+        finalPriceCharged: '10',
+        groupIdSnapshot: group._id,
+        walletDeducted: 10,
+        creditUsedAmount: '0',
+        status: ORDER_STATUS.PROCESSING,
+        executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        providerCode: 'luban-play',
+        familyKey: product.familyKey,
+        fulfillmentMode: product.fulfillmentMode,
+        customerInput: { values: { player_id: 'player-42', server_id: 'zone-2' }, fieldsSnapshot: [] },
+        ...overrides,
+    });
+};
+
+describe('Luban Play fulfillment safety', () => {
+    it('persists the namespaced stable reference before one placement and delivers encrypted gift-card secrets', async () => {
+        const { product } = await makeChain();
+        const order = await makeOrder(product);
+        const adapter = {
+            placeOrder: jest.fn().mockResolvedValue({
+                success: true,
+                providerOrderId: 'GC-1',
+                providerStatus: 'Delivered',
+                deliveryCodes: [{ code: 'secret-code', pin: '1234', serial: 's-1', expirationDate: '2030-01-01' }],
+                rawResponse: { data: { order_id: 'GC-1', status: 'delivered', codes: '[REDACTED]' } },
+            }),
+            checkOrderByReference: jest.fn(),
+            checkOrders: jest.fn(),
+        };
+
+        const result = await executeOrder(order._id, adapter);
+        expect(adapter.placeOrder).toHaveBeenCalledTimes(1);
+        expect(adapter.placeOrder.mock.calls[0][0]).toMatchObject({
+            lubanClientReference: `winnie-lp-${order._id}`,
+            params: { player_id: 'player-42', server_id: 'zone-2' },
+        });
+        expect(result.order.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(result.order.providerIdempotencyKey).toBe(`provider:luban-play:${order._id}`);
+
+        const delivered = await ProviderDeliveredCode.findOne({ order: order._id }).select('+codeEncrypted +pinEncrypted +serialEncrypted');
+        expect(delivered.codeEncrypted).not.toContain('secret-code');
+        expect(delivered.getSecretValue('codeEncrypted')).toBe('secret-code');
+        expect(delivered.getSecretValue('pinEncrypted')).toBe('1234');
+    });
+
+    it('never dispatches a concurrent duplicate placement', async () => {
+        const { product } = await makeChain({ kind: 'topup' });
+        const order = await makeOrder(product);
+        let release;
+        const placement = new Promise((resolve) => { release = resolve; });
+        const adapter = {
+            placeOrder: jest.fn().mockReturnValue(placement),
+            checkOrderByReference: jest.fn().mockResolvedValue({ found: false }),
+            checkOrders: jest.fn(),
+        };
+
+        const first = executeOrder(order._id, adapter);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        const second = executeOrder(order._id, adapter);
+        release({ success: true, providerOrderId: 'TP-1', providerStatus: 'Pending', rawResponse: { data: { order_id: 'TP-1' } } });
+        await Promise.all([first, second]);
+        expect(adapter.placeOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it('reconciles a timeout-like unknown outcome by client_reference without a replacement placement or refund', async () => {
+        const { product } = await makeChain({ kind: 'topup' });
+        const order = await makeOrder(product);
+        const adapter = {
+            placeOrder: jest.fn().mockResolvedValue({ success: false, manualReview: true, providerOrderId: null, providerStatus: 'Unknown', rawResponse: { transport: 'timeout' } }),
+            checkOrderByReference: jest.fn().mockResolvedValue({ found: true, providerOrderId: 'TP-2', providerStatus: 'Pending', rawResponse: { data: { order_id: 'TP-2', status: 'processing' } } }),
+            checkOrders: jest.fn(),
+        };
+
+        const result = await executeOrder(order._id, adapter);
+        expect(adapter.placeOrder).toHaveBeenCalledTimes(1);
+        expect(adapter.checkOrderByReference).toHaveBeenCalledWith(`winnie-lp-${order._id}`, 'topup');
+        expect(result.order.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(result.order.providerOrderId).toBe('TP-2');
+        expect(result.order.refunded).toBe(false);
+    });
+
+    it('uses the existing exactly-once refund path only for a confirmed Luban terminal failure', async () => {
+        const { product } = await makeChain({ kind: 'topup' });
+        const order = await makeOrder(product);
+        const adapter = {
+            placeOrder: jest.fn().mockResolvedValue({ success: false, providerOrderId: null, providerStatus: 'Failed', errorMessage: 'documented validation rejection', rawResponse: { code: 'INVALID_ARGUMENT' } }),
+            checkOrderByReference: jest.fn(),
+            checkOrders: jest.fn(),
+        };
+        const result = await executeOrder(order._id, adapter);
+        expect(result.order.status).toBe(ORDER_STATUS.FAILED);
+        expect(result.order.refunded).toBe(true);
+        expect(adapter.checkOrderByReference).not.toHaveBeenCalled();
+    });
+
+    it('polls delivered codes before completing', async () => {
+        const { product } = await makeChain();
+        const order = await makeOrder(product, { providerOrderId: 'GC-POLL', providerStatus: 'Pending' });
+        const provider = {
+            checkOrders: jest.fn().mockResolvedValue([{
+                providerOrderId: 'GC-POLL',
+                providerStatus: 'Delivered',
+                deliveryCodes: [{ code: 'poll-secret', pin: null, serial: 's-2' }],
+                rawResponse: { data: { status: 'delivered', codes: '[REDACTED]' } },
+            }]),
+        };
+        const stats = await pollProcessingOrders(provider);
+        expect(stats.completed).toBe(1);
+        expect((await Order.findById(order._id)).status).toBe(ORDER_STATUS.COMPLETED);
+    });
+
+    it('keeps a delivered gift card in manual review when codes are missing', async () => {
+        const { product } = await makeChain();
+        const order = await makeOrder(product);
+        const adapter = {
+            placeOrder: jest.fn().mockResolvedValue({
+                success: true,
+                providerOrderId: 'GC-NO-CODES',
+                providerStatus: 'Delivered',
+                deliveryCodes: [],
+                rawResponse: { data: { order_id: 'GC-NO-CODES', status: 'delivered' } },
+            }),
+            checkOrderByReference: jest.fn(),
+            checkOrders: jest.fn(),
+        };
+        const result = await executeOrder(order._id, adapter);
+        expect(result.order.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(result.order.refunded).toBe(false);
+        expect(await ProviderDeliveredCode.countDocuments({ order: order._id })).toBe(0);
+    });
+
+    it('refunds a reported refunded order exactly once', async () => {
+        const { product } = await makeChain({ kind: 'topup' });
+        const order = await makeOrder(product, { providerOrderId: 'TP-REFUND', providerStatus: 'Pending' });
+        const provider = {
+            checkOrders: jest.fn().mockResolvedValue([{
+                providerOrderId: 'TP-REFUND',
+                providerStatus: 'Refunded',
+                rawResponse: { data: { order_id: 'TP-REFUND', status: 'refunded' } },
+            }]),
+        };
+
+        await pollProcessingOrders(provider);
+        await pollProcessingOrders(provider);
+
+        expect((await Order.findById(order._id)).status).toBe(ORDER_STATUS.FAILED);
+        expect(await WalletTransaction.countDocuments({
+            reference: order._id,
+            type: 'REFUND',
+            semanticType: LEDGER_TRANSACTION_TYPES.ORDER_REFUND,
+        })).toBe(1);
+    });
+
+    it('keeps an unknown supplier status processing without a refund', async () => {
+        const { product } = await makeChain({ kind: 'topup' });
+        const order = await makeOrder(product, { providerOrderId: 'TP-UNKNOWN', providerStatus: 'Pending' });
+        const provider = {
+            checkOrders: jest.fn().mockResolvedValue([{
+                providerOrderId: 'TP-UNKNOWN',
+                providerStatus: 'unexpected_status',
+                rawResponse: { data: { order_id: 'TP-UNKNOWN', status: 'unexpected_status' } },
+            }]),
+        };
+        await pollProcessingOrders(provider);
+        const persisted = await Order.findById(order._id);
+        expect(persisted.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(persisted.refunded).toBe(false);
+    });
+});

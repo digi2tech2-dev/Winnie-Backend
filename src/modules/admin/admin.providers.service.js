@@ -84,6 +84,9 @@ const normalizeProviderPayload = (data = {}, { applyDefaults = false } = {}) => 
     if (!normalized.providerCode && String(data.code || data.slug || '').toLowerCase() === 'fazer-cards') {
         normalized.providerCode = PROVIDER_CODES.FAZER_CARDS;
     }
+    if (!normalized.providerCode && (adapterType === 'luban-play' || String(data.code || data.slug || '').toLowerCase() === 'luban-play')) {
+        normalized.providerCode = PROVIDER_CODES.LUBAN_PLAY;
+    }
 
     if (data.bearerToken !== undefined && data.apiToken === undefined) {
         normalized.apiToken = data.bearerToken;

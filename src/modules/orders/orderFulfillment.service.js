@@ -55,6 +55,7 @@ const {
     markFazerCardsPlacementOutcome,
 } = require('../providers/fazercards/fazercardsPlacement.service');
 const { storeDeliveredCodesForOrder, sanitizeProviderCodePayload } = require('../providers/fazercards/fazercardsDelivery.service');
+const { storeLubanDeliveredCodes } = require('../providers/lubanPlay/lubanPlayDelivery.service');
 const xenaService = require('../providers/xena/xena.service');
 const {
     XenaConnection,
@@ -281,9 +282,31 @@ const normalizeProviderCode = (value) => String(value || '').trim().toUpperCase(
 const normalizeProviderSlug = (value) => String(value || '').trim().toLowerCase();
 
 const CANONICAL_B2B_ADAPTER_TYPE = 'canonical-b2b';
+const LUBAN_PLAY_ADAPTER_TYPE = 'luban-play';
 
 const isCanonicalB2BProvider = (providerDoc = null) => (
     providerDoc?.adapterType === CANONICAL_B2B_ADAPTER_TYPE
+);
+
+const isLubanPlayProvider = (providerDoc = null, order = {}) => {
+    if (normalizeProviderSlug(providerDoc?.adapterType) === LUBAN_PLAY_ADAPTER_TYPE) return true;
+    const candidates = [
+        providerDoc?.providerCode,
+        providerDoc?.slug,
+        order?.providerCode,
+        order?.productId?.providerCode,
+    ].map(normalizeProviderCode).map((value) => value.replace(/[-\s]+/g, '_'));
+    return candidates.includes(PROVIDER_CODES.LUBAN_PLAY);
+};
+
+const buildLubanProviderIdempotencyKey = (order) => `provider:luban-play:${String(order._id)}`;
+const buildLubanClientReference = (order) => `winnie-lp-${String(order._id)}`;
+
+const hasLubanPlacementUncertainty = (order = {}) => (
+    order.status === ORDER_STATUS.PROCESSING
+    && !order.providerOrderId
+    && order.providerStatus === 'PLACEMENT_UNCERTAIN'
+    && order.providerIdempotencyKey === buildLubanProviderIdempotencyKey(order)
 );
 
 const buildCanonicalProviderIdempotencyKey = (order) => (
@@ -1403,6 +1426,95 @@ const recoverCanonicalUncertainPlacement = async (order, adapter, { countRetry =
     }
 };
 
+const getLubanOrderKind = (providerProduct = {}) => (
+    providerProduct?.rawPayload?.lubanKind === 'topup' ? 'topup' : 'giftcard'
+);
+
+const claimLubanPlacementAttempt = async (order, providerProduct) => {
+    const providerIdempotencyKey = buildLubanProviderIdempotencyKey(order);
+    const clientReference = buildLubanClientReference(order);
+    const claimed = await Order.findOneAndUpdate(
+        {
+            _id: order._id,
+            status: ORDER_STATUS.PROCESSING,
+            providerOrderId: { $in: [null, ''] },
+            providerIdempotencyKey: { $in: [null, ''] },
+        },
+        {
+            $set: {
+                providerIdempotencyKey,
+                providerStatus: 'PLACEMENT_UNCERTAIN',
+                providerRawResponse: {
+                    placement: 'attempt_claimed',
+                    clientReference,
+                    kind: getLubanOrderKind(providerProduct),
+                },
+                lastCheckedAt: new Date(),
+            },
+        },
+        { new: true }
+    );
+    return { claimed, current: claimed ? null : await Order.findById(order._id), clientReference, providerIdempotencyKey };
+};
+
+const deferLubanPlacementRecovery = async (order, { countRetry = false, recovery = 'lookup_failed' } = {}) => {
+    const retryCount = Number(order.retryCount || 0) + (countRetry ? 1 : 0);
+    const statusResult = {
+        providerOrderId: null,
+        providerStatus: 'PLACEMENT_UNCERTAIN',
+        providerIdempotencyKey: order.providerIdempotencyKey || buildLubanProviderIdempotencyKey(order),
+        rawResponse: {
+            placement: 'uncertain',
+            clientReference: buildLubanClientReference(order),
+            recovery,
+        },
+        errorMessage: null,
+    };
+    if (countRetry && retryCount >= MAX_RETRY_COUNT) {
+        const reviewOrder = await moveOrderToManualReview(order, { ...statusResult, retryCount }, {
+            reason: 'LUBAN_PLAY_PLACEMENT_UNRESOLVED',
+        });
+        return { action: 'manualReview', order: reviewOrder };
+    }
+    const deferred = await Order.findByIdAndUpdate(order._id, {
+        $set: {
+            status: ORDER_STATUS.PROCESSING,
+            ...buildProviderResultUpdate(statusResult),
+            retryCount,
+            lastCheckedAt: new Date(),
+        },
+    }, { new: true });
+    return { action: 'pending', order: deferred };
+};
+
+// Once the durable claim exists, this function is the only automated route:
+// query the supplier's documented client_reference; never send a replacement
+// create-order request and never issue a refund for an unknown outcome.
+const recoverLubanUncertainPlacement = async (order, adapter, providerProduct, { countRetry = false } = {}) => {
+    if (typeof adapter?.checkOrderByReference !== 'function') {
+        return deferLubanPlacementRecovery(order, { countRetry, recovery: 'unsupported' });
+    }
+    try {
+        const result = await adapter.checkOrderByReference(buildLubanClientReference(order), getLubanOrderKind(providerProduct));
+        if (!result?.found || !result.providerOrderId) {
+            return deferLubanPlacementRecovery(order, { countRetry, recovery: 'not_found' });
+        }
+        const recoveredOrder = await Order.findByIdAndUpdate(order._id, {
+            $set: {
+                ...buildProviderResultUpdate(result),
+                lastCheckedAt: new Date(),
+            },
+        }, { new: true });
+        if (!countRetry && toInternalStatus(result.providerStatus) === ORDER_STATUS.PROCESSING) {
+            return { action: 'pending', order: recoveredOrder };
+        }
+        const processed = await processOrderStatusResult(recoveredOrder, result);
+        return { ...processed, order: await Order.findById(order._id) };
+    } catch (_) {
+        return deferLubanPlacementRecovery(order, { countRetry, recovery: 'lookup_failed' });
+    }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EXECUTE ORDER (called immediately after createOrder commits)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1492,6 +1604,35 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             );
             return { order: reviewOrder, placed: false, refunded: false };
         }
+    }
+
+    // A Luban claim is the same financial boundary: it records the stable
+    // client_reference before any supplier POST.  On a re-entry, reconcile the
+    // documented reference rather than attempting placement again.
+    if (hasLubanPlacementUncertainty(order)) {
+        const claimedProvider = order.productId?.provider
+            ? await Provider.findById(order.productId.provider).catch(() => null)
+            : null;
+        const claimedProviderProduct = order.productId?.providerProduct
+            ? await ProviderProduct.findById(order.productId.providerProduct).select('rawPayload').lean().catch(() => null)
+            : null;
+        if (!claimedProvider || !claimedProvider.isActive || !isLubanPlayProvider(claimedProvider, order)) {
+            const reviewOrder = await moveOrderToManualReview(order, {
+                providerOrderId: null,
+                providerStatus: 'PLACEMENT_UNCERTAIN',
+                providerIdempotencyKey: order.providerIdempotencyKey,
+                providerErrorCode: 'LUBAN_PLAY_PLACEMENT_PROVIDER_UNAVAILABLE',
+                providerErrorMessage: 'Luban Play is unavailable for placement reconciliation.',
+                rawResponse: { placement: 'uncertain', clientReference: buildLubanClientReference(order) },
+            }, { reason: 'LUBAN_PLAY_PLACEMENT_PROVIDER_UNAVAILABLE' });
+            return { order: reviewOrder, placed: false, refunded: false };
+        }
+        const recovery = await recoverLubanUncertainPlacement(
+            order,
+            provider || getProviderAdapter(claimedProvider),
+            claimedProviderProduct
+        );
+        return { order: recovery.order || await Order.findById(orderId), placed: false, refunded: recovery.order?.refunded === true };
     }
 
     const actorId = auditContext?.actorId ?? order.userId;
@@ -1594,6 +1735,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     const isXenaOrder = isXenaFulfillmentOrder(order, resolvedProviderDoc);
     const isCanonicalOrder = isCanonicalB2BProvider(resolvedProviderDoc);
     const isFazerOrder = isFazerCardsOrder(order.productId, providerProduct);
+    const isLubanOrder = isLubanPlayProvider(resolvedProviderDoc, order);
 
     if (isXenaOrder) {
         const claim = await claimXenaFulfillmentAttempt({
@@ -1646,6 +1788,19 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 };
             }
             return { order: currentOrder, placed: false, refunded: currentOrder?.refunded === true };
+        }
+    }
+
+    let lubanPlacementClaim = null;
+    if (isLubanOrder) {
+        lubanPlacementClaim = await claimLubanPlacementAttempt(order, providerProduct);
+        if (!lubanPlacementClaim.claimed) {
+            const current = lubanPlacementClaim.current;
+            if (current && hasLubanPlacementUncertainty(current)) {
+                const recovery = await recoverLubanUncertainPlacement(current, resolvedProvider, providerProduct);
+                return { order: recovery.order || await Order.findById(orderId), placed: false, refunded: recovery.order?.refunded === true };
+            }
+            return { order: current || await Order.findById(orderId), placed: false, refunded: current?.refunded === true };
         }
     }
 
@@ -1726,6 +1881,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             ...mappedCustomerFields,
         };
         if (isXenaOrder) placementParams.xenaPlacementGate = activeXenaPlacementGate;
+        if (isLubanOrder) placementParams.lubanClientReference = lubanPlacementClaim.clientReference;
 
         result = isCanonicalOrder
             ? await resolvedProvider.placeOrder({
@@ -1852,7 +2008,30 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         });
     }
 
-    const logResult = isFazerCardsCodeDeliveryOrder(order.productId, providerProduct)
+    if (isLubanOrder && !result?.providerOrderId && (
+        result?.manualReview === true
+        || result?.success === true
+        || ['Unknown', 'Pending', 'PLACEMENT_UNCERTAIN'].includes(String(result?.providerStatus || ''))
+    )) {
+        // A timeout, disconnect, or incomplete accepted response is never a
+        // licence to repeat a create request.  The durable claim above is
+        // intentionally reconciled only through client_reference.
+        const claimed = await Order.findById(orderId);
+        const recovery = await recoverLubanUncertainPlacement(claimed, resolvedProvider, providerProduct);
+        return { order: recovery.order || await Order.findById(orderId), placed: false, refunded: false };
+    }
+
+    const logResult = isLubanOrder
+        ? {
+            success: result?.success,
+            manualReview: result?.manualReview,
+            providerStatus: result?.providerStatus,
+            providerOrderId: result?.providerOrderId || null,
+            providerRequestId: result?.providerRequestId || null,
+            providerErrorCode: result?.providerErrorCode || null,
+            deliveredCodeCount: Array.isArray(result?.deliveryCodes) ? result.deliveryCodes.length : 0,
+        }
+        : isFazerCardsCodeDeliveryOrder(order.productId, providerProduct)
         ? {
             success: result?.success,
             manualReview: result?.manualReview,
@@ -2065,6 +2244,26 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         return { order: await Order.findById(orderId), placed: true, refunded: false };
     }
 
+    // Gift-card completion is not durable until the delivered code/PIN payload
+    // has been encrypted in ProviderDeliveredCode.  Reuse the polling handler
+    // so immediate and delayed delivery have identical safety semantics.
+    if (isLubanOrder &&
+        String(order.productId?.fulfillmentMode || '').trim().toUpperCase() === FULFILLMENT_MODES.CODE_DELIVERY &&
+        String(result.providerStatus || '').trim().toLowerCase() === 'delivered') {
+        const preparedOrder = await Order.findByIdAndUpdate(orderId, {
+            $set: {
+                ...buildProviderResultUpdate(result),
+                lastCheckedAt: now,
+            },
+        }, { new: true });
+        const processed = await processOrderStatusResult(preparedOrder, result);
+        return {
+            order: await Order.findById(orderId),
+            placed: processed.action === 'completed',
+            refunded: false,
+        };
+    }
+
     // Case A: Completed immediately
     await Order.findByIdAndUpdate(orderId, {
         $set: {
@@ -2118,6 +2317,11 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             claimedOrder.providerIdempotencyKey === buildCanonicalProviderIdempotencyKey(claimedOrder) &&
             claimedOrder.providerStatus === 'PLACEMENT_UNCERTAIN') {
             console.error(`[Fulfillment] Canonical recovery crash for order ${orderId}; retaining placement uncertainty:`, fatalErr.message);
+            return { order: claimedOrder, placed: false, refunded: claimedOrder.refunded === true };
+        }
+
+        if (isLubanPlayProvider(claimedProvider, claimedOrder) && hasLubanPlacementUncertainty(claimedOrder)) {
+            console.error(`[Fulfillment] Luban Play recovery crash for order ${orderId}; retaining placement uncertainty:`, fatalErr.message);
             return { order: claimedOrder, placed: false, refunded: claimedOrder.refunded === true };
         }
 
@@ -2295,6 +2499,40 @@ const processOrderStatusResult = async (order, statusResult) => {
         }
 
         return { action: 'pending' };
+    }
+
+    const isLubanGiftCardDeliveryCompletion =
+        (
+            normalizeProviderCode(order.providerCode).replace(/[-\s]+/g, '_') === PROVIDER_CODES.LUBAN_PLAY
+            || String(order.providerIdempotencyKey || '').startsWith('provider:luban-play:')
+        )
+        && String(order.fulfillmentMode || '').trim().toUpperCase() === FULFILLMENT_MODES.CODE_DELIVERY
+        && String(providerStatus || '').trim().toLowerCase() === 'delivered';
+
+    if (isLubanGiftCardDeliveryCompletion) {
+        try {
+            const delivery = await storeLubanDeliveredCodes({
+                order,
+                deliveredCodes: statusResult.deliveryCodes || [],
+            });
+            if (delivery.deliveredCodeCount < Number(order.quantity || 1)) {
+                await moveOrderToManualReview(order, {
+                    ...statusResult,
+                    providerErrorCode: 'LUBAN_PLAY_DELIVERY_CODES_MISSING',
+                    providerErrorMessage: 'Luban Play reported delivery without all required encrypted code records.',
+                    rawResponse: statusResult.rawResponse,
+                }, { reason: 'LUBAN_PLAY_DELIVERY_CODES_MISSING' });
+                return { action: 'manualReview' };
+            }
+        } catch (error) {
+            await moveOrderToManualReview(order, {
+                ...statusResult,
+                providerErrorCode: 'LUBAN_PLAY_DELIVERY_STORAGE_FAILED',
+                providerErrorMessage: 'Luban Play delivered codes could not be stored securely.',
+                rawResponse: statusResult.rawResponse,
+            }, { reason: 'LUBAN_PLAY_DELIVERY_STORAGE_FAILED' });
+            return { action: 'manualReview' };
+        }
     }
 
     if (statusResult.manualReview === true) {
@@ -2658,6 +2896,59 @@ const pollCanonicalUncertainPlacements = async (providerOverride, stats) => {
     return processedIds;
 };
 
+const pollLubanUncertainPlacements = async (providerOverride, stats) => {
+    const candidates = await Order.find({
+        status: ORDER_STATUS.PROCESSING,
+        executionType: ORDER_EXECUTION_TYPES.AUTOMATIC,
+        providerStatus: 'PLACEMENT_UNCERTAIN',
+        providerOrderId: { $in: [null, ''] },
+        providerIdempotencyKey: /^provider:luban-play:/,
+    }).populate('productId', 'provider providerProduct').sort({ lastCheckedAt: 1 }).limit(200);
+
+    const processedIds = new Set();
+    for (const order of candidates) {
+        if (!hasLubanPlacementUncertainty(order)) continue;
+        try {
+            const providerDoc = order.productId?.provider
+                ? await Provider.findById(order.productId.provider)
+                : null;
+            if (!providerDoc?.isActive || !isLubanPlayProvider(providerDoc, order)) {
+                const reviewOrder = await moveOrderToManualReview(order, {
+                    providerOrderId: null,
+                    providerStatus: 'PLACEMENT_UNCERTAIN',
+                    providerIdempotencyKey: order.providerIdempotencyKey,
+                    providerErrorCode: 'LUBAN_PLAY_PLACEMENT_PROVIDER_UNAVAILABLE',
+                    providerErrorMessage: 'Luban Play is unavailable for placement reconciliation.',
+                    rawResponse: { placement: 'uncertain', clientReference: buildLubanClientReference(order) },
+                }, { reason: 'LUBAN_PLAY_PLACEMENT_PROVIDER_UNAVAILABLE' });
+                if (reviewOrder) stats.manualReview++;
+                stats.checked++;
+                processedIds.add(String(order._id));
+                continue;
+            }
+            const providerProduct = order.productId?.providerProduct
+                ? await ProviderProduct.findById(order.productId.providerProduct).select('rawPayload').lean()
+                : null;
+            const recovery = await recoverLubanUncertainPlacement(
+                order,
+                providerOverride || getProviderAdapter(providerDoc),
+                providerProduct,
+                { countRetry: true }
+            );
+            processedIds.add(String(order._id));
+            stats.checked++;
+            if (recovery.action === 'completed') stats.completed++;
+            else if (recovery.action === 'failed') stats.failed++;
+            else if (recovery.action === 'manualReview') stats.manualReview++;
+            else stats.pending++;
+        } catch (error) {
+            stats.errors.push(`[LUBAN_PLAY_UNCERTAIN:${order._id}] ${error.message}`);
+            stats.pending++;
+        }
+    }
+    return processedIds;
+};
+
 /**
  * pollProcessingOrders(providerOverride?)
  *
@@ -2684,6 +2975,7 @@ const pollProcessingOrders = async (providerOverride = null) => {
     const stats = { checked: 0, completed: 0, failed: 0, pending: 0, manualReview: 0, errors: [] };
 
     const canonicalReferencePolledOrderIds = await pollCanonicalUncertainPlacements(providerOverride, stats);
+    const lubanReferencePolledOrderIds = await pollLubanUncertainPlacements(providerOverride, stats);
 
     const xenaOrdersMissingProviderId = await Order.find({
         status: ORDER_STATUS.PROCESSING,
@@ -2731,8 +3023,12 @@ const pollProcessingOrders = async (providerOverride = null) => {
     };
     // A reference recovery that just found a provider ID already applied this
     // cycle's status; don't immediately count it again in the legacy batch.
-    if (canonicalReferencePolledOrderIds.size) {
-        normalPollingQuery._id = { $nin: [...canonicalReferencePolledOrderIds] };
+    const alreadyReferencePolled = new Set([
+        ...canonicalReferencePolledOrderIds,
+        ...lubanReferencePolledOrderIds,
+    ]);
+    if (alreadyReferencePolled.size) {
+        normalPollingQuery._id = { $nin: [...alreadyReferencePolled] };
     }
     const processingOrders = await Order.find(normalPollingQuery)
         .sort({ lastCheckedAt: 1 }).limit(200);  // oldest-checked first, cap 200/run

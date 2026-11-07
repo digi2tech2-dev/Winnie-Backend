@@ -33,7 +33,7 @@ const {
     PROVIDER_EXECUTION_MODES,
     computeFinalPrice,
 } = require('./product.model');
-const { ProviderProduct } = require('../providers/providerProduct.model');
+const { ProviderProduct, FULFILLMENT_MODES } = require('../providers/providerProduct.model');
 const { PROVIDER_CODES } = require('../providers/provider.constants');
 const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
 const {
@@ -590,6 +590,8 @@ const publishFromProviderProduct = async ({
     providerExecutionMode = PROVIDER_EXECUTION_MODES.MANUAL_FULFILLMENT,
     providerExecutionBlocked = false,
     providerBlockReason = null,
+    orderFields = [],
+    providerMapping = {},
     createdBy = null,            // accepted here for the createProductFromProvider alias
 }, adminUserId = null) => {
     // Resolve createdBy from either param location
@@ -652,6 +654,13 @@ const publishFromProviderProduct = async ({
         resolvedFinalPrice = resolvedBasePrice;
     }
 
+    const isLubanPlay = [
+        pp.provider?.adapterType,
+        pp.provider?.providerCode,
+        pp.provider?.slug,
+    ].map((value) => String(value || '').trim().toUpperCase().replace(/[-\s]+/g, '_'))
+        .includes(PROVIDER_CODES.LUBAN_PLAY);
+    const lubanKind = pp.rawPayload?.lubanKind;
     return Product.create({
         name,
         description,
@@ -676,8 +685,17 @@ const publishFromProviderProduct = async ({
         providerExecutionMode,
         providerExecutionBlocked,
         providerBlockReason,
+        orderFields,
+        dynamicFields: dynamicFieldsFromOrderFields(orderFields),
+        providerMapping,
         provider: pp.provider._id,
         providerProduct: pp._id,
+        currency: isLubanPlay ? 'USD' : null,
+        providerCode: isLubanPlay ? PROVIDER_CODES.LUBAN_PLAY : null,
+        familyKey: isLubanPlay && lubanKind === 'giftcard' ? 'GIFTCARDS' : isLubanPlay && lubanKind === 'topup' ? 'TOPUPS' : null,
+        fulfillmentMode: isLubanPlay && lubanKind === 'giftcard'
+            ? FULFILLMENT_MODES.CODE_DELIVERY
+            : isLubanPlay && lubanKind === 'topup' ? FULFILLMENT_MODES.TOPUP_WITH_FIELDS : null,
         createdBy: resolvedCreatedBy,
     });
 };

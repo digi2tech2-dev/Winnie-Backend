@@ -38,6 +38,7 @@ const { AlkasrVipAdapter } = require('./alkasr.adapter');
 const { XenaRechargeAdapter } = require('./xenaRecharge.adapter');
 const { FazerCardsAdapter } = require('../fazercards/fazercards.adapter');
 const { CanonicalB2BAdapter } = require('./canonicalB2B.adapter');
+const { LubanPlayAdapter } = require('./lubanPlay.adapter');
 
 // ─── Registry ────────────────────────────────────────────────────────────────
 //
@@ -81,12 +82,17 @@ const registry = new Map([
     ['fazercards', FazerCardsAdapter],
     ['fazer cards', FazerCardsAdapter],
 
+    ['luban-play', LubanPlayAdapter],
+    ['luban play', LubanPlayAdapter],
+    ['lubanplay', LubanPlayAdapter],
+
     // ── Default test / dev adapter ────────────────────────────────────────────
     ['mock', MockProviderAdapter],
 ]);
 
 const adapterTypeRegistry = new Map([
     ['canonical-b2b', CanonicalB2BAdapter],
+    ['luban-play', LubanPlayAdapter],
 ]);
 
 const unsupportedAdapterTypeError = (adapterType) => {

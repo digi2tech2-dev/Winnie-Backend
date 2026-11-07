@@ -27,7 +27,7 @@ const createProviderValidation = [
     body('adapterType')
         .optional({ nullable: true, checkFalsy: true })
         .isString().trim().toLowerCase()
-        .isIn(['canonical-b2b']).withMessage('adapterType is unsupported'),
+        .isIn(['canonical-b2b', 'luban-play']).withMessage('adapterType is unsupported'),
 
     body('baseUrl')
         .notEmpty().withMessage('baseUrl is required')
@@ -68,7 +68,7 @@ const updateProviderValidation = [
     body('adapterType')
         .optional({ nullable: true, checkFalsy: true })
         .isString().trim().toLowerCase()
-        .isIn(['canonical-b2b']).withMessage('adapterType is unsupported'),
+        .isIn(['canonical-b2b', 'luban-play']).withMessage('adapterType is unsupported'),
 
     body('baseUrl')
         .optional().isURL(),
