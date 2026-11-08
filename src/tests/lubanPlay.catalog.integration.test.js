@@ -5,6 +5,7 @@ const { ProviderProduct } = require('../modules/providers/providerProduct.model'
 const { Product } = require('../modules/products/product.model');
 const productService = require('../modules/products/product.service');
 const { syncProviderProducts } = require('../modules/providers/providerProductSync.service');
+const { ENDPOINTS } = require('../modules/providers/adapters/lubanPlay.adapter');
 const {
     connectTestDB,
     disconnectTestDB,
@@ -33,12 +34,12 @@ describe('Luban Play catalog integration', () => {
         const provider = await createProvider();
         const client = {
             post: jest.fn((path) => {
-                if (path === '/products') return Promise.resolve(envelope([
+                if (path === ENDPOINTS.products) return Promise.resolve(envelope([
                     { type: 'giftcard', product_id: 'fixed-usd', name: 'Fixed USD', face_value_min: '10', face_value_max: '10.00', amount_required: false, currency: 'USD', price: '9.500000', status: 'available' },
                     { type: 'giftcard', product_id: 'open-usd', name: 'Open USD', face_value_min: '10', face_value_max: '50', amount_required: true, currency: 'USD', price_min: '9', price_max: '49', status: 'available' },
                     { type: 'giftcard', product_id: 'fixed-eur', name: 'Fixed EUR', face_value_min: '10', face_value_max: '10', amount_required: false, currency: 'EUR', price: '9', status: 'available' },
                 ]));
-                if (path === '/topupProducts') return Promise.resolve(envelope([]));
+                if (path === ENDPOINTS.topupProducts) return Promise.resolve(envelope([]));
                 throw new Error(`unexpected ${path}`);
             }),
         };
@@ -88,11 +89,11 @@ describe('Luban Play catalog integration', () => {
         });
         const client = {
             post: jest.fn((path) => {
-                if (path === '/products') return Promise.resolve(envelope([
+                if (path === ENDPOINTS.products) return Promise.resolve(envelope([
                     { type: 'giftcard', product_id: 'fixed-usd', name: 'Fixed USD', face_value_min: '10', face_value_max: '10', amount_required: false, currency: 'USD', price: '9', status: 'available' },
                 ]));
-                if (path === '/topupProducts') return Promise.resolve(envelope([{ game_id: 12, name: 'Game', status: 'available' }]));
-                if (path === '/topupPackages') return Promise.resolve(envelope({ game_id: 12 }));
+                if (path === ENDPOINTS.topupProducts) return Promise.resolve(envelope([{ game_id: 12, name: 'Game', status: 'available' }]));
+                if (path === ENDPOINTS.topupPackages) return Promise.resolve(envelope({ game_id: 12 }));
                 throw new Error(`unexpected ${path}`);
             }),
         };

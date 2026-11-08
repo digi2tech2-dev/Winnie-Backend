@@ -5,6 +5,17 @@ const { BaseProviderAdapter } = require('./base.adapter');
 const { redactSecretText } = require('../../../shared/utils/secretEncryption');
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const OPEN_API_PATH = '/index.php?s=/api/openapi';
+const ENDPOINTS = Object.freeze({
+    balance: `${OPEN_API_PATH}/balance`,
+    products: `${OPEN_API_PATH}/products`,
+    createOrder: `${OPEN_API_PATH}/createOrder`,
+    queryOrder: `${OPEN_API_PATH}/queryOrder`,
+    topupProducts: `${OPEN_API_PATH}/topupProducts`,
+    topupPackages: `${OPEN_API_PATH}/topupPackages`,
+    createTopupOrder: `${OPEN_API_PATH}/createTopupOrder`,
+    queryTopupOrder: `${OPEN_API_PATH}/queryTopupOrder`,
+});
 // The documented /products endpoint returns the complete catalog in one
 // response. Sandbox observation shows a legitimate response can exceed the
 // normal order/read timeout, so only that catalog request gets this allowance.
@@ -27,7 +38,17 @@ const DEFINITIVE_CREATE_ORDER_ERROR_CODES = new Set([
 ]);
 
 const text = (value) => String(value ?? '').trim();
-const normaliseBaseUrl = (baseUrl) => text(baseUrl).replace(/\/+$/, '');
+const normaliseBaseUrl = (baseUrl) => {
+    const value = text(baseUrl);
+    if (!value) return '';
+    try {
+        // Older provider records used to include the legacy endpoint path.
+        // OpenAPI paths below are absolute to the documented API origin.
+        return new URL(value).origin;
+    } catch {
+        return value.replace(/\/+$/, '');
+    }
+};
 const isAvailable = (value) => text(value).toLowerCase() === 'available';
 const isUsd = (value) => text(value).toUpperCase() === 'USD';
 const numberLike = (value) => value !== null && value !== undefined && text(value) !== '' && Number.isFinite(Number(value));
@@ -80,6 +101,10 @@ const normaliseStatus = (value) => {
 };
 
 const getEnvelopeData = (payload) => payload?.data && typeof payload.data === 'object' ? payload.data : {};
+const isHtmlResponse = (data, headers = {}) => (
+    /(?:^|\b)(?:text\/html|application\/xhtml\+xml)(?:\b|;)/i.test(String(headers?.['content-type'] || headers?.['Content-Type'] || ''))
+    || (typeof data === 'string' && /<\s*!?doctype\b|<\s*html\b/i.test(data))
+);
 
 class LubanPlayAdapter extends BaseProviderAdapter {
     constructor(provider, options = {}) {
@@ -94,7 +119,7 @@ class LubanPlayAdapter extends BaseProviderAdapter {
             timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
             headers: {
                 Authorization: `Bearer ${token}`,
-                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Type': 'application/json',
                 Accept: 'application/json',
             },
         });
@@ -118,27 +143,41 @@ class LubanPlayAdapter extends BaseProviderAdapter {
     }
 
     async _post(path, body = {}, requestConfig = null) {
-        const form = new URLSearchParams();
-        for (const [key, value] of Object.entries(body)) {
-            if (value !== undefined && value !== null && value !== '') form.append(key, String(value));
-        }
+        const payload = Object.entries(body).reduce((request, [key, value]) => {
+            if (value !== undefined && value !== null && value !== '') request[key] = value;
+            return request;
+        }, {});
         try {
             const response = requestConfig
-                ? await this._client.post(path, form.toString(), requestConfig)
-                : await this._client.post(path, form.toString());
+                ? await this._client.post(path, payload, requestConfig)
+                : await this._client.post(path, payload);
             const { data } = response;
+            if (isHtmlResponse(data, response.headers) || !data || typeof data !== 'object' || Array.isArray(data)) {
+                const error = new Error('Luban Play returned an unexpected non-JSON response');
+                error.code = 'LUBAN_UNEXPECTED_RESPONSE';
+                error.statusCode = response.status ?? null;
+                error.definitive = false;
+                throw error;
+            }
             if (data?.success !== true) throw this._providerError(data);
             return data;
         } catch (error) {
             if (error.providerBody) throw error;
             const bodyData = error?.response?.data;
+            if (isHtmlResponse(bodyData, error?.response?.headers) || (typeof bodyData === 'string' && bodyData)) {
+                const responseError = new Error('Luban Play returned an unexpected non-JSON response');
+                responseError.code = 'LUBAN_UNEXPECTED_RESPONSE';
+                responseError.statusCode = error.response?.status ?? null;
+                responseError.definitive = false;
+                throw responseError;
+            }
             if (bodyData?.success === false) throw this._providerError(bodyData, error.response?.status ?? null);
             throw error;
         }
     }
 
     async getBalance() {
-        const payload = await this._post('/balance');
+        const payload = await this._post(ENDPOINTS.balance);
         const data = getEnvelopeData(payload);
         return { balances: data.balances || {}, environment: data.environment || null, requestId: payload.request_id || null };
     }
@@ -193,8 +232,8 @@ class LubanPlayAdapter extends BaseProviderAdapter {
 
     async getProducts() {
         const [giftPayload, gamesPayload] = await Promise.all([
-            this._post('/products', {}, { timeout: CATALOG_PRODUCTS_TIMEOUT_MS }),
-            this._post('/topupProducts'),
+            this._post(ENDPOINTS.products, {}, { timeout: CATALOG_PRODUCTS_TIMEOUT_MS }),
+            this._post(ENDPOINTS.topupProducts),
         ]);
         if (!Array.isArray(giftPayload.data)) {
             throw new Error('[LubanPlay] /products returned an invalid catalog envelope');
@@ -230,7 +269,7 @@ class LubanPlayAdapter extends BaseProviderAdapter {
                 throw new Error(`[LubanPlay] /topupProducts contained duplicate game_id ${gameId}`);
             }
             gameIds.add(gameId);
-            packagePayloads.push({ game, payload: await this._post('/topupPackages', { game_id: game.game_id }) });
+            packagePayloads.push({ game, payload: await this._post(ENDPOINTS.topupPackages, { game_id: game.game_id }) });
         }
         const topups = packagePayloads.flatMap(({ game, payload }) => {
             const data = getEnvelopeData(payload);
@@ -276,13 +315,13 @@ class LubanPlayAdapter extends BaseProviderAdapter {
             const { raw, reference, quantity, kind } = request;
             let payload;
             if (kind === 'giftcard') {
-                payload = await this._post('/createOrder', { product_id: raw.product_id, quantity, client_reference: reference });
+                payload = await this._post(ENDPOINTS.createOrder, { product_id: raw.product_id, quantity, client_reference: reference });
             } else if (kind === 'topup') {
                 const values = params.params || {};
                 const playerId = values.player_id ?? values.playerId;
                 const serverId = values.server_id ?? values.serverId;
                 if (!text(playerId)) throw new Error('[LubanPlay] player_id is required for game top-ups');
-                payload = await this._post('/createTopupOrder', {
+                payload = await this._post(ENDPOINTS.createTopupOrder, {
                     game_id: raw.game_id,
                     package_id: raw.package_id,
                     player_id: playerId,
@@ -320,7 +359,7 @@ class LubanPlayAdapter extends BaseProviderAdapter {
     async checkOrderByReference(referenceId, kind) {
         if (!text(referenceId)) throw new Error('[LubanPlay] client_reference is required');
         try {
-            const payload = await this._post(kind === 'topup' ? '/queryTopupOrder' : '/queryOrder', { client_reference: referenceId });
+            const payload = await this._post(kind === 'topup' ? ENDPOINTS.queryTopupOrder : ENDPOINTS.queryOrder, { client_reference: referenceId });
             return this._normaliseOrder(payload, { kind, reference: referenceId });
         } catch (error) {
             if (error?.statusCode === 404 || error?.providerCode === 'ORDER_NOT_FOUND') {
@@ -332,7 +371,7 @@ class LubanPlayAdapter extends BaseProviderAdapter {
 
     async checkOrder(orderId, options = {}) {
         const kind = options.kind || 'giftcard';
-        const payload = await this._post(kind === 'topup' ? '/queryTopupOrder' : '/queryOrder', { order_id: orderId });
+        const payload = await this._post(kind === 'topup' ? ENDPOINTS.queryTopupOrder : ENDPOINTS.queryOrder, { order_id: orderId });
         return this._normaliseOrder(payload, { kind });
     }
 
@@ -351,4 +390,4 @@ class LubanPlayAdapter extends BaseProviderAdapter {
     }
 }
 
-module.exports = { LubanPlayAdapter, GIFT_CARD_MAX_QTY, TOPUP_MAX_QTY };
+module.exports = { LubanPlayAdapter, GIFT_CARD_MAX_QTY, TOPUP_MAX_QTY, ENDPOINTS };
