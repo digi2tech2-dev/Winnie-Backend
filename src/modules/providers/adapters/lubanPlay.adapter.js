@@ -106,6 +106,37 @@ const isHtmlResponse = (data, headers = {}) => (
     || (typeof data === 'string' && /<\s*!?doctype\b|<\s*html\b/i.test(data))
 );
 
+const balanceResponseError = () => {
+    const error = new Error('Luban Play returned an invalid wallet balance response');
+    error.code = 'LUBAN_INVALID_BALANCE_RESPONSE';
+    return error;
+};
+
+const normaliseWalletBalance = (balances) => {
+    if (!balances || typeof balances !== 'object' || Array.isArray(balances)) {
+        throw balanceResponseError();
+    }
+
+    const entries = Object.entries(balances);
+    if (entries.length === 0) throw balanceResponseError();
+
+    const normalized = entries.map(([currency, value]) => {
+        const code = text(currency).toUpperCase();
+        // This adapter's established provider payload is a currency-to-amount
+        // map. Do not coerce labels, currency symbols, or malformed amounts.
+        if (!/^[A-Z]{3}$/.test(code) || !numberLike(value)) throw balanceResponseError();
+        return { currency: code, amount: Number(value) };
+    });
+
+    // Winnie currently publishes only USD Luban offers, so use that matching
+    // wallet when it exists. A sole non-USD wallet is still displayable; two
+    // non-USD wallets are ambiguous for the single-balance admin UI.
+    const usd = normalized.find((entry) => entry.currency === 'USD');
+    if (usd) return usd;
+    if (normalized.length === 1) return normalized[0];
+    throw balanceResponseError();
+};
+
 class LubanPlayAdapter extends BaseProviderAdapter {
     constructor(provider, options = {}) {
         super(provider, options);
@@ -179,7 +210,14 @@ class LubanPlayAdapter extends BaseProviderAdapter {
     async getBalance() {
         const payload = await this._post(ENDPOINTS.balance);
         const data = getEnvelopeData(payload);
-        return { balances: data.balances || {}, environment: data.environment || null, requestId: payload.request_id || null };
+        const normalized = normaliseWalletBalance(data.balances);
+        return {
+            balance: normalized.amount,
+            currency: normalized.currency,
+            balances: data.balances,
+            environment: data.environment || null,
+            requestId: payload.request_id || null,
+        };
     }
 
     _giftDto(item) {

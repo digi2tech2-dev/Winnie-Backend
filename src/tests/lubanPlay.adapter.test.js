@@ -150,17 +150,44 @@ describe('LubanPlayAdapter', () => {
         expect(client.post).toHaveBeenCalledTimes(2);
     });
 
-    it('uses the documented balance path and JSON request contract', async () => {
+    it('normalizes the documented wallet balance map for the admin balance contract', async () => {
         const { adapter, client } = makeAdapter((path, body) => {
             expect(path).toBe(ENDPOINTS.balance);
             expect(body).toEqual({});
             return Promise.resolve(response({ balances: { USD: '10.00' }, environment: 'production' }));
         });
 
-        await expect(adapter.getBalance()).resolves.toEqual({ balances: { USD: '10.00' }, environment: 'production', requestId: 'req-test' });
+        await expect(adapter.getBalance()).resolves.toEqual({
+            balance: 10,
+            currency: 'USD',
+            balances: { USD: '10.00' },
+            environment: 'production',
+            requestId: 'req-test',
+        });
         const configured = new LubanPlayAdapter(provider);
         expect(configured._client.defaults.headers.Authorization).toBe('Bearer test-luban-token');
         expect(configured._client.defaults.headers['Content-Type']).toBe('application/json');
+    });
+
+    it('preserves a zero wallet balance as a numeric amount', async () => {
+        const { adapter } = makeAdapter(() => Promise.resolve(response({ balances: { USD: '0' } })));
+
+        await expect(adapter.getBalance()).resolves.toMatchObject({
+            balance: 0,
+            currency: 'USD',
+        });
+    });
+
+    it.each([
+        {},
+        { balances: {} },
+        { balances: { USD: 'not-a-number' } },
+        { balances: { US: '10' } },
+        { balances: { EUR: '10', AED: '20' } },
+    ])('rejects missing, malformed, or ambiguous wallet balances', async (data) => {
+        const { adapter } = makeAdapter(() => Promise.resolve(response(data)));
+
+        await expect(adapter.getBalance()).rejects.toThrow('invalid wallet balance response');
     });
 
     it('rejects HTML responses without retaining the provider body', async () => {
