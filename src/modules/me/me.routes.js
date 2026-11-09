@@ -91,6 +91,7 @@ router.get(
     '/products',
     [
         query('search').optional().isString().trim(),
+        query('category').optional().isString().trim().isLength({ min: 1, max: 100 }),
         query('page').optional().isInt({ min: 1 }),
         query('limit').optional().isInt({ min: 1, max: 100 }),
     ],

@@ -96,4 +96,29 @@ describe('Backend search and pagination', () => {
         expect(payload.data[0].description).toContain('Alpha');
         expect(String(payload.data[0].userId)).toBe(owner._id.toString());
     });
+
+    it('ignores whitespace-only wallet transaction searches', async () => {
+        const { customer } = await createCustomerWithGroup({ walletBalance: 0, currency: 'USD' });
+        const base = {
+            currency: 'USD',
+            balanceBefore: 0,
+            balanceAfter: 0,
+            status: 'COMPLETED',
+            userId: customer._id,
+        };
+
+        await WalletTransaction.create([
+            { ...base, type: 'CREDIT', amount: 10, description: 'Alpha deposit' },
+            { ...base, type: 'DEBIT', amount: 5, description: 'Beta order' },
+        ]);
+
+        const { payload } = await callGetTransactions(customer, {
+            search: '   ',
+            page: '1',
+            limit: '10',
+        });
+
+        expect(payload.pagination.total).toBe(2);
+        expect(payload.data).toHaveLength(2);
+    });
 });
