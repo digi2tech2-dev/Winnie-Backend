@@ -33,6 +33,7 @@ const {
     normalizeSubmittedCustomFields,
 } = require('../payments/paymentCustomFields');
 const fazerCardsContracts = require('../providers/fazercards/fazercardsContracts');
+const mongoose = require('mongoose');
 
 const FAZER_CARDS_CUSTOMER_PRODUCT_FILTER = {
     $or: [
@@ -187,6 +188,60 @@ const exposeSafeCustomerProduct = (product) => {
 
 const parsePage = (v) => Math.max(1, parseInt(v, 10) || 1);
 const parseLimit = (v) => Math.min(100, Math.max(1, parseInt(v, 10) || 20));
+
+/**
+ * Product.category predates the Category relation and is stored as a string.
+ * Resolve a customer-facing category identifier to every legacy value that
+ * can represent that category before applying pagination.
+ */
+const resolveCustomerCategory = async (value) => {
+    const identifier = String(value || '').trim();
+    if (!identifier) return null;
+
+    const { Category } = require('../categories/category.model');
+    const exactIdentifier = new RegExp(`^${escapeRegex(identifier)}$`, 'i');
+    const categoryFilter = {
+        isActive: true,
+        $or: [
+            { slug: identifier.toLowerCase() },
+            { name: exactIdentifier },
+            { nameAr: exactIdentifier },
+        ],
+    };
+
+    if (mongoose.Types.ObjectId.isValid(identifier)) {
+        categoryFilter.$or.push({ _id: identifier });
+    }
+    if (/^\d+$/.test(identifier)) {
+        categoryFilter.$or.push({ compatCategoryId: Number(identifier) });
+    }
+
+    const category = await Category.findOne(categoryFilter)
+        .select('_id slug name nameAr compatCategoryId')
+        .lean();
+    return category || null;
+};
+
+const getCategoryProductValues = async (value) => {
+    const identifier = String(value || '').trim();
+    if (!identifier) return { category: null, values: [] };
+
+    const category = await resolveCustomerCategory(identifier);
+    if (!category) return { category: null, values: [] };
+
+    const values = [...new Set([
+        identifier,
+        category._id,
+        category.slug,
+        category.name,
+        category.nameAr,
+        category.compatCategoryId,
+    ]
+        .filter((item) => item !== null && item !== undefined && String(item).trim())
+        .map((item) => String(item).trim()))];
+
+    return { category, values };
+};
 
 // =============================================================================
 // PROFILE  —  GET /api/me
@@ -538,23 +593,32 @@ const getProducts = catchAsync(async (req, res) => {
         deletedAt: null,
         $and: [FAZER_CARDS_CUSTOMER_PRODUCT_FILTER],
     };
-    if (req.query.search) {
+    const rawSearch = req.query.search === undefined || req.query.search === null
+        ? ''
+        : String(req.query.search);
+    const search = rawSearch.trim();
+    let category = null;
+    let categorySearch = false;
+    const hasCategoryFilter = Boolean(req.query.category);
+
+    if (req.query.category) {
+        const categoryResolution = await getCategoryProductValues(req.query.category);
+        category = categoryResolution.category;
+        filter.category = categoryResolution.values.length
+            ? { $in: categoryResolution.values }
+            : { $in: [] };
+        categorySearch = Boolean(category && search);
+    }
+
+    // Preserve the established regex behavior for non-category API callers.
+    // Category pages use a literal, user-facing search across the same fields
+    // the old client searched, plus the existing product description field.
+    if (!hasCategoryFilter && req.query.search) {
         filter.$or = [
             { name: { $regex: req.query.search, $options: 'i' } },
             { description: { $regex: req.query.search, $options: 'i' } },
         ];
     }
-
-    const skip = (page - 1) * limit;
-    const [products, total] = await Promise.all([
-        Product.find(filter)
-            .sort({ name: 1 })
-            .skip(skip)
-            .limit(limit)
-            .populate('providerProduct', 'externalProductId')
-            .lean(),
-        Product.countDocuments(filter),
-    ]);
 
     // ── 1. Resolve user's group markup ────────────────────────────────────────
     const groupPricing = await resolveUserPricingGroup(req.user);
@@ -565,7 +629,7 @@ const getProducts = catchAsync(async (req, res) => {
     const rate = await getPurchaseRate(userCurrency);
 
     // ── 3. Apply pipeline: Base → Markup → Currency ───────────────────────────
-    const converted = products.map((product) => {
+    const convertProduct = (product) => {
         const p = exposeSafeCustomerProduct(product);
         const productFinalUnitPriceUsd = getProductFinalUnitPrice(p);
         const markedUpUSD = calculateFinalPrice(productFinalUnitPriceUsd, markupPercentage);
@@ -594,9 +658,64 @@ const getProducts = catchAsync(async (req, res) => {
                 && p.status !== 'unavailable'
                 && p.isAvailableForApi !== false,
         };
-    });
+    };
 
-    sendPaginated(res, sanitizePricingForSupervisor(converted, req.user), { page, limit, total, pages: Math.ceil(total / limit) }, 'Products retrieved.');
+    const skip = (page - 1) * limit;
+    let products;
+    let total;
+
+    if (categorySearch) {
+        // Customer-visible price labels depend on the user's group and
+        // purchase currency, so MongoDB cannot safely search basePrice for
+        // this feature. Stream the already category/visibility/FazerCards-
+        // filtered products instead, keeping memory bounded while evaluating
+        // the exact pricing presenter output used by the response.
+        const searchNeedle = search.toLowerCase();
+        const categoryTitles = [category.name, category.nameAr]
+            .filter(Boolean)
+            .map((value) => String(value).toLowerCase());
+        const cursor = Product.find(filter)
+            .sort({ name: 1, _id: 1 })
+            .populate('providerProduct', 'externalProductId')
+            .lean()
+            .cursor();
+        const selected = [];
+        total = 0;
+
+        for await (const product of cursor) {
+            const textMatches = [product.name, product.description]
+                .filter(Boolean)
+                .some((value) => String(value).toLowerCase().includes(searchNeedle));
+            const categoryMatches = categoryTitles.some((value) => value.includes(searchNeedle));
+            let convertedProduct = null;
+            if (!textMatches && !categoryMatches) {
+                convertedProduct = convertProduct(product);
+            }
+            const priceMatches = convertedProduct
+                ? String(convertedProduct.displayPriceLabel || '').toLowerCase().includes(searchNeedle)
+                : false;
+            if (!textMatches && !categoryMatches && !priceMatches) continue;
+
+            total += 1;
+            if (total > skip && selected.length < limit) {
+                selected.push(convertedProduct || convertProduct(product));
+            }
+        }
+        products = selected;
+    } else {
+        [products, total] = await Promise.all([
+            Product.find(filter)
+                .sort({ name: 1, _id: 1 })
+                .skip(skip)
+                .limit(limit)
+                .populate('providerProduct', 'externalProductId')
+                .lean(),
+            Product.countDocuments(filter),
+        ]);
+        products = products.map(convertProduct);
+    }
+
+    sendPaginated(res, sanitizePricingForSupervisor(products, req.user), { page, limit, total, pages: Math.ceil(total / limit) }, 'Products retrieved.');
 });
 
 /**
