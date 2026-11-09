@@ -48,6 +48,7 @@ const { Provider } = require('./provider.model');
 const { ProviderProduct } = require('./providerProduct.model');
 const { Product, PRICING_MODES, computeFinalPrice } = require('../products/product.model');
 const { getAdapter } = require('./adapters/adapter.factory');
+const { buildProviderProductSearchFields } = require('./providerProductSearch');
 const { NotFoundError, BusinessRuleError } = require('../../shared/errors/AppError');
 
 // =============================================================================
@@ -139,6 +140,7 @@ const runWithConcurrency = async (tasks, limit) => {
  * @returns {Promise<{ doc: Document, isNew: boolean }>}
  */
 const _upsertOne = async (providerId, dto, now) => {
+    const searchFields = buildProviderProductSearchFields(dto);
     const set = {
         rawName: dto.rawName,
         rawPrice: dto.rawPrice,
@@ -146,6 +148,7 @@ const _upsertOne = async (providerId, dto, now) => {
         maxQty: dto.maxQty ?? 9999,
         isActive: dto.isActive ?? true,
         rawPayload: dto.rawPayload ?? null,
+        ...searchFields,
         lastSyncedAt: now,
         // translatedName intentionally absent — admin-owned field
     };
@@ -202,6 +205,25 @@ const _upsertOne = async (providerId, dto, now) => {
             if (concurrent) return { doc: concurrent, isNew: false, applied: false };
             throw error;
         }
+    }
+
+    // translatedName is admin-owned and is intentionally preserved by the
+    // sync update. Refresh the normalized name index with the returned value
+    // so a prior translation remains searchable after every sync.
+    const mergedSearchFields = buildProviderProductSearchFields({
+        ...dto,
+        translatedName: doc.translatedName,
+    });
+    if (
+        JSON.stringify(doc.searchNamePrefixes || []) !== JSON.stringify(mergedSearchFields.searchNamePrefixes)
+        || JSON.stringify(doc.searchIdentifiers || []) !== JSON.stringify(mergedSearchFields.searchIdentifiers)
+        || JSON.stringify(doc.searchLookup || []) !== JSON.stringify(mergedSearchFields.searchLookup)
+    ) {
+        await ProviderProduct.updateOne(
+            { _id: doc._id, lastSyncedAt: now },
+            { $set: mergedSearchFields }
+        );
+        Object.assign(doc, mergedSearchFields);
     }
 
     // Discriminate new vs updated: createdAt ≈ updatedAt within 100ms on the

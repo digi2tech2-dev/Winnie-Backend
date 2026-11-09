@@ -53,6 +53,11 @@ describe('Luban Play catalog integration', () => {
             ProviderProduct.findOne({ provider: provider._id, externalProductId: 'LUBAN_GIFTCARD:fixed-eur' }),
         ]);
         expect(eligible).toMatchObject({ isActive: true, currency: 'USD', rawPrice: '9.500000' });
+        expect(eligible.searchIdentifiers).toEqual(expect.arrayContaining([
+            'luban_giftcard:fixed-usd',
+            'fixed-usd',
+        ]));
+        expect(eligible.searchNamePrefixes).toEqual(expect.arrayContaining(['fix', 'fixed']));
         expect(openValue.isActive).toBe(false);
         expect(nonUsd.isActive).toBe(false);
 

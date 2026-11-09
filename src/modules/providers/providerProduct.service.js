@@ -16,6 +16,7 @@
 
 const { ProviderProduct } = require('./providerProduct.model');
 const { NotFoundError } = require('../../shared/errors/AppError');
+const { buildProviderProductSearchFields } = require('./providerProductSearch');
 
 // =============================================================================
 // LIST / SEARCH
@@ -90,9 +91,21 @@ const getProviderProductById = async (id) => {
  * @returns {Promise<ProviderProduct>}
  */
 const setTranslatedName = async (providerProductId, translatedName) => {
+    const current = await ProviderProduct.findById(providerProductId);
+    if (!current) throw new NotFoundError('ProviderProduct');
+
+    const nextTranslatedName = translatedName?.trim() || null;
+    const searchFields = buildProviderProductSearchFields({
+        rawName: current.rawName,
+        translatedName: nextTranslatedName,
+        externalProductId: current.externalProductId,
+        offerId: current.offerId,
+        offerName: current.offerName,
+        rawPayload: current.rawPayload,
+    });
     const pp = await ProviderProduct.findByIdAndUpdate(
         providerProductId,
-        { $set: { translatedName: translatedName?.trim() || null } },
+        { $set: { translatedName: nextTranslatedName, ...searchFields } },
         { new: true, runValidators: true }
     );
     if (!pp) throw new NotFoundError('ProviderProduct');

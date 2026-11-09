@@ -100,6 +100,29 @@ const providerProductSchema = new mongoose.Schema(
             default: null,
         },
 
+        // Normalized, bounded search material maintained by catalog sync and
+        // the translated-name update path. These fields avoid regex scans of
+        // rawPayload while preserving provider-scoped active filtering.
+        searchNamePrefixes: {
+            type: [String],
+            default: [],
+        },
+
+        searchNamePhrases: {
+            type: [String],
+            default: [],
+        },
+
+        searchLookup: {
+            type: [String],
+            default: [],
+        },
+
+        searchIdentifiers: {
+            type: [String],
+            default: [],
+        },
+
         rawPrice: {
             type: String,
             required: [true, 'rawPrice is required'],
@@ -306,6 +329,23 @@ providerProductSchema.index(
 providerProductSchema.index(
     { provider: 1, isActive: 1 },
     { name: 'provider_active_products' }
+);
+
+// Provider-scoped option searches always constrain provider and active state
+// before evaluating the human/search identifier fields.
+providerProductSchema.index(
+    { provider: 1, isActive: 1, externalProductId: 1 },
+    { name: 'provider_active_external_product' }
+);
+
+providerProductSchema.index(
+    { provider: 1, isActive: 1, offerId: 1 },
+    { name: 'provider_active_offer_id' }
+);
+
+providerProductSchema.index(
+    { provider: 1, isActive: 1, searchLookup: 1 },
+    { name: 'provider_active_search_lookup' }
 );
 
 /**

@@ -23,6 +23,7 @@ const providerService = require('../providers/provider.service');
 const ppService = require('../providers/providerProduct.service');
 const productService = require('../products/product.service');
 const { ProviderProduct } = require('../providers/providerProduct.model');
+const { buildProviderProductSearchFilter } = require('../providers/providerProductSearch');
 const { PROVIDER_CODES } = require('../providers/provider.constants');
 const { createAuditLog } = require('../audit/audit.service');
 const {
@@ -83,6 +84,9 @@ const PROVIDER_LINK_FIELDS = new Set([
     'syncName',
     'syncLimits',
 ]);
+
+const PROVIDER_PRODUCT_OPTION_PAGE_SIZE = 40;
+const PROVIDER_PRODUCT_OPTION_MAX_PAGE_SIZE = 100;
 
 const assertSupervisorDoesNotSubmitPricing = (req) => {
     if (!isSupervisorRole(req.user)) return;
@@ -287,11 +291,29 @@ const sanitizeProviderProductOption = (providerProduct, user) => {
     const plainProduct = toPlainCatalogValue(providerProduct) || {};
     const provider = toPlainCatalogValue(plainProduct.provider) || {};
     const externalProductId = String(plainProduct.externalProductId || '').trim();
+    const rawPayload = plainProduct.rawPayload && typeof plainProduct.rawPayload === 'object'
+        ? plainProduct.rawPayload
+        : {};
+    const supplierCode = String(
+        plainProduct.offerId
+        || rawPayload.sku_id
+        || rawPayload.skuId
+        || rawPayload.product_id
+        || rawPayload.productId
+        || rawPayload.package_id
+        || rawPayload.packageId
+        || rawPayload.code
+        || externalProductId
+        || ''
+    ).trim();
     const option = {
         id: String(plainProduct._id || plainProduct.id || ''),
         providerProductId: String(plainProduct._id || plainProduct.id || ''),
         externalId: externalProductId,
         externalProductId,
+        offerId: String(plainProduct.offerId || '').trim(),
+        offerName: String(plainProduct.offerName || '').trim(),
+        supplierCode,
         name: String(plainProduct.translatedName || plainProduct.rawName || '').trim(),
         providerName: String(provider.name || '').trim(),
         category: null,
@@ -463,7 +485,7 @@ const listProductProviderOptions = catchAsync(async (req, res) => {
  * Does not return raw payloads, provider credentials, or internal mapping data.
  */
 const listProductProviderProductOptions = catchAsync(async (req, res) => {
-    const { search = '', page = 1, limit = 600, includeInactive } = req.query;
+    const { search = '', page = 1, limit = PROVIDER_PRODUCT_OPTION_PAGE_SIZE, includeInactive } = req.query;
     const { providerId } = req.params;
 
     if (!isValidObjectId(providerId)) {
@@ -473,20 +495,17 @@ const listProductProviderProductOptions = catchAsync(async (req, res) => {
     const filter = { provider: providerId };
     const canIncludeInactive = !isSupervisorRole(req.user) && includeInactive === 'true';
     if (!canIncludeInactive) filter.isActive = true;
-    if (search) {
-        const escapedSearch = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const re = new RegExp(escapedSearch, 'i');
-        filter.$or = [{ rawName: re }, { translatedName: re }, { externalProductId: re }];
-    }
+    const searchFilter = buildProviderProductSearchFilter(search);
+    if (searchFilter) Object.assign(filter, searchFilter);
 
-    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 600, 1), 1000);
+    const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || PROVIDER_PRODUCT_OPTION_PAGE_SIZE, 1), PROVIDER_PRODUCT_OPTION_MAX_PAGE_SIZE);
     const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
     const skip = (parsedPage - 1) * parsedLimit;
+    const sort = search ? null : { translatedName: 1, rawName: 1 };
 
     const [products, total] = await Promise.all([
-        ProviderProduct.find(filter)
-            .select('provider externalProductId rawName translatedName rawPrice minQty maxQty isActive')
-            .sort({ translatedName: 1, rawName: 1 })
+        (sort ? ProviderProduct.find(filter).sort(sort) : ProviderProduct.find(filter))
+            .select('provider externalProductId rawName translatedName rawPrice minQty maxQty isActive offerId offerName lastSyncedAt searchIdentifiers searchLookup rawPayload.product_id rawPayload.productId rawPayload.sku_id rawPayload.skuId rawPayload.package_id rawPayload.packageId rawPayload.game_id rawPayload.gameId rawPayload.service_id rawPayload.serviceId rawPayload.external_product_id rawPayload.code')
             .skip(skip)
             .limit(parsedLimit)
             .populate('provider', 'name'),
