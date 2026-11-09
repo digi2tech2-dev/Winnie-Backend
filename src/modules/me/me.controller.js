@@ -614,10 +614,13 @@ const getProducts = catchAsync(async (req, res) => {
     // Category pages use a literal, user-facing search across the same fields
     // the old client searched, plus the existing product description field.
     if (!hasCategoryFilter && req.query.search) {
-        filter.$or = [
-            { name: { $regex: req.query.search, $options: 'i' } },
-            { description: { $regex: req.query.search, $options: 'i' } },
-        ];
+        const escapedSearch = escapeRegex(search);
+        if (escapedSearch) {
+            const searchRegex = { $regex: escapedSearch, $options: 'i' };
+            filter.$or = req.query.nameOnly === 'true'
+                ? [{ name: searchRegex }]
+                : [{ name: searchRegex }, { description: searchRegex }];
+        }
     }
 
     // ── 1. Resolve user's group markup ────────────────────────────────────────

@@ -226,16 +226,35 @@ app.get(`${API_PREFIX}/public/catalog`, async (req, res) => {
     try {
         const { Category } = require('./modules/categories/category.model');
         const { Product } = require('./modules/products/product.model');
+        const search = String(req.query.search || '').trim();
+        const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 100);
+        const productFilter = {
+            isActive: true,
+            visibleInStore: { $ne: false },
+            deletedAt: null,
+            $or: [
+                { providerCode: { $ne: 'FAZER_CARDS' } },
+                { providerCode: 'FAZER_CARDS', customerPurchaseEnabled: true, status: 'available' },
+            ],
+        };
+        if (search) {
+            productFilter.name = { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
+        }
+        const skip = (page - 1) * limit;
 
-        const [categories, products] = await Promise.all([
+        const [categories, products, total] = await Promise.all([
             Category.find({ isActive: true })
-                .select('name nameAr image slug sortOrder parentCategory')
-                .sort({ sortOrder: 1 })
+                .select('name nameAr image slug sortOrder parentCategory compatCategoryId')
+                .sort({ sortOrder: 1, name: 1, _id: 1 })
                 .lean(),
-            Product.find({ isActive: true, deletedAt: null })
+            Product.find(productFilter)
                 .select('name description image category displayOrder minQty maxQty orderFields')
-                .sort({ displayOrder: 1 })
+                .sort({ displayOrder: 1, name: 1, _id: 1 })
+                .skip(skip)
+                .limit(limit)
                 .lean(),
+            Product.countDocuments(productFilter),
         ]);
 
         // Double-check: strip any financial field that might leak via virtuals or getters
@@ -254,6 +273,12 @@ app.get(`${API_PREFIX}/public/catalog`, async (req, res) => {
             success: true,
             message: 'Public catalog',
             data: { categories, products: safeProducts },
+            pagination: {
+                page,
+                limit,
+                total,
+                pages: Math.ceil(total / limit),
+            },
         });
     } catch (err) {
         res.status(500).json({ success: false, message: 'Failed to load public catalog' });
