@@ -56,6 +56,8 @@ const serializeDecimal = (value) => toStr(toDecimal(value));
 const XENA_TARGET_FIELD_KEY = 'target_uid';
 const XENA_LEGACY_TARGET_FIELD_KEY = 'account_id';
 const FAZER_CARDS_CODE_DELIVERY_FAMILIES = new Set(['GIFTCARDS', 'GAME_KEYS']);
+const DEFAULT_CHECKOUT_PROVIDER_PRICE_GUARD_TIMEOUT_MS = 5_000;
+const MAX_CHECKOUT_COMMIT_ATTEMPTS = 3;
 
 const _hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
 
@@ -163,6 +165,144 @@ const _assertProductAvailable = (product) => {
             );
         }
     }
+};
+
+// A cold provider price cache may require a full supplier-catalog fetch. That
+// read protects pricing, but it is not part of the financial commit and must
+// never hold a MongoDB transaction open. Bound it as well: a slow supplier is
+// allowed to fall back to the last durable catalog price, not to hold checkout
+// until the reverse proxy times out.
+const _checkoutProviderPriceGuardTimeoutMs = () => {
+    const configured = Number(process.env.CHECKOUT_PROVIDER_PRICE_GUARD_TIMEOUT_MS);
+    if (!Number.isFinite(configured) || configured <= 0) {
+        return DEFAULT_CHECKOUT_PROVIDER_PRICE_GUARD_TIMEOUT_MS;
+    }
+    return Math.min(Math.max(Math.trunc(configured), 100), 15_000);
+};
+
+const _getLivePriceWithinCheckoutDeadline = async (providerId, externalProductId, provider, options = {}) => {
+    const timeoutMs = _checkoutProviderPriceGuardTimeoutMs();
+    let timeoutId;
+    const deadline = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+            const error = new Error('Provider price verification exceeded the checkout deadline');
+            error.code = 'CHECKOUT_PROVIDER_PRICE_GUARD_TIMEOUT';
+            reject(error);
+        }, timeoutMs);
+    });
+
+    try {
+        return await Promise.race([
+            getLivePrice(providerId, externalProductId, provider, options),
+            deadline,
+        ]);
+    } finally {
+        clearTimeout(timeoutId);
+    }
+};
+
+const verifyProviderPriceBeforeCheckout = async ({ product, provider }) => {
+    if (isFazerCardsProduct(product) || !product?.provider || !product?.providerProduct || !provider) return;
+
+    try {
+        const ppDoc = await ProviderProduct.findById(product.providerProduct)
+            .select('externalProductId')
+            .lean();
+        if (!ppDoc?.externalProductId) return;
+
+        const observedPrice = await _getLivePriceWithinCheckoutDeadline(
+            String(product.provider),
+            ppDoc.externalProductId,
+            provider
+        );
+        const storedCostIncreased = observedPrice !== null && product.providerPrice != null
+            && compare(String(observedPrice), String(product.providerPrice)) > 0;
+        const publishedPriceIsBelowCost = observedPrice !== null
+            && compare(String(observedPrice), String(getProductFinalUnitPrice(product))) > 0;
+
+        if (!storedCostIncreased && !publishedPriceIsBelowCost) return;
+
+        let livePrice;
+        try {
+            livePrice = await _getLivePriceWithinCheckoutDeadline(
+                String(product.provider),
+                ppDoc.externalProductId,
+                provider,
+                { forceRefresh: true }
+            );
+        } catch (_) {
+            throw new BusinessRuleError(
+                'The supplier price changed recently but could not be confirmed. Please try again shortly.',
+                'PROVIDER_PRICE_CONFIRMATION_UNAVAILABLE'
+            );
+        }
+
+        const confirmedCostIncrease = livePrice !== null && product.providerPrice != null
+            && compare(String(livePrice), String(product.providerPrice)) > 0;
+        const confirmedPublishedPriceBelowCost = livePrice !== null
+            && compare(String(livePrice), String(getProductFinalUnitPrice(product))) > 0;
+        if (!confirmedCostIncrease && !confirmedPublishedPriceBelowCost) return;
+
+        const refreshed = await applyLiveProviderPrice({
+            providerProductId: product.providerProduct,
+            rawPrice: livePrice,
+        });
+        if (!refreshed.applied) {
+            throw new BusinessRuleError(
+                'The supplier price changed while the catalog was being refreshed. Please try again shortly.',
+                'PROVIDER_PRICE_REFRESH_CONFLICT'
+            );
+        }
+
+        throw new BusinessRuleError(
+            'The provider has increased the price for this service. ' +
+            'The catalog has been automatically updated. ' +
+            'Please refresh and review the new price before ordering.',
+            'PROVIDER_PRICE_INCREASED'
+        );
+    } catch (jitErr) {
+        if ([
+            'PROVIDER_PRICE_INCREASED',
+            'PROVIDER_PRICE_CONFIRMATION_UNAVAILABLE',
+            'PROVIDER_PRICE_REFRESH_CONFLICT',
+        ].includes(jitErr.code)) throw jitErr;
+        // An unavailable or slow price read falls back to the durable catalog
+        // price. The supplier request continues outside the checkout
+        // transaction and can never turn into a financial partial write.
+    }
+};
+
+const _hasTransactionErrorLabel = (error, label) => (
+    Array.isArray(error?.errorLabels) && error.errorLabels.includes(label)
+);
+
+const _isRetryableCheckoutTransactionError = (error) => (
+    [24, 112, 251].includes(error?.code)
+    || _hasTransactionErrorLabel(error, 'TransientTransactionError')
+);
+
+const _abortCheckoutTransactionQuietly = async (session) => {
+    if (!session?.inTransaction()) return;
+    try {
+        await session.abortTransaction();
+    } catch (_) {
+        // MongoDB may already have aborted an expired transaction. Preserve
+        // the original operation error so retry classification stays correct.
+    }
+};
+
+const _commitCheckoutTransaction = async (session) => {
+    let lastError;
+    for (let attempt = 0; attempt < MAX_CHECKOUT_COMMIT_ATTEMPTS; attempt++) {
+        try {
+            await session.commitTransaction();
+            return;
+        } catch (error) {
+            lastError = error;
+            if (!_hasTransactionErrorLabel(error, 'UnknownTransactionCommitResult')) throw error;
+        }
+    }
+    throw lastError;
 };
 
 const getFazerCardsExecutionMode = (product = {}) => {
@@ -640,7 +780,7 @@ const createOrder = async ({
 
 /**
  * Internal helper â€” executes the transactional order creation.
- * Retried once on WriteConflict (code 112) or lock timeout (code 24).
+ * Retried once after a transient MongoDB transaction abort.
  * @private
  */
 const _attemptCreateOrder = async (
@@ -662,6 +802,15 @@ const _attemptCreateOrder = async (
     },
     isRetry = false
 ) => {
+    // Provider catalog reads can take seconds (and a cold Luban catalog has a
+    // deliberately longer adapter timeout). Keep that work entirely outside
+    // the financial transaction. Re-read the product inside the transaction
+    // below before debiting so its local availability/pricing snapshots remain
+    // authoritative at commit time.
+    const preflightProduct = await Product.findById(productId);
+    _assertProductAvailable(preflightProduct);
+    _normaliseOrderQuantity(quantity, preflightProduct);
+    await verifyProviderPriceBeforeCheckout({ product: preflightProduct, provider });
 
     const session = await mongoose.startSession();
 
@@ -762,98 +911,6 @@ const _attemptCreateOrder = async (
 
         // â”€â”€ 2c. JIT Provider Price Verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         //
-        // If this product is linked to a provider, verify the provider's live
-        // price hasn't increased since the last catalog sync.  This prevents
-        // selling at a loss when a provider raises prices between sync cycles.
-        //
-        // Performance: uses an in-memory cache (5-min TTL) so the full catalog
-        // is fetched at most once per provider per TTL window.
-        //
-        // Fault-tolerant: if the provider API is unreachable, the order
-        // proceeds with the cached DB price.  A transient outage should NOT
-        // block legitimate orders.
-        //
-        if (!isFazerCardsProduct(product) && product.provider && product.providerProduct && provider) {
-            try {
-                // Look up the externalProductId from the linked ProviderProduct
-                const ppDoc = await ProviderProduct.findById(product.providerProduct)
-                    .select('externalProductId')
-                    .lean();
-
-                if (ppDoc?.externalProductId) {
-                    const observedPrice = await getLivePrice(
-                        String(product.provider),
-                        ppDoc.externalProductId,
-                        provider
-                    );
-
-                    const storedCostIncreased = observedPrice !== null && product.providerPrice != null &&
-                        compare(String(observedPrice), String(product.providerPrice)) > 0;
-                    const publishedPriceIsBelowCost = observedPrice !== null &&
-                        compare(String(observedPrice), String(getProductFinalUnitPrice(product))) > 0;
-
-                    if (storedCostIncreased || publishedPriceIsBelowCost) {
-                        // A cached catalog can be five minutes old. Confirm an
-                        // apparent increase with a fresh provider read before
-                        // rejecting a customer, so a reverted price cannot
-                        // produce a false "price increased" failure.
-                        let livePrice;
-                        try {
-                            livePrice = await getLivePrice(
-                                String(product.provider),
-                                ppDoc.externalProductId,
-                                provider,
-                                { forceRefresh: true }
-                            );
-                        } catch (_) {
-                            throw new BusinessRuleError(
-                                'The supplier price changed recently but could not be confirmed. Please try again shortly.',
-                                'PROVIDER_PRICE_CONFIRMATION_UNAVAILABLE'
-                            );
-                        }
-
-                        const confirmedCostIncrease = livePrice !== null && product.providerPrice != null &&
-                            compare(String(livePrice), String(product.providerPrice)) > 0;
-                        const confirmedPublishedPriceBelowCost = livePrice !== null &&
-                            compare(String(livePrice), String(getProductFinalUnitPrice(product))) > 0;
-
-                        if (confirmedCostIncrease || confirmedPublishedPriceBelowCost) {
-                            const refreshed = await applyLiveProviderPrice({
-                                providerProductId: product.providerProduct,
-                                rawPrice: livePrice,
-                            });
-                            if (!refreshed.applied) {
-                                throw new BusinessRuleError(
-                                    'The supplier price changed while the catalog was being refreshed. Please try again shortly.',
-                                    'PROVIDER_PRICE_REFRESH_CONFLICT'
-                                );
-                            }
-
-                            // Keep the newly-confirmed catalog in cache for a
-                            // retry. Sync-mode products now expose their
-                            // authorized recalculated price; manual prices are
-                            // intentionally not overwritten.
-                            throw new BusinessRuleError(
-                                'The provider has increased the price for this service. ' +
-                                'The catalog has been automatically updated. ' +
-                                'Please refresh and review the new price before ordering.',
-                                'PROVIDER_PRICE_INCREASED'
-                            );
-                        }
-                    }
-                }
-            } catch (jitErr) {
-                // Re-throw our own BusinessRuleError (price increase abort)
-                if ([
-                    'PROVIDER_PRICE_INCREASED',
-                    'PROVIDER_PRICE_CONFIRMATION_UNAVAILABLE',
-                    'PROVIDER_PRICE_REFRESH_CONFLICT',
-                ].includes(jitErr.code)) throw jitErr;
-                // Swallow all other errors (API timeout, network failure, etc.)
-                // â€” proceed with the cached DB price rather than blocking the order.
-            }
-        }
-
         // â”€â”€ 3. Pricing Engine (USD) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const orderPricing = await calculateOrderPricing({ userId, product, quantity: qty, session });
         const pricing = orderPricing.pricing;
@@ -1029,7 +1086,7 @@ const _attemptCreateOrder = async (
         }
 
         // â”€â”€ 8. Commit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        await session.commitTransaction();
+        await _commitCheckoutTransaction(session);
 
         await order.populate([{ path: 'productId', select: 'name basePrice executionType providerProduct' }]);
 
@@ -1132,12 +1189,9 @@ const _attemptCreateOrder = async (
         return { order, idempotent: false };
 
     } catch (err) {
-        if (session.inTransaction()) {
-            await session.abortTransaction();
-        }
+        await _abortCheckoutTransactionQuietly(session);
 
-        if ((err.code === 112 || err.code === 24) && !isRetry) {
-            session.endSession();
+        if (_isRetryableCheckoutTransactionError(err) && !isRetry) {
             await new Promise((r) => setTimeout(r, 10));
             return _attemptCreateOrder(
                 {
