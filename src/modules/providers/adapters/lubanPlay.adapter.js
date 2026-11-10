@@ -353,11 +353,14 @@ class LubanPlayAdapter extends BaseProviderAdapter {
             const { raw, reference, quantity, kind } = request;
             let payload;
             if (kind === 'giftcard') {
+                if (!text(raw.product_id)) throw new Error('[LubanPlay] product_id is required for gift cards');
                 payload = await this._post(ENDPOINTS.createOrder, { product_id: raw.product_id, quantity, client_reference: reference });
             } else if (kind === 'topup') {
                 const values = params.params || {};
                 const playerId = values.player_id ?? values.playerId;
                 const serverId = values.server_id ?? values.serverId;
+                if (!text(raw.game_id)) throw new Error('[LubanPlay] game_id is required for game top-ups');
+                if (!text(raw.package_id)) throw new Error('[LubanPlay] package_id is required for game top-ups');
                 if (!text(playerId)) throw new Error('[LubanPlay] player_id is required for game top-ups');
                 payload = await this._post(ENDPOINTS.createTopupOrder, {
                     game_id: raw.game_id,

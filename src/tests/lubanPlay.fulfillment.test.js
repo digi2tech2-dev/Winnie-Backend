@@ -132,6 +132,30 @@ describe('Luban Play fulfillment safety', () => {
         expect(adapter.placeOrder).toHaveBeenCalledTimes(1);
     });
 
+    it('rejects a missing player_id before dispatch instead of treating server_id as a player', async () => {
+        const { product } = await makeChain({ kind: 'topup' });
+        const order = await makeOrder(product, {
+            customerInput: { values: { server_id: 'zone-only' }, fieldsSnapshot: [] },
+        });
+        const adapter = {
+            placeOrder: jest.fn(),
+            checkOrderByReference: jest.fn(),
+            checkOrders: jest.fn(),
+        };
+
+        const result = await executeOrder(order._id, adapter);
+
+        expect(adapter.placeOrder).not.toHaveBeenCalled();
+        expect(adapter.checkOrderByReference).not.toHaveBeenCalled();
+        expect(result.order.status).toBe(ORDER_STATUS.FAILED);
+        expect(result.order.refunded).toBe(true);
+        expect(result.order.providerErrorCode).toBe('LUBAN_PLAY_PRE_DISPATCH_VALIDATION');
+        expect(result.order.providerRawResponse).toMatchObject({
+            placement: 'pre_dispatch_rejected',
+            placementDiagnostic: { playerIdPresent: false, serverIdPresent: true },
+        });
+    });
+
     it('reconciles a timeout-like unknown outcome by client_reference without a replacement placement or refund', async () => {
         const { product } = await makeChain({ kind: 'topup' });
         const order = await makeOrder(product);
@@ -147,6 +171,89 @@ describe('Luban Play fulfillment safety', () => {
         expect(result.order.status).toBe(ORDER_STATUS.PROCESSING);
         expect(result.order.providerOrderId).toBe('TP-2');
         expect(result.order.refunded).toBe(false);
+    });
+
+    it('keeps the first diagnostic when a dispatched placement has no supplier reference', async () => {
+        const { product } = await makeChain({ kind: 'topup' });
+        const order = await makeOrder(product);
+        const adapter = {
+            placeOrder: jest.fn().mockResolvedValue({ success: true, providerOrderId: null, providerStatus: 'Pending', rawResponse: { data: {} } }),
+            checkOrderByReference: jest.fn().mockResolvedValue({ found: false }),
+            checkOrders: jest.fn(),
+        };
+
+        const result = await executeOrder(order._id, adapter);
+
+        expect(adapter.placeOrder).toHaveBeenCalledTimes(1);
+        expect(adapter.checkOrderByReference).toHaveBeenCalledWith(`winnie-lp-${order._id}`, 'topup');
+        expect(result.order.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(result.order.providerRawResponse).toMatchObject({
+            placement: 'uncertain',
+            recovery: 'not_found',
+            placementDiagnostic: {
+                phase: 'pre_dispatch_validated',
+                gameId: '12',
+                packageId: expect.any(String),
+                playerIdPresent: true,
+            },
+        });
+        expect(result.order.providerRawResponse.placementDiagnostic).not.toHaveProperty('playerId');
+    });
+
+    it('recovers a crash after the dispatch marker without a second placement', async () => {
+        const { product } = await makeChain({ kind: 'topup' });
+        const order = await makeOrder(product, {
+            providerIdempotencyKey: 'placeholder',
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            providerRawResponse: { placement: 'dispatching', clientReference: 'ignored', placementDiagnostic: { phase: 'pre_dispatch_validated', playerIdPresent: true } },
+        });
+        await Order.findByIdAndUpdate(order._id, {
+            $set: { providerIdempotencyKey: `provider:luban-play:${order._id}` },
+        });
+        const adapter = {
+            placeOrder: jest.fn(),
+            checkOrderByReference: jest.fn().mockResolvedValue({ found: false }),
+            checkOrders: jest.fn(),
+        };
+
+        const result = await executeOrder(order._id, adapter);
+
+        expect(adapter.placeOrder).not.toHaveBeenCalled();
+        expect(adapter.checkOrderByReference).toHaveBeenCalledWith(`winnie-lp-${order._id}`, 'topup');
+        expect(result.order.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(result.order.providerRawResponse).toMatchObject({
+            recovery: 'not_found',
+            placementDiagnostic: { phase: 'pre_dispatch_validated' },
+        });
+    });
+
+    it.each([12, 13])('moves an unresolved placement at retry %i to manual review without another supplier lookup', async (retryCount) => {
+        const { product } = await makeChain({ kind: 'topup' });
+        const order = await makeOrder(product, {
+            providerIdempotencyKey: 'placeholder',
+            providerStatus: 'PLACEMENT_UNCERTAIN',
+            retryCount,
+            providerRawResponse: { placement: 'dispatching', placementDiagnostic: { phase: 'pre_dispatch_validated', playerIdPresent: true } },
+        });
+        await Order.findByIdAndUpdate(order._id, {
+            $set: { providerIdempotencyKey: `provider:luban-play:${order._id}` },
+        });
+        const provider = {
+            checkOrderByReference: jest.fn(),
+            checkOrders: jest.fn(),
+        };
+
+        const stats = await pollProcessingOrders(provider);
+        const persisted = await Order.findById(order._id);
+
+        expect(provider.checkOrderByReference).not.toHaveBeenCalled();
+        expect(stats.manualReview).toBe(1);
+        expect(persisted.status).toBe(ORDER_STATUS.MANUAL_REVIEW);
+        expect(persisted.retryCount).toBe(retryCount);
+        expect(persisted.providerRawResponse).toMatchObject({
+            recovery: 'retry_limit',
+            placementDiagnostic: { phase: 'pre_dispatch_validated' },
+        });
     });
 
     it('uses the existing exactly-once refund path only for a confirmed Luban terminal failure', async () => {

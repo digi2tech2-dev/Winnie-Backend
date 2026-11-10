@@ -107,6 +107,21 @@ describe('LubanPlayAdapter', () => {
         expect(client.post).not.toHaveBeenCalled();
     });
 
+    it.each([
+        [{ lubanKind: 'topup', game_id: 12, package_id: 301 }, {}, /player_id is required/],
+        [{ lubanKind: 'topup', package_id: 301 }, { player_id: 'player-7' }, /game_id is required/],
+        [{ lubanKind: 'topup', game_id: 12 }, { player_id: 'player-7' }, /package_id is required/],
+    ])('rejects malformed top-up payloads before createTopupOrder', async (rawPayload, params, message) => {
+        const { adapter, client } = makeAdapter(() => Promise.resolve(response({})));
+        await expect(adapter.placeOrder({
+            quantity: 1,
+            lubanClientReference: 'winnie-lp-preflight',
+            providerProduct: { rawPayload },
+            params,
+        })).resolves.toMatchObject({ success: false, providerStatus: 'Failed', errorMessage: expect.stringMatching(message) });
+        expect(client.post).not.toHaveBeenCalled();
+    });
+
     it('maps player and optional server fields to a top-up request', async () => {
         const { adapter, client } = makeAdapter((path) => {
             expect(path).toBe(ENDPOINTS.createTopupOrder);

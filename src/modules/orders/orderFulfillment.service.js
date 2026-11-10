@@ -277,6 +277,32 @@ const buildProviderParams = (order, product, providerProduct) => {
     return mapped;
 };
 
+// Luban's top-up endpoint has a named player_id contract. The generic
+// single-field fallback is useful for legacy providers, but it must not
+// reinterpret an unrelated value (for example server_id) as a player ID.
+const buildLubanProviderParams = (order, product, providerProduct) => {
+    const values = order.customerInput?.values ?? {};
+    const mapped = applyProviderMapping(values, _plainMapping(product?.providerMapping));
+    if (_firstPresent(mapped.player_id, mapped.playerId) !== undefined) return mapped;
+
+    const explicitFieldKey = _extractSingleProviderParamKey(providerProduct);
+    const playerId = _firstPresent(
+        mapped.account_id,
+        mapped.user_id,
+        mapped.uid,
+        mapped.userId,
+        values.player_id,
+        values.playerId,
+        values.account_id,
+        values.user_id,
+        values.uid,
+        values.userId,
+        explicitFieldKey ? values[explicitFieldKey] : undefined,
+    );
+    if (playerId !== undefined) mapped.playerId = playerId;
+    return mapped;
+};
+
 const normalizeProviderCode = (value) => String(value || '').trim().toUpperCase();
 
 const normalizeProviderSlug = (value) => String(value || '').trim().toLowerCase();
@@ -301,6 +327,9 @@ const isLubanPlayProvider = (providerDoc = null, order = {}) => {
 
 const buildLubanProviderIdempotencyKey = (order) => `provider:luban-play:${String(order._id)}`;
 const buildLubanClientReference = (order) => `winnie-lp-${String(order._id)}`;
+// A placement with no supplier order ID cannot enter the normal polling path.
+// After twelve reference lookups it needs an operator to correlate it safely.
+const LUBAN_PLACEMENT_MAX_RECOVERY_ATTEMPTS = 12;
 
 const hasLubanPlacementUncertainty = (order = {}) => (
     order.status === ORDER_STATUS.PROCESSING
@@ -1263,6 +1292,7 @@ const buildProviderResultUpdate = (result = {}) => {
         'providerErrorCode',
         'providerErrorMessage',
         'providerTargetSnapshot',
+        'retryCount',
     ]) {
         if (result[key] !== undefined) {
             update[key] = result[key];
@@ -1430,7 +1460,53 @@ const getLubanOrderKind = (providerProduct = {}) => (
     providerProduct?.rawPayload?.lubanKind === 'topup' ? 'topup' : 'giftcard'
 );
 
-const claimLubanPlacementAttempt = async (order, providerProduct) => {
+const lubanText = (value) => String(value ?? '').trim();
+
+// Validate before the durable dispatch marker and before the adapter can call
+// axios. Never retain the customer player ID in this diagnostic.
+const validateLubanPlacementPreflight = ({ order, providerProduct, params, clientReference }) => {
+    const raw = providerProduct?.rawPayload || {};
+    const kind = raw.lubanKind;
+    const quantity = Number(order.quantity);
+    const maxQuantity = kind === 'giftcard' ? 50 : kind === 'topup' ? 20 : 0;
+    const playerId = params?.player_id ?? params?.playerId;
+    const serverId = params?.server_id ?? params?.serverId;
+    const diagnostic = {
+        phase: 'pre_dispatch_validated',
+        kind: kind || null,
+        clientReference,
+        quantity: Number.isSafeInteger(quantity) ? quantity : null,
+        gameId: kind === 'topup' && lubanText(raw.game_id) ? String(raw.game_id) : null,
+        packageId: kind === 'topup' && lubanText(raw.package_id) ? String(raw.package_id) : null,
+        productId: kind === 'giftcard' && lubanText(raw.product_id) ? String(raw.product_id) : null,
+        playerIdPresent: kind === 'topup' ? Boolean(lubanText(playerId)) : null,
+        serverIdPresent: kind === 'topup' ? Boolean(lubanText(serverId)) : null,
+    };
+
+    let errorMessage = null;
+    if (!clientReference) errorMessage = '[LubanPlay] stable client_reference is required';
+    else if (!['giftcard', 'topup'].includes(kind)) errorMessage = '[LubanPlay] provider product kind is unsupported';
+    else if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > maxQuantity) errorMessage = '[LubanPlay] quantity is outside the documented range';
+    else if (kind === 'giftcard' && !diagnostic.productId) errorMessage = '[LubanPlay] product_id is required for gift cards';
+    else if (kind === 'topup' && !diagnostic.gameId) errorMessage = '[LubanPlay] game_id is required for game top-ups';
+    else if (kind === 'topup' && !diagnostic.packageId) errorMessage = '[LubanPlay] package_id is required for game top-ups';
+    else if (kind === 'topup' && !diagnostic.playerIdPresent) errorMessage = '[LubanPlay] player_id is required for game top-ups';
+
+    return errorMessage
+        ? { valid: false, errorMessage, diagnostic: { ...diagnostic, phase: 'pre_dispatch_rejected' } }
+        : { valid: true, diagnostic };
+};
+
+const buildLubanUncertaintyRawResponse = (order, recovery) => ({
+    placement: 'uncertain',
+    clientReference: buildLubanClientReference(order),
+    recovery,
+    placementDiagnostic: order.providerRawResponse?.placementDiagnostic
+        ?? order.providerRawResponse
+        ?? null,
+});
+
+const claimLubanPlacementAttempt = async (order, providerProduct, placementDiagnostic) => {
     const providerIdempotencyKey = buildLubanProviderIdempotencyKey(order);
     const clientReference = buildLubanClientReference(order);
     const claimed = await Order.findOneAndUpdate(
@@ -1445,9 +1521,10 @@ const claimLubanPlacementAttempt = async (order, providerProduct) => {
                 providerIdempotencyKey,
                 providerStatus: 'PLACEMENT_UNCERTAIN',
                 providerRawResponse: {
-                    placement: 'attempt_claimed',
+                    placement: 'pre_dispatch_validated',
                     clientReference,
                     kind: getLubanOrderKind(providerProduct),
+                    placementDiagnostic,
                 },
                 lastCheckedAt: new Date(),
             },
@@ -1457,20 +1534,37 @@ const claimLubanPlacementAttempt = async (order, providerProduct) => {
     return { claimed, current: claimed ? null : await Order.findById(order._id), clientReference, providerIdempotencyKey };
 };
 
-const deferLubanPlacementRecovery = async (order, { countRetry = false, recovery = 'lookup_failed' } = {}) => {
+// The last durable write before calling the adapter. A crash after this point
+// is intentionally ambiguous to prevent a second create request.
+const markLubanPlacementDispatching = async (order) => Order.findOneAndUpdate({
+    _id: order._id,
+    status: ORDER_STATUS.PROCESSING,
+    providerOrderId: { $in: [null, ''] },
+    providerIdempotencyKey: order.providerIdempotencyKey || buildLubanProviderIdempotencyKey(order),
+}, {
+    $set: {
+        providerStatus: 'PLACEMENT_UNCERTAIN',
+        providerRawResponse: {
+            placement: 'dispatching',
+            clientReference: buildLubanClientReference(order),
+            placementDiagnostic: order.providerRawResponse?.placementDiagnostic
+                ?? order.providerRawResponse
+                ?? null,
+        },
+        lastCheckedAt: new Date(),
+    },
+}, { new: true });
+
+const deferLubanPlacementRecovery = async (order, { countRetry = false, recovery = 'lookup_failed', forceManualReview = false } = {}) => {
     const retryCount = Number(order.retryCount || 0) + (countRetry ? 1 : 0);
     const statusResult = {
         providerOrderId: null,
         providerStatus: 'PLACEMENT_UNCERTAIN',
         providerIdempotencyKey: order.providerIdempotencyKey || buildLubanProviderIdempotencyKey(order),
-        rawResponse: {
-            placement: 'uncertain',
-            clientReference: buildLubanClientReference(order),
-            recovery,
-        },
+        rawResponse: buildLubanUncertaintyRawResponse(order, recovery),
         errorMessage: null,
     };
-    if (countRetry && retryCount >= MAX_RETRY_COUNT) {
+    if (forceManualReview || (countRetry && retryCount >= LUBAN_PLACEMENT_MAX_RECOVERY_ATTEMPTS)) {
         const reviewOrder = await moveOrderToManualReview(order, { ...statusResult, retryCount }, {
             reason: 'LUBAN_PLAY_PLACEMENT_UNRESOLVED',
         });
@@ -1623,7 +1717,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 providerIdempotencyKey: order.providerIdempotencyKey,
                 providerErrorCode: 'LUBAN_PLAY_PLACEMENT_PROVIDER_UNAVAILABLE',
                 providerErrorMessage: 'Luban Play is unavailable for placement reconciliation.',
-                rawResponse: { placement: 'uncertain', clientReference: buildLubanClientReference(order) },
+                rawResponse: buildLubanUncertaintyRawResponse(order, 'provider_unavailable'),
             }, { reason: 'LUBAN_PLAY_PLACEMENT_PROVIDER_UNAVAILABLE' });
             return { order: reviewOrder, placed: false, refunded: false };
         }
@@ -1730,12 +1824,15 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     // ── Build provider params from customerInput.values + providerMapping ───────
     // Convert internal field keys → provider-expected parameter names.
     // Falls back to identity mapping when no providerMapping is defined.
-    const mappedCustomerFields = buildProviderParams(order, order.productId, providerProduct);
+    const genericMappedCustomerFields = buildProviderParams(order, order.productId, providerProduct);
     const stableOrderUuid = order.idempotencyKey || order._id.toString();
     const isXenaOrder = isXenaFulfillmentOrder(order, resolvedProviderDoc);
     const isCanonicalOrder = isCanonicalB2BProvider(resolvedProviderDoc);
     const isFazerOrder = isFazerCardsOrder(order.productId, providerProduct);
     const isLubanOrder = isLubanPlayProvider(resolvedProviderDoc, order);
+    const mappedCustomerFields = isLubanOrder
+        ? buildLubanProviderParams(order, order.productId, providerProduct)
+        : genericMappedCustomerFields;
 
     if (isXenaOrder) {
         const claim = await claimXenaFulfillmentAttempt({
@@ -1792,8 +1889,36 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     }
 
     let lubanPlacementClaim = null;
+    let lubanPreDispatchResult = null;
+    let lubanPreflight = null;
     if (isLubanOrder) {
-        lubanPlacementClaim = await claimLubanPlacementAttempt(order, providerProduct);
+        const clientReference = buildLubanClientReference(order);
+        lubanPreflight = validateLubanPlacementPreflight({
+            order,
+            providerProduct,
+            params: mappedCustomerFields,
+            clientReference,
+        });
+        if (!lubanPreflight.valid) {
+            lubanPreDispatchResult = {
+                success: false,
+                providerOrderId: null,
+                providerStatus: 'Failed',
+                providerIdempotencyKey: null,
+                providerErrorCode: 'LUBAN_PLAY_PRE_DISPATCH_VALIDATION',
+                providerErrorMessage: lubanPreflight.errorMessage,
+                rawResponse: {
+                    placement: 'pre_dispatch_rejected',
+                    clientReference,
+                    placementDiagnostic: lubanPreflight.diagnostic,
+                },
+                errorMessage: lubanPreflight.errorMessage,
+            };
+        }
+    }
+
+    if (isLubanOrder && !lubanPreDispatchResult) {
+        lubanPlacementClaim = await claimLubanPlacementAttempt(order, providerProduct, lubanPreflight.diagnostic);
         if (!lubanPlacementClaim.claimed) {
             const current = lubanPlacementClaim.current;
             if (current && hasLubanPlacementUncertainty(current)) {
@@ -1824,10 +1949,11 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     }
 
     // ── Call the provider ──────────────────────────────────────────────────────
-    console.log(`[Fulfillment] Placing order ${orderId} with provider…`);
-
-    let result;
+    let result = lubanPreDispatchResult;
     try {
+        if (result) {
+            // A pre-dispatch Luban rejection is fully classified locally.
+        } else {
         if (fazerCardsPlacementClaim) {
             const submitted = await markFazerCardsPlacementSubmitted({
                 orderId: order._id,
@@ -1883,6 +2009,15 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
         if (isXenaOrder) placementParams.xenaPlacementGate = activeXenaPlacementGate;
         if (isLubanOrder) placementParams.lubanClientReference = lubanPlacementClaim.clientReference;
 
+        if (isLubanOrder) {
+            const dispatching = await markLubanPlacementDispatching(lubanPlacementClaim.claimed);
+            if (!dispatching) return { order: await Order.findById(orderId), placed: false, refunded: false };
+            lubanPlacementClaim.claimed = dispatching;
+            console.log(`[Fulfillment] Dispatching Luban Play order ${orderId} after pre-dispatch validation.`);
+        } else {
+            console.log(`[Fulfillment] Placing order ${orderId} with provider…`);
+        }
+
         result = isCanonicalOrder
             ? await resolvedProvider.placeOrder({
                 externalProductId: String(externalProductId),
@@ -1891,6 +2026,7 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                 params: mappedCustomerFields,
             })
             : await resolvedProvider.placeOrder(placementParams);
+        }
         }
     } catch (err) {
         if (isCanonicalOrder) {
@@ -1978,6 +2114,18 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
             };
         }
         }
+    }
+
+    if (isLubanOrder && lubanPlacementClaim?.claimed && result) {
+        result = {
+            ...result,
+            rawResponse: {
+                ...(result.rawResponse && typeof result.rawResponse === 'object' ? result.rawResponse : {}),
+                placementDiagnostic: lubanPlacementClaim.claimed.providerRawResponse?.placementDiagnostic
+                    ?? lubanPlacementClaim.claimed.providerRawResponse
+                    ?? null,
+            },
+        };
     }
 
     if (isFazerOrder && result?.success === false && result?.manualReview !== true && !result?.providerOrderId &&
@@ -2909,6 +3057,19 @@ const pollLubanUncertainPlacements = async (providerOverride, stats) => {
     for (const order of candidates) {
         if (!hasLubanPlacementUncertainty(order)) continue;
         try {
+            // Escalate locally before another supplier lookup. An unresolved
+            // placement must never remain PROCESSING indefinitely.
+            if (Number(order.retryCount || 0) >= LUBAN_PLACEMENT_MAX_RECOVERY_ATTEMPTS) {
+                const recovery = await deferLubanPlacementRecovery(order, {
+                    recovery: 'retry_limit',
+                    forceManualReview: true,
+                });
+                processedIds.add(String(order._id));
+                stats.checked++;
+                if (recovery.action === 'manualReview') stats.manualReview++;
+                else stats.pending++;
+                continue;
+            }
             const providerDoc = order.productId?.provider
                 ? await Provider.findById(order.productId.provider)
                 : null;
@@ -2919,7 +3080,7 @@ const pollLubanUncertainPlacements = async (providerOverride, stats) => {
                     providerIdempotencyKey: order.providerIdempotencyKey,
                     providerErrorCode: 'LUBAN_PLAY_PLACEMENT_PROVIDER_UNAVAILABLE',
                     providerErrorMessage: 'Luban Play is unavailable for placement reconciliation.',
-                    rawResponse: { placement: 'uncertain', clientReference: buildLubanClientReference(order) },
+                    rawResponse: buildLubanUncertaintyRawResponse(order, 'provider_unavailable'),
                 }, { reason: 'LUBAN_PLAY_PLACEMENT_PROVIDER_UNAVAILABLE' });
                 if (reviewOrder) stats.manualReview++;
                 stats.checked++;
