@@ -1,19 +1,22 @@
 'use strict';
 
 const http = require('node:http');
+const jwt = require('jsonwebtoken');
 const app = require('../app');
+const config = require('../config/config');
 const { Category } = require('../modules/categories/category.model');
 const { Product } = require('../modules/products/product.model');
-const { connectTestDB, disconnectTestDB } = require('./testHelpers');
+const { connectTestDB, createCustomerWithGroup, disconnectTestDB } = require('./testHelpers');
 
 const PUBG_ID = '6a92cbc9fd1b7b830172b174';
 const PUBG_PARENT_ID = '6a4da4f7387abd79e3cb92b8';
 
 let server;
 let baseUrl;
+let customerToken;
 
-const requestJson = (path) => new Promise((resolve, reject) => {
-    http.get(`${baseUrl}${path}`, (response) => {
+const requestJson = (path, headers = {}) => new Promise((resolve, reject) => {
+    http.get(`${baseUrl}${path}`, { headers }, (response) => {
         let body = '';
         response.setEncoding('utf8');
         response.on('data', (chunk) => { body += chunk; });
@@ -66,6 +69,8 @@ beforeAll(async () => {
         visibleInStore: true,
         deletedAt: null,
     });
+    const { customer } = await createCustomerWithGroup({ currency: 'USD' });
+    customerToken = jwt.sign({ id: customer._id, role: customer.role }, config.jwt.secret, { expiresIn: '1h' });
     await new Promise((resolve) => {
         server = app.listen(0, '127.0.0.1', resolve);
     });
@@ -81,6 +86,9 @@ test('actual category and product search endpoints return production-shaped resu
     const pubg = await requestJson('/api/categories?search=PUBG');
     const pubgLower = await requestJson('/api/categories?search=pubg');
     const product = await requestJson('/api/public/catalog?search=Unique%20Search%20Product&limit=24');
+    const authenticatedProduct = await requestJson('/api/me/products?search=Unique%20Search%20Product&nameOnly=true&limit=24', {
+        authorization: `Bearer ${customerToken}`,
+    });
     const empty = await requestJson('/api/categories?search=');
 
     expect(pubg.status).toBe(200);
@@ -88,6 +96,8 @@ test('actual category and product search endpoints return production-shaped resu
     expect(pubgLower.body.data.categories.map((category) => String(category._id))).toEqual([PUBG_ID]);
     expect(product.status).toBe(200);
     expect(product.body.data.products.map((item) => item.name)).toEqual(['Unique Search Product']);
+    expect(authenticatedProduct.status).toBe(200);
+    expect(authenticatedProduct.body.data.map((item) => item.name)).toEqual(['Unique Search Product']);
     expect(empty.body.data.categories).toEqual([]);
 
     if (process.env.REPORT_SEARCH_EVIDENCE === '1') {
