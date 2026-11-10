@@ -5,7 +5,10 @@ const { Provider } = require('../modules/providers/provider.model');
 const { ProviderProduct, FULFILLMENT_MODES } = require('../modules/providers/providerProduct.model');
 const { ProviderDeliveredCode } = require('../modules/providers/fazercards/providerDeliveredCode.model');
 const { WalletTransaction, LEDGER_TRANSACTION_TYPES } = require('../modules/wallet/walletTransaction.model');
-const { executeOrder, pollProcessingOrders } = require('../modules/orders/orderFulfillment.service');
+const { createOrder } = require('../modules/orders/order.service');
+const orderFulfillmentService = require('../modules/orders/orderFulfillment.service');
+const { executeOrder, pollProcessingOrders } = orderFulfillmentService;
+const { LubanPlayAdapter, ENDPOINTS } = require('../modules/providers/adapters/lubanPlay.adapter');
 const {
     connectTestDB,
     disconnectTestDB,
@@ -20,7 +23,11 @@ beforeEach(async () => clearCollections());
 
 let sequence = 0;
 
-const makeChain = async ({ kind = 'giftcard' } = {}) => {
+const makeChain = async ({
+    kind = 'giftcard',
+    providerMapping = { player_id: 'player_id', server_id: 'server_id' },
+    orderFields = [],
+} = {}) => {
     const id = ++sequence;
     const provider = await Provider.create({
         name: `Luban ${id}`,
@@ -52,7 +59,8 @@ const makeChain = async ({ kind = 'giftcard' } = {}) => {
         providerCode: 'LUBAN_PLAY',
         familyKey: kind === 'giftcard' ? 'GIFTCARDS' : 'TOPUPS',
         fulfillmentMode: kind === 'giftcard' ? FULFILLMENT_MODES.CODE_DELIVERY : FULFILLMENT_MODES.TOPUP_WITH_FIELDS,
-        providerMapping: { player_id: 'player_id', server_id: 'server_id' },
+        providerMapping,
+        orderFields,
     });
     return { provider, providerProduct, product };
 };
@@ -83,6 +91,91 @@ const makeOrder = async (product, overrides = {}) => {
 };
 
 describe('Luban Play fulfillment safety', () => {
+    it('passes checkout player_id through an empty mapping, dispatches one top-up, and completes on polling', async () => {
+        const { provider, product } = await makeChain({
+            kind: 'topup',
+            providerMapping: {},
+            orderFields: [
+                { id: 'player_id', key: 'player_id', label: 'Player ID', type: 'text', required: true, isActive: true },
+                { id: 'server_id', key: 'server_id', label: 'Server ID', type: 'text', required: false, isActive: true },
+            ],
+        });
+        const { customer } = await createCustomerWithGroup({ walletBalance: 1000 }, { percentage: 0 });
+        const httpClient = { post: jest.fn() };
+        const adapter = new LubanPlayAdapter(provider, { httpClient, packageRequestDelayMs: 0 });
+        // Checkout refreshes cached provider pricing before it commits the
+        // financial transaction. Keep that read local; the actual dispatch
+        // below uses the real Luban adapter with a mocked HTTP client.
+        const checkoutAdapter = { getProducts: jest.fn().mockResolvedValue([]) };
+        const backgroundFulfillment = jest.spyOn(orderFulfillmentService, 'executeOrder')
+            .mockResolvedValue({ order: null, placed: false, refunded: false });
+
+        let checkout;
+        try {
+            checkout = await createOrder({
+                userId: customer._id,
+                productId: product._id,
+                quantity: 1,
+                orderFieldsValues: { player_id: 'player-42', server_id: 'zone-2' },
+                provider: checkoutAdapter,
+                idempotencyKey: `luban-empty-mapping-${product._id}`,
+            });
+        } finally {
+            backgroundFulfillment.mockRestore();
+        }
+
+        const order = checkout.order;
+        expect(order.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(order.customerInput.values).toEqual({ player_id: 'player-42', server_id: 'zone-2' });
+
+        httpClient.post.mockImplementation((path, body) => {
+            if (path === ENDPOINTS.createTopupOrder) {
+                expect(body).toEqual({
+                    game_id: 12,
+                    package_id: expect.any(Number),
+                    player_id: 'player-42',
+                    server_id: 'zone-2',
+                    quantity: 1,
+                    client_reference: `winnie-lp-${order._id}`,
+                });
+                return Promise.resolve({
+                    data: {
+                        success: true,
+                        data: { order_id: 'TP-CHECKOUT-1', status: 'processing', client_reference: `winnie-lp-${order._id}` },
+                        request_id: 'req-create',
+                    },
+                });
+            }
+            if (path === ENDPOINTS.queryOrder) {
+                return Promise.reject({
+                    response: { status: 404, data: { success: false, code: 'ORDER_NOT_FOUND', message: 'not found' } },
+                });
+            }
+            if (path === ENDPOINTS.queryTopupOrder) {
+                expect(body).toEqual({ order_id: 'TP-CHECKOUT-1' });
+                return Promise.resolve({
+                    data: {
+                        success: true,
+                        data: { order_id: 'TP-CHECKOUT-1', status: 'delivered', client_reference: `winnie-lp-${order._id}` },
+                        request_id: 'req-poll',
+                    },
+                });
+            }
+            throw new Error(`unexpected Luban endpoint ${path}`);
+        });
+
+        const dispatched = await executeOrder(order._id, adapter);
+        expect(dispatched.order.providerOrderId).toBe('TP-CHECKOUT-1');
+        expect(httpClient.post.mock.calls.filter(([path]) => path === ENDPOINTS.createTopupOrder)).toHaveLength(1);
+
+        const stats = await pollProcessingOrders(adapter);
+        const completed = await Order.findById(order._id);
+        expect(stats.completed).toBe(1);
+        expect(completed.status).toBe(ORDER_STATUS.COMPLETED);
+        expect(completed.refunded).toBe(false);
+        expect(httpClient.post.mock.calls.filter(([path]) => path === ENDPOINTS.createTopupOrder)).toHaveLength(1);
+    });
+
     it('persists the namespaced stable reference before one placement and delivers encrypted gift-card secrets', async () => {
         const { product } = await makeChain();
         const order = await makeOrder(product);
