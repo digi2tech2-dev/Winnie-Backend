@@ -85,6 +85,25 @@ describe('Luban provider-product search backfill', () => {
         expect(afterSecond.searchLookup).toEqual(afterFirst.searchLookup);
     });
 
+    it('reindexes the mapped Luban parent game name for package-only records', async () => {
+        const provider = await createProvider();
+        const product = await createProduct(provider, {
+            rawName: '60 Pink Diamonds',
+            translatedName: null,
+            offerName: null,
+            rawPayload: {
+                game_id: 'gangstar-mirage-city',
+                game_name: 'Gangstar Mirage City',
+                package_id: 'pkg-60',
+                package_name: '60 Pink Diamonds',
+            },
+        });
+
+        await runBackfill();
+        const indexed = await ProviderProduct.findById(product._id).lean();
+        expect(indexed.searchLookup).toEqual(expect.arrayContaining(['gangstar', 'mirage']));
+    });
+
     it('retries a compare-and-set conflict using the fresh source version', async () => {
         const provider = await createProvider();
         const product = await createProduct(provider, { rawName: 'Before sync' });

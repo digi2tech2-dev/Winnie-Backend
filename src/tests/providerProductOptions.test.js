@@ -44,6 +44,23 @@ describe('provider product option search', () => {
             };
             return { ...product, ...buildProviderProductSearchFields(product) };
         }));
+        const gangstarPackages = Array.from({ length: 6 }, (_, index) => {
+            const product = {
+                provider: provider._id,
+                externalProductId: `LUBAN_TOPUP:gangstar:${index + 1}`,
+                rawName: `${[60, 320, 600, 1200, 2400, 5000][index]} Pink Diamonds`,
+                rawPrice: '9',
+                isActive: true,
+                rawPayload: {
+                    game_id: 'gangstar-mirage-city',
+                    game_name: 'Gangstar Mirage City',
+                    package_id: `pkg-${index + 1}`,
+                    package_name: `${index + 1} package`,
+                },
+            };
+            return { ...product, ...buildProviderProductSearchFields(product) };
+        });
+        await ProviderProduct.insertMany(gangstarPackages);
         const inactiveProduct = {
             provider: provider._id,
             externalProductId: 'LUBAN_GIFTCARD:inactive',
@@ -55,7 +72,7 @@ describe('provider product option search', () => {
         await ProviderProduct.create({ ...inactiveProduct, ...buildProviderProductSearchFields(inactiveProduct) });
 
         const firstPage = await invoke({ page: '1' }, provider._id);
-        expect(firstPage.pagination).toMatchObject({ page: 1, limit: 40, total: 10_000, pages: 250 });
+        expect(firstPage.pagination).toMatchObject({ page: 1, limit: 40, total: 10_006, pages: 251 });
         expect(firstPage.data).toHaveLength(40);
 
         const bySku = await invoke({ search: 'SKU-9999', page: '1' }, provider._id);
@@ -70,6 +87,11 @@ describe('provider product option search', () => {
 
         expect((await invoke({ search: '9999', page: '1' }, provider._id)).pagination.total).toBe(1);
         expect((await invoke({ search: 'CODE-9999', page: '1' }, provider._id)).pagination.total).toBe(1);
+
+        const gangstar = await invoke({ search: 'Gangstar', page: '1', limit: '10' }, provider._id);
+        expect(gangstar.pagination.total).toBe(6);
+        expect(gangstar.data).toHaveLength(6);
+        expect((await invoke({ search: 'Mirage', page: '1', limit: '10' }, provider._id)).pagination.total).toBe(6);
 
         const noMatch = await invoke({ search: 'does-not-exist', page: '1' }, provider._id);
         expect(noMatch.pagination.total).toBe(0);

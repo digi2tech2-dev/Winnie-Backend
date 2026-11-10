@@ -24,6 +24,18 @@ const buildPhrases = (tokens) => unique(tokens.flatMap((_, start) => (
     Array.from({ length: tokens.length - start - 1 }, (_, offset) => tokens.slice(start, start + offset + 2).join(' '))
 )));
 
+// Luban top-up packages carry the parent game name in this explicit mapped
+// payload field. Keep the allowlist narrow so unrelated raw payload values are
+// never copied into the search index.
+const getRawNameValues = (rawPayload = {}) => [
+    rawPayload.game_name,
+    rawPayload.gameName,
+    rawPayload.parent_game_name,
+    rawPayload.parentGameName,
+    rawPayload.game?.name,
+    rawPayload.game?.title,
+];
+
 const getRawIdentifierValues = (rawPayload = {}) => [
     rawPayload.product_id,
     rawPayload.productId,
@@ -50,7 +62,7 @@ const buildProviderProductSearchFields = ({
     offerName,
     rawPayload,
 } = {}) => {
-    const names = [rawName, translatedName, offerName];
+    const names = [rawName, translatedName, offerName, ...getRawNameValues(rawPayload || {})];
     const nameTokens = unique(names.flatMap(tokenize));
     const identifierValues = [externalProductId, offerId, ...getRawIdentifierValues(rawPayload || {})];
     const identifierTokens = unique(identifierValues.flatMap((value) => [
