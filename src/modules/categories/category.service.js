@@ -26,6 +26,64 @@ const listCategories = async ({ includeInactive = false } = {}) => {
     return Category.find(filter).sort({ sortOrder: 1, name: 1 }).lean();
 };
 
+const normalizeSearchValue = (value) => String(value ?? '')
+    .normalize('NFKC')
+    .trim()
+    .toLocaleLowerCase('ar')
+    .replace(/[\u064B-\u065F\u0670\u06D6-\u06ED]/g, '')
+    .replace(/[إأآٱ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ؤ/g, 'و')
+    .replace(/ئ/g, 'ي')
+    .replace(/ة/g, 'ه');
+
+const searchCategories = async (search) => {
+    const term = normalizeSearchValue(search);
+    if (!term) return [];
+
+    const categories = await Category.find({ isActive: true })
+        .sort({ sortOrder: 1, name: 1, _id: 1 })
+        .lean();
+    const byId = new Map(categories.map((category) => [String(category._id), category]));
+    const eligible = categories.filter((category) => {
+        const seen = new Set();
+        let parentId = category.parentCategory ? String(category.parentCategory) : '';
+        while (parentId) {
+            if (seen.has(parentId)) return false;
+            seen.add(parentId);
+            const parent = byId.get(parentId);
+            if (!parent) return false;
+            parentId = parent.parentCategory ? String(parent.parentCategory) : '';
+        }
+        return true;
+    });
+
+    const matches = eligible.filter((category) => normalizeSearchValue([
+        category.name,
+        category.nameAr,
+        category.slug,
+        category._id,
+        category.compatCategoryId,
+    ].filter(Boolean).join(' ')).includes(term));
+
+    const rank = (category) => {
+        const values = normalizeSearchValue([
+            category.name,
+            category.nameAr,
+            category.slug,
+        ].filter(Boolean).join(' ')).split(/\s+/).filter(Boolean);
+        return values.includes(term) ? 0 : values.some((value) => value.startsWith(term)) ? 1 : 2;
+    };
+    return matches.sort((left, right) => {
+        const leftLevel = left.parentCategory ? 0 : 1;
+        const rightLevel = right.parentCategory ? 0 : 1;
+        return leftLevel - rightLevel
+            || rank(left) - rank(right)
+            || String(left.name || '').localeCompare(String(right.name || ''))
+            || String(left._id).localeCompare(String(right._id));
+    });
+};
+
 // ─── Get One ───────────────────────────────────────────────────────────────────
 
 const getCategoryById = async (id) => {
@@ -153,6 +211,7 @@ const deleteCategory = async (id, adminId) => {
 
 module.exports = {
     listCategories,
+    searchCategories,
     getCategoryById,
     createCategory,
     updateCategory,

@@ -170,7 +170,11 @@ app.use(`${API_PREFIX}/me`, meRoutes);
 app.get(`${API_PREFIX}/categories`, async (req, res) => {
     try {
         const categorySvc = require('./modules/categories/category.service');
-        const categories = await categorySvc.listCategories({ includeInactive: false });
+        const hasSearch = Object.prototype.hasOwnProperty.call(req.query, 'search');
+        const search = String(req.query.search || '').trim();
+        const categories = hasSearch
+            ? await categorySvc.searchCategories(search)
+            : await categorySvc.listCategories({ includeInactive: false });
         res.json({ success: true, message: 'Categories retrieved', data: { categories } });
     } catch (err) {
         res.status(500).json({ success: false, message: 'Failed to load categories' });
