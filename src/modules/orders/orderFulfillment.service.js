@@ -309,6 +309,31 @@ const normalizeProviderSlug = (value) => String(value || '').trim().toLowerCase(
 
 const CANONICAL_B2B_ADAPTER_TYPE = 'canonical-b2b';
 const LUBAN_PLAY_ADAPTER_TYPE = 'luban-play';
+const LUBAN_ATTEMPT_ENDPOINTS = new Set(['createOrder', 'createTopupOrder']);
+const LUBAN_ATTEMPT_PHASES = new Set([
+    'pre_post_failure',
+    'supplier_response_received',
+    'post_dispatch_unknown',
+]);
+const LUBAN_ATTEMPT_CLASSIFICATIONS = new Set([
+    'pre_post_failure',
+    'supplier_accepted',
+    'supplier_response_missing_order_reference',
+    'supplier_rejection_definitive',
+    'supplier_rejection_unconfirmed',
+    'post_dispatch_invalid_response',
+    'transport_uncertain',
+]);
+const LUBAN_NETWORK_ERROR_CODES = new Set([
+    'ECONNABORTED',
+    'ETIMEDOUT',
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+]);
 
 const isCanonicalB2BProvider = (providerDoc = null) => (
     providerDoc?.adapterType === CANONICAL_B2B_ADAPTER_TYPE
@@ -337,6 +362,47 @@ const hasLubanPlacementUncertainty = (order = {}) => (
     && order.providerStatus === 'PLACEMENT_UNCERTAIN'
     && order.providerIdempotencyKey === buildLubanProviderIdempotencyKey(order)
 );
+
+const safeLubanDiagnosticCode = (value) => {
+    const normalized = String(value ?? '').trim();
+    return /^[A-Za-z0-9_.:-]{1,120}$/.test(normalized) ? normalized : null;
+};
+
+const safeLubanHttpStatus = (value) => {
+    const status = Number(value);
+    return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+};
+
+const buildLubanFirstPlacementAttempt = (result = {}, kind) => {
+    const provided = result.placementAttemptDiagnostic || {};
+    const endpoint = LUBAN_ATTEMPT_ENDPOINTS.has(provided.endpoint)
+        ? provided.endpoint
+        : kind === 'topup' ? 'createTopupOrder' : 'createOrder';
+    const responseClassification = LUBAN_ATTEMPT_CLASSIFICATIONS.has(provided.responseClassification)
+        ? provided.responseClassification
+        : result.providerOrderId
+            ? 'supplier_accepted'
+            : result.providerStatus === 'Failed'
+                ? 'supplier_rejection_definitive'
+                : 'transport_uncertain';
+    const dispatchPhase = LUBAN_ATTEMPT_PHASES.has(provided.dispatchPhase)
+        ? provided.dispatchPhase
+        : responseClassification === 'pre_post_failure'
+            ? 'pre_post_failure'
+            : responseClassification.startsWith('supplier_')
+                ? 'supplier_response_received'
+                : 'post_dispatch_unknown';
+    const networkErrorCode = String(provided.networkErrorCode || '').toUpperCase();
+
+    return {
+        dispatchPhase,
+        endpoint,
+        httpStatus: safeLubanHttpStatus(provided.httpStatus),
+        providerErrorCode: safeLubanDiagnosticCode(provided.providerErrorCode || result.providerErrorCode),
+        networkErrorCode: LUBAN_NETWORK_ERROR_CODES.has(networkErrorCode) ? networkErrorCode : null,
+        responseClassification,
+    };
+};
 
 const buildCanonicalProviderIdempotencyKey = (order) => (
     `provider:canonical-b2b:${String(order.orderNumber)}`
@@ -1504,7 +1570,41 @@ const buildLubanUncertaintyRawResponse = (order, recovery) => ({
     placementDiagnostic: order.providerRawResponse?.placementDiagnostic
         ?? order.providerRawResponse
         ?? null,
+    firstPlacementAttempt: order.providerRawResponse?.firstPlacementAttempt ?? null,
 });
+
+const persistLubanFirstPlacementAttempt = async (order, providerProduct, result) => {
+    const existing = order.providerRawResponse?.firstPlacementAttempt;
+    if (existing) return { order, diagnostic: existing };
+
+    const diagnostic = buildLubanFirstPlacementAttempt(result, getLubanOrderKind(providerProduct));
+    const updated = await Order.findOneAndUpdate({
+        _id: order._id,
+        status: ORDER_STATUS.PROCESSING,
+        providerOrderId: { $in: [null, ''] },
+        providerIdempotencyKey: order.providerIdempotencyKey || buildLubanProviderIdempotencyKey(order),
+        'providerRawResponse.firstPlacementAttempt': { $exists: false },
+    }, {
+        $set: {
+            providerRawResponse: {
+                placement: 'first_attempt_recorded',
+                clientReference: buildLubanClientReference(order),
+                kind: getLubanOrderKind(providerProduct),
+                placementDiagnostic: order.providerRawResponse?.placementDiagnostic
+                    ?? order.providerRawResponse
+                    ?? null,
+                firstPlacementAttempt: diagnostic,
+            },
+            lastCheckedAt: new Date(),
+        },
+    }, { new: true });
+
+    const persisted = updated || await Order.findById(order._id);
+    return {
+        order: persisted,
+        diagnostic: persisted?.providerRawResponse?.firstPlacementAttempt || diagnostic,
+    };
+};
 
 const claimLubanPlacementAttempt = async (order, providerProduct, placementDiagnostic) => {
     const providerIdempotencyKey = buildLubanProviderIdempotencyKey(order);
@@ -1595,7 +1695,16 @@ const recoverLubanUncertainPlacement = async (order, adapter, providerProduct, {
         }
         const recoveredOrder = await Order.findByIdAndUpdate(order._id, {
             $set: {
-                ...buildProviderResultUpdate(result),
+                ...buildProviderResultUpdate({
+                    ...result,
+                    rawResponse: {
+                        ...(result.rawResponse && typeof result.rawResponse === 'object' ? result.rawResponse : {}),
+                        placementDiagnostic: order.providerRawResponse?.placementDiagnostic
+                            ?? order.providerRawResponse
+                            ?? null,
+                        firstPlacementAttempt: order.providerRawResponse?.firstPlacementAttempt ?? null,
+                    },
+                }),
                 lastCheckedAt: new Date(),
             },
         }, { new: true });
@@ -1911,6 +2020,14 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
                     placement: 'pre_dispatch_rejected',
                     clientReference,
                     placementDiagnostic: lubanPreflight.diagnostic,
+                    firstPlacementAttempt: {
+                        dispatchPhase: 'pre_post_failure',
+                        endpoint: getLubanOrderKind(providerProduct) === 'topup' ? 'createTopupOrder' : 'createOrder',
+                        httpStatus: null,
+                        providerErrorCode: 'LUBAN_PLAY_PRE_DISPATCH_VALIDATION',
+                        networkErrorCode: null,
+                        responseClassification: 'pre_post_failure',
+                    },
                 },
                 errorMessage: lubanPreflight.errorMessage,
             };
@@ -2117,13 +2234,20 @@ const executeOrder = async (orderId, provider = null, auditContext = null) => {
     }
 
     if (isLubanOrder && lubanPlacementClaim?.claimed && result) {
+        const firstAttempt = await persistLubanFirstPlacementAttempt(
+            lubanPlacementClaim.claimed,
+            providerProduct,
+            result
+        );
+        lubanPlacementClaim.claimed = firstAttempt.order || lubanPlacementClaim.claimed;
         result = {
             ...result,
             rawResponse: {
                 ...(result.rawResponse && typeof result.rawResponse === 'object' ? result.rawResponse : {}),
-                placementDiagnostic: lubanPlacementClaim.claimed.providerRawResponse?.placementDiagnostic
-                    ?? lubanPlacementClaim.claimed.providerRawResponse
+                placementDiagnostic: lubanPlacementClaim.claimed?.providerRawResponse?.placementDiagnostic
+                    ?? lubanPlacementClaim.claimed?.providerRawResponse
                     ?? null,
+                firstPlacementAttempt: firstAttempt.diagnostic,
             },
         };
     }

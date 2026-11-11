@@ -246,6 +246,53 @@ describe('Luban Play fulfillment safety', () => {
         expect(result.order.providerRawResponse).toMatchObject({
             placement: 'pre_dispatch_rejected',
             placementDiagnostic: { playerIdPresent: false, serverIdPresent: true },
+            firstPlacementAttempt: {
+                dispatchPhase: 'pre_post_failure',
+                endpoint: 'createTopupOrder',
+                responseClassification: 'pre_post_failure',
+            },
+        });
+    });
+
+    it('preserves the first placement outcome when reference recovery is not found', async () => {
+        const { product } = await makeChain({ kind: 'topup' });
+        const order = await makeOrder(product);
+        const adapter = {
+            placeOrder: jest.fn().mockResolvedValue({
+                success: false,
+                manualReview: true,
+                providerOrderId: null,
+                providerStatus: 'Unknown',
+                rawResponse: { code: 'RATE_LIMIT_EXCEEDED' },
+                placementAttemptDiagnostic: {
+                    dispatchPhase: 'supplier_response_received',
+                    endpoint: 'createTopupOrder',
+                    httpStatus: 429,
+                    providerErrorCode: 'RATE_LIMIT_EXCEEDED',
+                    networkErrorCode: null,
+                    responseClassification: 'supplier_rejection_unconfirmed',
+                },
+            }),
+            checkOrderByReference: jest.fn().mockResolvedValue({ found: false }),
+            checkOrders: jest.fn(),
+        };
+
+        const result = await executeOrder(order._id, adapter);
+
+        expect(adapter.placeOrder).toHaveBeenCalledTimes(1);
+        expect(adapter.checkOrderByReference).toHaveBeenCalledWith('winnie-lp-' + order._id, 'topup');
+        expect(result.order.status).toBe(ORDER_STATUS.PROCESSING);
+        expect(result.order.refunded).toBe(false);
+        expect(result.order.providerRawResponse).toMatchObject({
+            recovery: 'not_found',
+            firstPlacementAttempt: {
+                dispatchPhase: 'supplier_response_received',
+                endpoint: 'createTopupOrder',
+                httpStatus: 429,
+                providerErrorCode: 'RATE_LIMIT_EXCEEDED',
+                networkErrorCode: null,
+                responseClassification: 'supplier_rejection_unconfirmed',
+            },
         });
     });
 

@@ -22,6 +22,16 @@ const ENDPOINTS = Object.freeze({
 const CATALOG_PRODUCTS_TIMEOUT_MS = 120_000;
 const GIFT_CARD_MAX_QTY = 50;
 const TOPUP_MAX_QTY = 20;
+const NETWORK_ERROR_CODES = new Set([
+    'ECONNABORTED',
+    'ETIMEDOUT',
+    'ECONNRESET',
+    'ECONNREFUSED',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+]);
 const DEFINITIVE_CREATE_ORDER_ERROR_CODES = new Set([
     'MISSING_PRODUCT_ID',
     'MISSING_GAME_ID',
@@ -78,6 +88,32 @@ const sanitize = (value) => {
         return safe;
     }, {});
 };
+
+const safeCode = (value) => {
+    const normalized = text(value);
+    return /^[A-Za-z0-9_.:-]{1,120}$/.test(normalized) ? normalized : null;
+};
+
+const safeHttpStatus = (value) => {
+    const status = Number(value);
+    return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+};
+
+const placementAttemptDiagnostic = ({
+    endpoint,
+    dispatchPhase,
+    responseClassification,
+    error = null,
+} = {}) => ({
+    dispatchPhase,
+    endpoint,
+    httpStatus: safeHttpStatus(error?.statusCode ?? error?.response?.status),
+    providerErrorCode: safeCode(error?.providerCode),
+    networkErrorCode: NETWORK_ERROR_CODES.has(String(error?.code || '').toUpperCase())
+        ? String(error.code).toUpperCase()
+        : null,
+    responseClassification,
+});
 
 const extractCodes = (payload) => {
     const list = payload?.data?.codes ?? payload?.codes ?? [];
@@ -348,12 +384,14 @@ class LubanPlayAdapter extends BaseProviderAdapter {
 
     async placeOrder(params = {}) {
         let request;
+        let endpoint = null;
         try {
             request = this._orderPayload(params);
             const { raw, reference, quantity, kind } = request;
             let payload;
             if (kind === 'giftcard') {
                 if (!text(raw.product_id)) throw new Error('[LubanPlay] product_id is required for gift cards');
+                endpoint = 'createOrder';
                 payload = await this._post(ENDPOINTS.createOrder, { product_id: raw.product_id, quantity, client_reference: reference });
             } else if (kind === 'topup') {
                 const values = params.params || {};
@@ -362,6 +400,7 @@ class LubanPlayAdapter extends BaseProviderAdapter {
                 if (!text(raw.game_id)) throw new Error('[LubanPlay] game_id is required for game top-ups');
                 if (!text(raw.package_id)) throw new Error('[LubanPlay] package_id is required for game top-ups');
                 if (!text(playerId)) throw new Error('[LubanPlay] player_id is required for game top-ups');
+                endpoint = 'createTopupOrder';
                 payload = await this._post(ENDPOINTS.createTopupOrder, {
                     game_id: raw.game_id,
                     package_id: raw.package_id,
@@ -373,12 +412,61 @@ class LubanPlayAdapter extends BaseProviderAdapter {
             } else {
                 throw new Error('[LubanPlay] provider product kind is unsupported');
             }
-            return this._normaliseOrder(payload, { kind, reference });
+            const normalized = this._normaliseOrder(payload, { kind, reference });
+            return {
+                ...normalized,
+                placementAttemptDiagnostic: placementAttemptDiagnostic({
+                    endpoint,
+                    dispatchPhase: 'supplier_response_received',
+                    responseClassification: normalized.providerOrderId
+                        ? 'supplier_accepted'
+                        : 'supplier_response_missing_order_reference',
+                }),
+            };
         } catch (error) {
+            const supplierResponded = Boolean(error?.providerBody || error?.response?.data);
+            const prePostFailure = !endpoint;
+            const diagnostic = placementAttemptDiagnostic({
+                endpoint: endpoint || (request?.kind === 'topup' ? 'createTopupOrder' : request?.kind === 'giftcard' ? 'createOrder' : null),
+                dispatchPhase: prePostFailure
+                    ? 'pre_post_failure'
+                    : supplierResponded
+                        ? 'supplier_response_received'
+                        : 'post_dispatch_unknown',
+                responseClassification: prePostFailure
+                    ? 'pre_post_failure'
+                    : supplierResponded
+                        ? error?.definitive
+                            ? 'supplier_rejection_definitive'
+                            : 'supplier_rejection_unconfirmed'
+                        : error?.code === 'LUBAN_UNEXPECTED_RESPONSE'
+                            ? 'post_dispatch_invalid_response'
+                            : 'transport_uncertain',
+                error,
+            });
             if (error?.definitive || /required|outside the documented range|unsupported/i.test(error.message || '')) {
-                return { success: false, providerOrderId: null, providerStatus: 'Failed', providerRequestId: error.requestId || null, rawResponse: error.providerBody || { message: error.message }, errorMessage: error.message };
+                return {
+                    success: false,
+                    providerOrderId: null,
+                    providerStatus: 'Failed',
+                    providerRequestId: error.requestId || null,
+                    providerErrorCode: safeCode(error.providerCode) || safeCode(error.code),
+                    rawResponse: error.providerBody || { errorCode: safeCode(error.code) },
+                    errorMessage: error.message,
+                    placementAttemptDiagnostic: diagnostic,
+                };
             }
-            return { success: false, manualReview: true, providerOrderId: null, providerStatus: 'Unknown', providerRequestId: error.requestId || null, rawResponse: error.providerBody || { transport: error.code || null }, errorMessage: 'Luban Play placement outcome is uncertain; reconcile by client_reference.' };
+            return {
+                success: false,
+                manualReview: true,
+                providerOrderId: null,
+                providerStatus: 'Unknown',
+                providerRequestId: error.requestId || null,
+                providerErrorCode: safeCode(error.providerCode) || null,
+                rawResponse: error.providerBody || { transport: diagnostic.networkErrorCode },
+                errorMessage: 'Luban Play placement outcome is uncertain; reconcile by client_reference.',
+                placementAttemptDiagnostic: diagnostic,
+            };
         }
     }
 

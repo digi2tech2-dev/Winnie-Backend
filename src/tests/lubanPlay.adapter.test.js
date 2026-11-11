@@ -113,12 +113,22 @@ describe('LubanPlayAdapter', () => {
         [{ lubanKind: 'topup', game_id: 12 }, { player_id: 'player-7' }, /package_id is required/],
     ])('rejects malformed top-up payloads before createTopupOrder', async (rawPayload, params, message) => {
         const { adapter, client } = makeAdapter(() => Promise.resolve(response({})));
-        await expect(adapter.placeOrder({
+        const result = await adapter.placeOrder({
             quantity: 1,
             lubanClientReference: 'winnie-lp-preflight',
             providerProduct: { rawPayload },
             params,
-        })).resolves.toMatchObject({ success: false, providerStatus: 'Failed', errorMessage: expect.stringMatching(message) });
+        });
+
+        expect(result).toMatchObject({ success: false, providerStatus: 'Failed', errorMessage: expect.stringMatching(message) });
+        expect(result.manualReview).not.toBe(true);
+        expect(result.placementAttemptDiagnostic).toMatchObject({
+            dispatchPhase: 'pre_post_failure',
+            endpoint: 'createTopupOrder',
+            httpStatus: null,
+            networkErrorCode: null,
+            responseClassification: 'pre_post_failure',
+        });
         expect(client.post).not.toHaveBeenCalled();
     });
 
@@ -135,6 +145,66 @@ describe('LubanPlayAdapter', () => {
         });
         expect(client.post.mock.calls[0][1]).toEqual({ game_id: 12, package_id: 301, player_id: 'player-7', server_id: 'zone-2', quantity: 20, client_reference: 'winnie-lp-2' });
         expect(result).toMatchObject({ success: true, providerOrderId: 'TP-1', providerStatus: 'Pending' });
+        expect(result.placementAttemptDiagnostic).toEqual({
+            dispatchPhase: 'supplier_response_received',
+            endpoint: 'createTopupOrder',
+            httpStatus: null,
+            providerErrorCode: null,
+            networkErrorCode: null,
+            responseClassification: 'supplier_accepted',
+        });
+    });
+
+    it('records a sanitized definitive supplier rejection for a top-up placement', async () => {
+        const { adapter } = makeAdapter(() => Promise.reject({
+            response: {
+                status: 400,
+                data: { success: false, code: 'MISSING_PLAYER_ID', message: 'supplier message', request_id: 'req-rejected' },
+            },
+        }));
+
+        const result = await adapter.placeOrder({
+            quantity: 1,
+            lubanClientReference: 'winnie-lp-rejected',
+            providerProduct: { rawPayload: { lubanKind: 'topup', game_id: 12, package_id: 301 } },
+            params: { player_id: 'player-7' },
+        });
+
+        expect(result).toMatchObject({ success: false, providerStatus: 'Failed', providerErrorCode: 'MISSING_PLAYER_ID' });
+        expect(result.placementAttemptDiagnostic).toEqual({
+            dispatchPhase: 'supplier_response_received',
+            endpoint: 'createTopupOrder',
+            httpStatus: 400,
+            providerErrorCode: 'MISSING_PLAYER_ID',
+            networkErrorCode: null,
+            responseClassification: 'supplier_rejection_definitive',
+        });
+        expect(JSON.stringify(result.placementAttemptDiagnostic)).not.toContain('player-7');
+    });
+
+    it.each([
+        ['timeout', 'ECONNABORTED'],
+        ['transport failure', 'ENOTFOUND'],
+    ])('records a sanitized uncertain %s after top-up dispatch', async (_label, code) => {
+        const { adapter } = makeAdapter(() => Promise.reject(Object.assign(new Error('transport failed'), { code })));
+
+        const result = await adapter.placeOrder({
+            quantity: 1,
+            lubanClientReference: 'winnie-lp-transport',
+            providerProduct: { rawPayload: { lubanKind: 'topup', game_id: 12, package_id: 301 } },
+            params: { player_id: 'player-7' },
+        });
+
+        expect(result).toMatchObject({ success: false, manualReview: true, providerStatus: 'Unknown' });
+        expect(result.placementAttemptDiagnostic).toEqual({
+            dispatchPhase: 'post_dispatch_unknown',
+            endpoint: 'createTopupOrder',
+            httpStatus: null,
+            providerErrorCode: null,
+            networkErrorCode: code,
+            responseClassification: 'transport_uncertain',
+        });
+        expect(JSON.stringify(result.placementAttemptDiagnostic)).not.toContain('player-7');
     });
 
     it('uses client_reference for status recovery and treats documented 404 as not found', async () => {
